@@ -14,6 +14,8 @@ export class WorkerRuntime extends EventEmitter {
   #supervisor;
   #isStarted = false;
   #isShuttingDown = false;
+  #maxTasksPerWorker;
+  #maxMemoryMb;
   #stats = {
     submittedTasks: 0,
     completedTasks: 0,
@@ -22,6 +24,26 @@ export class WorkerRuntime extends EventEmitter {
 
   constructor(options = {}) {
     super();
+
+    const maxTasksPerWorker = options.maxTasksPerWorker === undefined ? Infinity : options.maxTasksPerWorker;
+    if (typeof maxTasksPerWorker !== 'number' || Number.isNaN(maxTasksPerWorker)) {
+      throw new TypeError('maxTasksPerWorker must be a positive number or Infinity');
+    }
+    if (maxTasksPerWorker <= 0) {
+      throw new RangeError('maxTasksPerWorker must be greater than 0');
+    }
+
+    const maxMemoryMb = options.maxMemoryMb === undefined ? Infinity : options.maxMemoryMb;
+    if (typeof maxMemoryMb !== 'number' || Number.isNaN(maxMemoryMb)) {
+      throw new TypeError('maxMemoryMb must be a positive number or Infinity');
+    }
+    if (maxMemoryMb <= 0) {
+      throw new RangeError('maxMemoryMb must be greater than 0');
+    }
+
+    this.#maxTasksPerWorker = maxTasksPerWorker;
+    this.#maxMemoryMb = maxMemoryMb;
+
     const defaultWorkers = Math.max(1, availableParallelism() - 1);
     const workerCount = options.workers || defaultWorkers;
 
@@ -35,6 +57,8 @@ export class WorkerRuntime extends EventEmitter {
       workerScript: options.workerScript,
       handlerPath: options.handlerPath,
       resourceLimits: options.resourceLimits,
+      maxTasksPerWorker: this.#maxTasksPerWorker,
+      maxMemoryMb: this.#maxMemoryMb,
     });
 
     // Wire supervisor events to runtime events
@@ -106,6 +130,14 @@ export class WorkerRuntime extends EventEmitter {
       completedTasks: this.#stats.completedTasks,
       failedTasks: this.#stats.failedTasks,
     };
+  }
+
+  get maxTasksPerWorker() {
+    return this.#maxTasksPerWorker;
+  }
+
+  get maxMemoryMb() {
+    return this.#maxMemoryMb;
   }
 
   /**

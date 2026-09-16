@@ -9,15 +9,27 @@ export class Supervisor extends EventEmitter {
   #isShuttingDown = false;
   #workerOptions;
   #targetWorkers;
+  #maxTasksPerWorker;
+  #maxMemoryMb;
 
   constructor(options = {}) {
     super();
     this.#targetWorkers = options.workers || 4;
+    this.#maxTasksPerWorker = options.maxTasksPerWorker === undefined ? Infinity : options.maxTasksPerWorker;
+    this.#maxMemoryMb = options.maxMemoryMb === undefined ? Infinity : options.maxMemoryMb;
     this.#workerOptions = {
       workerScript: options.workerScript,
       handlerPath: options.handlerPath,
       resourceLimits: options.resourceLimits,
     };
+  }
+
+  get maxTasksPerWorker() {
+    return this.#maxTasksPerWorker;
+  }
+
+  get maxMemoryMb() {
+    return this.#maxMemoryMb;
   }
 
   get totalWorkers() {
