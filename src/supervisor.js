@@ -14,6 +14,7 @@ export class Supervisor extends EventEmitter {
   #forceKillOnTimeout;
   #killGracePeriodMs;
   #recycledCount = 0;
+  #preemptedCount = 0;
 
   constructor(options = {}) {
     super();
@@ -47,6 +48,10 @@ export class Supervisor extends EventEmitter {
 
   get recycledCount() {
     return this.#recycledCount;
+  }
+
+  get preemptedCount() {
+    return this.#preemptedCount;
   }
 
   get totalWorkers() {
@@ -167,9 +172,26 @@ export class Supervisor extends EventEmitter {
 
     this.#workers.set(worker.id, worker);
 
-    worker.on('exit', ({ worker, exitCode, prevStatus }) => {
+    worker.on('exit', ({ worker, exitCode, prevStatus, isPreempted }) => {
       this.#workers.delete(worker.id);
-      this.emit('worker_exit', { workerId: worker.id, exitCode, prevStatus });
+      this.emit('worker_exit', { workerId: worker.id, exitCode, prevStatus, isPreempted });
+
+      // If worker was preempted and we are not shutting down, immediately spawn a replacement
+      if (
+        !this.#isShuttingDown &&
+        !worker.isDedicated &&
+        (isPreempted || prevStatus === 'preempting' || worker.isPreempted)
+      ) {
+        this.emit('worker_preempted', { workerId: worker.id, exitCode });
+        this.#spawnWorker().then((replacement) => {
+          if (replacement) {
+            this.emit('worker_replaced', { oldId: worker.id, newId: replacement.id });
+          }
+        }).catch((err) => {
+          this.emit('error', err);
+        });
+        return;
+      }
 
       // If worker crashed and we are not shutting down, automatically spawn a replacement
       if (
@@ -188,6 +210,11 @@ export class Supervisor extends EventEmitter {
           this.emit('error', err);
         });
       }
+    });
+
+    worker.on('task_preempted', (data) => {
+      this.#preemptedCount++;
+      this.emit('task_preempted', data);
     });
 
     worker.on('task_completed', (data) => {
