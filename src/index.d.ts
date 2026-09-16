@@ -1,4 +1,5 @@
 import { ResourceLimits } from 'node:worker_threads';
+import { EventEmitter } from 'node:events';
 
 /**
  * Configuration options for initializing a WorkerRuntime.
@@ -9,6 +10,18 @@ export interface WorkerRuntimeOptions {
    * Defaults to availableParallelism() - 1.
    */
   workers?: number;
+
+  /**
+   * Maximum number of tasks a worker thread executes before graceful recycling.
+   * Defaults to Infinity.
+   */
+  maxTasksPerWorker?: number;
+
+  /**
+   * Maximum V8 heap memory (MB) allowed before graceful worker recycling is triggered.
+   * Defaults to Infinity.
+   */
+  maxMemoryMb?: number;
 
   /**
    * Minimum number of worker threads kept alive in the elastic pool.
@@ -146,6 +159,25 @@ export interface RuntimeStats {
   submittedTasks: number;
   completedTasks: number;
   failedTasks: number;
+  recycledWorkersCount: number;
+}
+
+/**
+ * Event payload emitted when a persistent worker begins graceful recycling.
+ */
+export interface WorkerRecyclingEvent {
+  workerId: string;
+  reason: 'tasks_exceeded' | 'memory_exceeded' | string;
+  tasksCompleted: number;
+  memoryUsage: number;
+}
+
+/**
+ * Event payload emitted when a retired worker terminates and its replacement is active.
+ */
+export interface WorkerRecycledEvent {
+  oldWorkerId: string;
+  newWorkerId: string;
 }
 
 /**
@@ -190,9 +222,17 @@ export class WorkerHandle {
   readonly id: string;
   readonly name: string | null;
   readonly affinityKey: string | null;
-  readonly status: 'starting' | 'idle' | 'busy' | 'terminating' | 'terminated';
+  readonly status: 'starting' | 'idle' | 'busy' | 'recycling' | 'terminating' | 'terminated';
   readonly isIdle: boolean;
+  readonly isRecycling: boolean;
   readonly tasksCompleted: number;
+  readonly lastMemoryUsageBytes: number;
+  readonly lastMemoryUsage: number;
+
+  /**
+   * Marks this worker as recycling to prevent new task assignments.
+   */
+  markRecycling(): void;
 
   /**
    * Gets a value from the worker's private L1 in-memory heap.
@@ -228,13 +268,25 @@ export class WorkerHandle {
 /**
  * Persistent Worker Runtime orchestrator.
  */
-export class WorkerRuntime {
+export class WorkerRuntime extends EventEmitter {
   constructor(options?: WorkerRuntimeOptions);
+
+  get maxTasksPerWorker(): number;
+  get maxMemoryMb(): number;
 
   /**
    * Current real-time metrics of the worker pool and task queue.
    */
   get stats(): RuntimeStats;
+
+  on(event: 'worker_recycling' | 'worker:recycling', listener: (data: WorkerRecyclingEvent) => void): this;
+  on(event: 'worker_recycled' | 'worker:recycled', listener: (data: WorkerRecycledEvent) => void): this;
+  on(event: 'worker:ready', listener: (data: { workerId: string }) => void): this;
+  on(event: 'worker:replaced', listener: (data: { oldId: string; newId: string }) => void): this;
+  on(event: 'task:completed', listener: (data: { taskId: string; type: string; durationMs: number; result: any }) => void): this;
+  on(event: 'task:failed', listener: (data: { taskId: string; type: string; durationMs: number; attempts: number; error: Error }) => void): this;
+  on(event: 'task:retrying', listener: (data: { taskId: string; attempt: number; maxRetries: number; delayMs: number; error: Error }) => void): this;
+  on(event: string | symbol, listener: (...args: any[]) => void): this;
 
   /**
    * Starts the runtime and warms up persistent worker threads.
@@ -321,6 +373,32 @@ export class WorkerRuntime {
  * const runtime = await createWorkerRuntime({ workers: 4 });
  */
 export function createWorkerRuntime(options?: WorkerRuntimeOptions): Promise<WorkerRuntime>;
+
+/**
+ * Supervisor monitors worker lifecycles, detects crashes, and maintains pool capacity automatically.
+ */
+export class Supervisor extends EventEmitter {
+  constructor(options?: {
+    workers?: number;
+    workerScript?: string;
+    handlerPath?: string;
+    resourceLimits?: ResourceLimits;
+    maxTasksPerWorker?: number;
+    maxMemoryMb?: number;
+  });
+
+  get maxTasksPerWorker(): number;
+  get maxMemoryMb(): number;
+  get recycledCount(): number;
+  get totalWorkers(): number;
+  get idleWorkers(): WorkerHandle[];
+  get allWorkers(): WorkerHandle[];
+
+  start(): Promise<void>;
+  findWorkerForTask(task: any): WorkerHandle | null;
+  createDedicatedWorker(options?: any): Promise<WorkerHandle>;
+  shutdown(): Promise<void>;
+}
 
 // Error Hierarchy
 export class WorkerRuntimeError extends Error {

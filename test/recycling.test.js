@@ -540,3 +540,40 @@ describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () =>
     assert.equal(runtime.stats.totalWorkers, 0);
   });
 });
+
+describe('Worker Recycling - Telemetry in Stats and TypeScript Types (T5)', () => {
+  it('exposes and increments recycledWorkersCount in runtime.stats', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 1,
+      maxTasksPerWorker: 1,
+    });
+
+    try {
+      assert.equal(runtime.stats.recycledWorkersCount, 0);
+
+      await runtime.execute({ fn: () => 'task 1' });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(runtime.stats.recycledWorkersCount, 1);
+
+      await runtime.execute({ fn: () => 'task 2' });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(runtime.stats.recycledWorkersCount, 2);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('includes all recycling definitions in src/index.d.ts', async () => {
+    const { readFileSync } = await import('node:fs');
+    const dtsContent = readFileSync(join(__dirname, '../src/index.d.ts'), 'utf8');
+
+    assert.ok(dtsContent.includes('maxTasksPerWorker?: number;'));
+    assert.ok(dtsContent.includes('maxMemoryMb?: number;'));
+    assert.ok(dtsContent.includes('recycledWorkersCount: number;'));
+    assert.ok(dtsContent.includes('WorkerRecyclingEvent'));
+    assert.ok(dtsContent.includes('WorkerRecycledEvent'));
+    assert.ok(dtsContent.includes("'recycling'"));
+    assert.ok(dtsContent.includes('isRecycling: boolean;'));
+    assert.ok(dtsContent.includes('markRecycling(): void;'));
+  });
+});
