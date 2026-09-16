@@ -473,6 +473,18 @@ Run any example directly with `node examples/<name>.js`:
 | `zero-copy-image.js` | Transfer a 30MB raw image buffer to a worker via `transferList` (no copy). |
 | `cancel-on-disconnect.js` | Manual cancellation, `AbortSignal.timeout()`, and pre-aborted signals. |
 
+## 🤖 Agent Skill (Embedded)
+
+This package ships with an **AI-agent skill** at `skills/persistent-worker-runtime/` so coding assistants (Claude Code, Cursor, Windsurf, etc.) can pick up the library's API automatically when you `npm install persistent-worker-runtime`.
+
+After installing, point your agent at the skill directory — for example, with the Tech Leads Club installer:
+
+```bash
+npx @tech-leads-club/agent-skills install --skill node_modules/persistent-worker-runtime/skills/persistent-worker-runtime
+```
+
+The skill covers: pool setup, request-response vs outbox modes, L1 state management, cancellation, priority routing, zero-copy transfer, retries, and preemption — plus six production-ready patterns (transactional outbox, image batch, AI inference, priority routing, cancellation, streaming).
+
 ---
 
 ## 📄 License
