@@ -7,3 +7,12 @@ yarn-error.log*
 coverage/
 .env
 .specs/
+
+# Tech Leads Club agent-skills installer local state.
+# Other developers run `npx @tech-leads-club/agent-skills install --skill <name>`
+# in their environment to populate these directories.
+.agents/.skill-lock.json
+.agents/.skill-lock.json.backup
+.agents/skills/
+.claude/
+.windsurf/
