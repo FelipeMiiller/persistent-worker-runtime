@@ -1,0 +1,25 @@
+{
+  "name": "persistent-worker-runtime",
+  "version": "0.1.0",
+  "description": "A persistent worker execution runtime for Node.js to offload CPU-bound tasks and preserve Event Loop responsiveness with stateful workers.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test test/**/*.test.js",
+    "benchmark": "node benchmarks/event-loop-lag.benchmark.js"
+  },
+  "keywords": [
+    "nodejs",
+    "worker_threads",
+    "concurrency",
+    "cpu-bound",
+    "event-loop",
+    "pool",
+    "runtime"
+  ],
+  "author": "Felipe Miiller",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
