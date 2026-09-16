@@ -158,6 +158,54 @@ describe('Persistent Worker Runtime Test Suite', () => {
     });
   });
 
+  it('supports zero-copy ArrayBuffer transfer via transferList', async () => {
+    const buffer = new ArrayBuffer(1024 * 1024); // 1MB buffer
+    const uint8 = new Uint8Array(buffer);
+    uint8[0] = 42;
+    uint8[uint8.length - 1] = 99;
+
+    const result = await runtime.execute({
+      type: 'buffer_task',
+      payload: { buffer },
+      transferList: [buffer],
+      fn: (p) => {
+        const view = new Uint8Array(p.buffer);
+        return {
+          length: view.byteLength,
+          first: view[0],
+          last: view[view.length - 1],
+        };
+      },
+    });
+
+    // Zero-copy guarantee: buffer on main thread is detached (byteLength === 0)
+    assert.equal(buffer.byteLength, 0, 'Original buffer must be detached after transfer');
+    assert.equal(result.length, 1024 * 1024);
+    assert.equal(result.first, 42);
+    assert.equal(result.last, 99);
+  });
+
+  it('automatically retries failed tasks with backoff before final settlement', async () => {
+    const result = await runtime.execute({
+      type: 'flaky_task',
+      payload: {},
+      retries: 2,
+      retryDelayMs: 20,
+      backoff: 'linear',
+      fn: (_, state) => {
+        const count = (state.get('flaky_attempts') || 0) + 1;
+        state.set('flaky_attempts', count);
+        if (count < 3) {
+          throw new Error(`Transient network glitch (attempt ${count})`);
+        }
+        return { recovered: true, attempts: count };
+      },
+    });
+
+    assert.equal(result.recovered, true);
+    assert.equal(result.attempts, 3);
+  });
+
   it('reports accurate runtime statistics', () => {
     const stats = runtime.stats;
     assert.ok(stats.totalWorkers >= 2);

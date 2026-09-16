@@ -23,6 +23,11 @@ export class TaskHandle {
     this.queueTimeoutMs = options.queueTimeoutMs || 30000;
     this.signal = options.signal || null;
     this.fnCode = options.fnCode || (typeof options.fn === 'function' ? options.fn.toString() : null);
+    this.transferList = options.transferList || [];
+    this.retries = options.retries || 0;
+    this.retryDelayMs = options.retryDelayMs || 500;
+    this.backoff = options.backoff || 'exponential';
+    this.attempts = 0;
     this.metadata = options.metadata || {};
 
     this.createdAt = performance.now();

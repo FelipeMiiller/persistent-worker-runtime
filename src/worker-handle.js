@@ -105,7 +105,6 @@ export class WorkerHandle extends EventEmitter {
             code: message.error?.code,
           });
           if (message.error?.stack) err.stack = message.error.stack;
-          task.reject(err);
           this.emit('task_failed', { worker: this, task, error: err });
         }
       }
@@ -157,7 +156,11 @@ export class WorkerHandle extends EventEmitter {
       fnCode: task.fnCode || null,
     };
 
-    this.#worker.postMessage(message);
+    if (task.transferList && task.transferList.length > 0) {
+      this.#worker.postMessage(message, task.transferList);
+    } else {
+      this.#worker.postMessage(message);
+    }
     return task.promise;
   }
 

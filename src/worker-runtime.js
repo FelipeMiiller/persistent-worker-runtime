@@ -60,13 +60,38 @@ export class WorkerRuntime extends EventEmitter {
     });
 
     this.#supervisor.on('task_failed', ({ task, error }) => {
-      this.#stats.failedTasks++;
-      this.emit('task:failed', {
-        taskId: task.id,
-        type: task.type,
-        durationMs: task.durationMs,
-        error,
-      });
+      if (task.retries > 0 && task.attempts < task.retries) {
+        task.attempts++;
+        const delay = task.backoff === 'exponential'
+          ? task.retryDelayMs * Math.pow(2, task.attempts - 1)
+          : (task.backoff === 'linear' ? task.retryDelayMs * task.attempts : task.retryDelayMs);
+
+        this.emit('task:retrying', {
+          taskId: task.id,
+          attempt: task.attempts,
+          maxRetries: task.retries,
+          delayMs: delay,
+          error,
+        });
+
+        setTimeout(() => {
+          if (!this.#isShuttingDown && !task.isSettled) {
+            this.#queue.enqueue(task)
+              .then(() => this.#scheduleNext())
+              .catch(() => {});
+          }
+        }, delay);
+      } else {
+        this.#stats.failedTasks++;
+        task.reject(error);
+        this.emit('task:failed', {
+          taskId: task.id,
+          type: task.type,
+          durationMs: task.durationMs,
+          attempts: task.attempts,
+          error,
+        });
+      }
       this.#scheduleNext();
     });
   }

@@ -10,3 +10,6 @@ This directory contains the formal Architecture Decision Records for the **Persi
 | **[ADR-0004](0004-asynchronous-queue-backpressure-with-timeout.md)** | Asynchronous Queue Backpressure with Timeout and AsyncResource | Accepted | 2026-09-16 |
 | **[ADR-0005](0005-native-javascript-esm-with-zero-external-dependencies.md)** | Pure Modern JavaScript (ESM, Node.js >= 24) with Zero External Dependencies | Accepted | 2026-09-16 |
 | **[ADR-0006](0006-bounded-concurrency-batch-processing.md)** | Bounded Concurrency Batch Processing (executeAll & dispatchAll) | Accepted | 2026-09-16 |
+| **[ADR-0007](0007-automatic-retry-policies-with-exponential-backoff.md)** | Automatic Retry Policies with Exponential Backoff for Background Tasks | Accepted | 2026-09-16 |
+| **[ADR-0008](0008-zero-copy-binary-data-transfer-via-transferable-objects.md)** | Zero-Copy Binary Data Transfer via Transferable Objects | Accepted | 2026-09-16 |
+| **[ADR-0009](0009-elastic-worker-pool-auto-scaling.md)** | Elastic Worker Pool Auto-Scaling with Min/Max Bounds and Idle Timeout | Accepted | 2026-09-16 |
