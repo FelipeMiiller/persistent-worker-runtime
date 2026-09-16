@@ -18,6 +18,7 @@ export class WorkerHandle extends EventEmitter {
   #currentTask = null;
   #status = 'starting';
   #tasksCompleted = 0;
+  #lastMemoryUsageBytes = 0;
   #readyPromise = null;
   #readyResolver = null;
 
@@ -46,12 +47,34 @@ export class WorkerHandle extends EventEmitter {
     return this.#status === 'idle';
   }
 
+  get isRecycling() {
+    return this.#status === 'recycling';
+  }
+
   get currentTask() {
     return this.#currentTask;
   }
 
   get tasksCompleted() {
     return this.#tasksCompleted;
+  }
+
+  get lastMemoryUsageBytes() {
+    return this.#lastMemoryUsageBytes;
+  }
+
+  get lastMemoryUsage() {
+    return this.#lastMemoryUsageBytes;
+  }
+
+  /**
+   * Marks this worker as recycling so it stops accepting new tasks.
+   */
+  markRecycling() {
+    if (this.#status === 'terminating' || this.#status === 'terminated') {
+      return;
+    }
+    this.#status = 'recycling';
   }
 
   /**
@@ -94,18 +117,35 @@ export class WorkerHandle extends EventEmitter {
       if (message?.taskId && this.#currentTask && this.#currentTask.id === message.taskId) {
         const task = this.#currentTask;
         this.#currentTask = null;
-        this.#status = 'idle';
+
+        if (typeof message.memoryUsageBytes === 'number') {
+          this.#lastMemoryUsageBytes = message.memoryUsageBytes;
+        }
+
+        if (this.#status !== 'recycling' && this.#status !== 'terminating' && this.#status !== 'terminated') {
+          this.#status = 'idle';
+        }
         this.#tasksCompleted++;
 
         if (message.success) {
           task.resolve(message.result);
-          this.emit('task_completed', { worker: this, task, result: message.result });
+          this.emit('task_completed', {
+            worker: this,
+            task,
+            result: message.result,
+            memoryUsageBytes: this.#lastMemoryUsageBytes,
+          });
         } else {
           const err = new WorkerRuntimeError(message.error?.message || 'Task execution failed', {
             code: message.error?.code,
           });
           if (message.error?.stack) err.stack = message.error.stack;
-          this.emit('task_failed', { worker: this, task, error: err });
+          this.emit('task_failed', {
+            worker: this,
+            task,
+            error: err,
+            memoryUsageBytes: this.#lastMemoryUsageBytes,
+          });
         }
       }
     });

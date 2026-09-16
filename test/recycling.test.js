@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WorkerRuntime, Supervisor } from '../src/index.js';
+import { WorkerRuntime, Supervisor, WorkerHandle, TaskHandle } from '../src/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -275,5 +275,123 @@ describe('Worker Recycling - Memory Reporting in worker-thread-entry (T2)', () =
     } finally {
       await worker.terminate();
     }
+  });
+});
+
+describe('Worker Recycling - Recycling State in WorkerHandle (T3)', () => {
+  it('transitions to recycling state and updates isIdle/isRecycling flags', async () => {
+    const worker = new WorkerHandle();
+    await worker.waitUntilReady();
+
+    try {
+      assert.equal(worker.status, 'idle');
+      assert.equal(worker.isIdle, true);
+      assert.equal(worker.isRecycling, false);
+
+      worker.markRecycling();
+
+      assert.equal(worker.status, 'recycling');
+      assert.equal(worker.isIdle, false);
+      assert.equal(worker.isRecycling, true);
+    } finally {
+      await worker.terminate();
+    }
+  });
+
+  it('rejects task execution when worker is in recycling state', async () => {
+    const worker = new WorkerHandle();
+    await worker.waitUntilReady();
+
+    try {
+      worker.markRecycling();
+
+      const task = new TaskHandle({
+        type: 'test_reject',
+        payload: {},
+        fn: () => 'should not run',
+      });
+
+      await assert.rejects(
+        () => worker.executeTask(task),
+        {
+          name: 'WorkerRuntimeError',
+          message: `Worker ${worker.id} is busy with status: recycling`,
+        }
+      );
+    } finally {
+      await worker.terminate();
+    }
+  });
+
+  it('records last sampled memory usage upon task completion', async () => {
+    const worker = new WorkerHandle();
+    await worker.waitUntilReady();
+
+    try {
+      assert.equal(worker.lastMemoryUsageBytes, 0);
+
+      const task = new TaskHandle({
+        type: 'mem_task',
+        payload: { text: 'hello world' },
+        fn: (p) => p.text.toUpperCase(),
+      });
+
+      const result = await worker.executeTask(task);
+      assert.equal(result, 'HELLO WORLD');
+
+      assert.equal(typeof worker.lastMemoryUsageBytes, 'number');
+      assert.ok(worker.lastMemoryUsageBytes > 0, 'lastMemoryUsageBytes must be greater than 0');
+      assert.equal(worker.lastMemoryUsage, worker.lastMemoryUsageBytes);
+    } finally {
+      await worker.terminate();
+    }
+  });
+
+  it('preserves recycling state when active task finishes', async () => {
+    const worker = new WorkerHandle();
+    await worker.waitUntilReady();
+
+    try {
+      const task = new TaskHandle({
+        type: 'delayed_task',
+        payload: { ms: 50 },
+        fn: async (p) => {
+          await new Promise((resolve) => setTimeout(resolve, p.ms));
+          return 'ok';
+        },
+      });
+
+      const executionPromise = worker.executeTask(task);
+      assert.equal(worker.status, 'busy');
+
+      // Mark recycling while task is in flight
+      worker.markRecycling();
+      assert.equal(worker.status, 'recycling');
+      assert.equal(worker.isRecycling, true);
+      assert.equal(worker.isIdle, false);
+
+      const result = await executionPromise;
+      assert.equal(result, 'ok');
+
+      // Status must remain recycling after task settlement, NOT reset to idle
+      assert.equal(worker.status, 'recycling');
+      assert.equal(worker.isRecycling, true);
+      assert.equal(worker.isIdle, false);
+      assert.ok(worker.lastMemoryUsageBytes > 0);
+    } finally {
+      await worker.terminate();
+    }
+  });
+
+  it('does not overwrite terminating or terminated status when markRecycling is called', async () => {
+    const worker = new WorkerHandle();
+    await worker.waitUntilReady();
+
+    await worker.terminate();
+    assert.equal(worker.status, 'terminated');
+
+    worker.markRecycling();
+    assert.equal(worker.status, 'terminated');
+    assert.equal(worker.isRecycling, false);
   });
 });
