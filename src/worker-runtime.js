@@ -22,6 +22,7 @@ export class WorkerRuntime extends EventEmitter {
     submittedTasks: 0,
     completedTasks: 0,
     failedTasks: 0,
+    preemptedTasksCount: 0,
   };
 
   constructor(options = {}) {
@@ -79,11 +80,13 @@ export class WorkerRuntime extends EventEmitter {
     // Wire supervisor events to runtime events
     this.#supervisor.on('worker_ready', (worker) => {
       this.#scheduleNext();
+      this.emit('worker_ready', { workerId: worker.id });
       this.emit('worker:ready', { workerId: worker.id });
     });
 
     this.#supervisor.on('worker_replaced', ({ oldId, newId }) => {
       this.#scheduleNext();
+      this.emit('worker_replaced', { oldId, newId });
       this.emit('worker:replaced', { oldId, newId });
     });
 
@@ -96,6 +99,19 @@ export class WorkerRuntime extends EventEmitter {
       this.#scheduleNext();
       this.emit('worker_recycled', data);
       this.emit('worker:recycled', data);
+    });
+
+    this.#supervisor.on('worker_preempted', (data) => {
+      this.emit('worker_preempted', data);
+      this.emit('worker:preempted', data);
+    });
+
+    this.#supervisor.on('task_preempted', (data) => {
+      this.#stats.preemptedTasksCount++;
+      this.#stats.failedTasks++;
+      this.emit('task_preempted', data);
+      this.emit('task:preempted', data);
+      this.#scheduleNext();
     });
 
     this.#supervisor.on('task_completed', ({ task, result }) => {
@@ -156,6 +172,7 @@ export class WorkerRuntime extends EventEmitter {
       completedTasks: this.#stats.completedTasks,
       failedTasks: this.#stats.failedTasks,
       recycledWorkersCount: this.#supervisor.recycledCount,
+      preemptedTasksCount: this.#stats.preemptedTasksCount,
     };
   }
 

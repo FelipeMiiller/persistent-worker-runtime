@@ -62,6 +62,18 @@ export interface WorkerRuntimeOptions {
   queueTimeoutMs?: number;
 
   /**
+   * Whether to forcibly terminate the worker thread on execution timeout via worker.terminate().
+   * Defaults to false.
+   */
+  forceKillOnTimeout?: boolean;
+
+  /**
+   * Grace period (ms) to allow cooperative cancellation before hard thread termination.
+   * Defaults to 500ms.
+   */
+  killGracePeriodMs?: number;
+
+  /**
    * V8 memory and stack resource limits applied to each worker isolate.
    */
   resourceLimits?: ResourceLimits;
@@ -102,6 +114,18 @@ export interface TaskOptions<TPayload = any, TResult = any> {
    * 0 means unlimited. Defaults to 0.
    */
   timeoutMs?: number;
+
+  /**
+   * Whether to forcibly terminate the worker thread on execution timeout.
+   * Defaults to the runtime-level configuration (false).
+   */
+  forceKillOnTimeout?: boolean;
+
+  /**
+   * Grace period (ms) before hard kill is executed.
+   * Defaults to the runtime-level configuration (500ms).
+   */
+  killGracePeriodMs?: number;
 
   /**
    * Maximum queue wait duration (ms) before rejecting with TaskQueueTimeoutError.
@@ -160,6 +184,7 @@ export interface RuntimeStats {
   completedTasks: number;
   failedTasks: number;
   recycledWorkersCount: number;
+  preemptedTasksCount: number;
 }
 
 /**
@@ -178,6 +203,24 @@ export interface WorkerRecyclingEvent {
 export interface WorkerRecycledEvent {
   oldWorkerId: string;
   newWorkerId: string;
+}
+
+/**
+ * Event payload emitted when a task is forcibly preempted due to timeout.
+ */
+export interface TaskPreemptedEvent {
+  workerId: string;
+  taskId: string;
+  timeoutMs: number;
+  preempted: boolean;
+}
+
+/**
+ * Event payload emitted when a preempted worker terminates.
+ */
+export interface WorkerPreemptedEvent {
+  workerId: string;
+  exitCode?: number;
 }
 
 /**
@@ -222,9 +265,10 @@ export class WorkerHandle {
   readonly id: string;
   readonly name: string | null;
   readonly affinityKey: string | null;
-  readonly status: 'starting' | 'idle' | 'busy' | 'recycling' | 'terminating' | 'terminated';
+  readonly status: 'starting' | 'idle' | 'busy' | 'recycling' | 'preempting' | 'terminating' | 'terminated';
   readonly isIdle: boolean;
   readonly isRecycling: boolean;
+  readonly isPreempted: boolean;
   readonly tasksCompleted: number;
   readonly lastMemoryUsageBytes: number;
   readonly lastMemoryUsage: number;
@@ -273,6 +317,8 @@ export class WorkerRuntime extends EventEmitter {
 
   get maxTasksPerWorker(): number;
   get maxMemoryMb(): number;
+  get forceKillOnTimeout(): boolean;
+  get killGracePeriodMs(): number;
 
   /**
    * Current real-time metrics of the worker pool and task queue.
@@ -281,8 +327,10 @@ export class WorkerRuntime extends EventEmitter {
 
   on(event: 'worker_recycling' | 'worker:recycling', listener: (data: WorkerRecyclingEvent) => void): this;
   on(event: 'worker_recycled' | 'worker:recycled', listener: (data: WorkerRecycledEvent) => void): this;
+  on(event: 'worker_preempted' | 'worker:preempted', listener: (data: WorkerPreemptedEvent) => void): this;
   on(event: 'worker:ready', listener: (data: { workerId: string }) => void): this;
   on(event: 'worker:replaced', listener: (data: { oldId: string; newId: string }) => void): this;
+  on(event: 'task_preempted' | 'task:preempted', listener: (data: TaskPreemptedEvent) => void): this;
   on(event: 'task:completed', listener: (data: { taskId: string; type: string; durationMs: number; result: any }) => void): this;
   on(event: 'task:failed', listener: (data: { taskId: string; type: string; durationMs: number; attempts: number; error: Error }) => void): this;
   on(event: 'task:retrying', listener: (data: { taskId: string; attempt: number; maxRetries: number; delayMs: number; error: Error }) => void): this;
@@ -385,11 +433,16 @@ export class Supervisor extends EventEmitter {
     resourceLimits?: ResourceLimits;
     maxTasksPerWorker?: number;
     maxMemoryMb?: number;
+    forceKillOnTimeout?: boolean;
+    killGracePeriodMs?: number;
   });
 
   get maxTasksPerWorker(): number;
   get maxMemoryMb(): number;
+  get forceKillOnTimeout(): boolean;
+  get killGracePeriodMs(): number;
   get recycledCount(): number;
+  get preemptedCount(): number;
   get totalWorkers(): number;
   get idleWorkers(): WorkerHandle[];
   get allWorkers(): WorkerHandle[];
@@ -416,6 +469,8 @@ export class TaskQueueTimeoutError extends WorkerRuntimeError {
 export class TaskTimeoutError extends WorkerRuntimeError {
   taskId: string;
   timeoutMs: number;
+  preempted: boolean;
+  workerId: string | null;
 }
 export class TaskAbortedError extends WorkerRuntimeError {
   taskId: string;
