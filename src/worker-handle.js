@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { WorkerCrashError, WorkerRuntimeError } from './errors.js';
+import { WorkerCrashError, WorkerRuntimeError, TaskTimeoutError } from './errors.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -19,6 +19,9 @@ export class WorkerHandle extends EventEmitter {
   #status = 'starting';
   #tasksCompleted = 0;
   #lastMemoryUsageBytes = 0;
+  #watchdogTimer = null;
+  #graceTimer = null;
+  #isPreempted = false;
   #readyPromise = null;
   #readyResolver = null;
 
@@ -49,6 +52,10 @@ export class WorkerHandle extends EventEmitter {
 
   get isRecycling() {
     return this.#status === 'recycling';
+  }
+
+  get isPreempted() {
+    return this.#isPreempted;
   }
 
   get currentTask() {
@@ -115,6 +122,7 @@ export class WorkerHandle extends EventEmitter {
       }
 
       if (message?.taskId && this.#currentTask && this.#currentTask.id === message.taskId) {
+        this.#clearWatchdog();
         const task = this.#currentTask;
         this.#currentTask = null;
 
@@ -155,6 +163,7 @@ export class WorkerHandle extends EventEmitter {
     });
 
     this.#worker.on('exit', (exitCode) => {
+      this.#clearWatchdog();
       const prevStatus = this.#status;
       this.#status = 'terminated';
 
@@ -170,7 +179,7 @@ export class WorkerHandle extends EventEmitter {
         );
       }
 
-      this.emit('exit', { worker: this, exitCode, prevStatus });
+      this.emit('exit', { worker: this, exitCode, prevStatus, isPreempted: this.#isPreempted });
     });
   }
 
@@ -189,6 +198,10 @@ export class WorkerHandle extends EventEmitter {
     this.#currentTask = task;
     task.markStarted();
 
+    if (task.timeoutMs > 0 && task.forceKillOnTimeout) {
+      this.#armWatchdog(task);
+    }
+
     const message = {
       taskId: task.id,
       type: task.type,
@@ -202,6 +215,98 @@ export class WorkerHandle extends EventEmitter {
       this.#worker.postMessage(message);
     }
     return task.promise;
+  }
+
+  /**
+   * Clears any active watchdog or grace period timers.
+   */
+  #clearWatchdog() {
+    if (this.#watchdogTimer) {
+      clearTimeout(this.#watchdogTimer);
+      this.#watchdogTimer = null;
+    }
+    if (this.#graceTimer) {
+      clearTimeout(this.#graceTimer);
+      this.#graceTimer = null;
+    }
+  }
+
+  /**
+   * Arms the execution timeout watchdog on the main thread for uncooperative task preemption.
+   * @param {TaskHandle} task
+   */
+  #armWatchdog(task) {
+    this.#clearWatchdog();
+
+    if (!task || task.timeoutMs <= 0 || !task.forceKillOnTimeout) {
+      return;
+    }
+
+    this.#watchdogTimer = setTimeout(() => {
+      this.#watchdogTimer = null;
+
+      if (task.isSettled || this.#currentTask !== task) {
+        return;
+      }
+
+      if (task.killGracePeriodMs > 0) {
+        if (task.signal && !task.signal.aborted) {
+          try {
+            task.signal.dispatchEvent(new Event('abort'));
+          } catch (_) {
+            // Ignore dispatch errors
+          }
+        }
+
+        this.#graceTimer = setTimeout(() => {
+          this.#graceTimer = null;
+          this.#preemptWorker(task);
+        }, task.killGracePeriodMs);
+      } else {
+        this.#preemptWorker(task);
+      }
+    }, task.timeoutMs);
+  }
+
+  /**
+   * Forcibly preempts the active worker thread and terminates the underlying V8 isolate.
+   * @param {TaskHandle} task
+   */
+  #preemptWorker(task) {
+    if (this.#status === 'preempting' || this.#status === 'terminated') {
+      return;
+    }
+
+    this.#status = 'preempting';
+    this.#isPreempted = true;
+    this.#clearWatchdog();
+
+    const currentTask = this.#currentTask || task;
+    this.#currentTask = null;
+
+    const timeoutErr = new TaskTimeoutError(
+      `Task ${currentTask.id} exceeded execution timeout of ${currentTask.timeoutMs}ms and was forcibly preempted`,
+      {
+        taskId: currentTask.id,
+        timeoutMs: currentTask.timeoutMs,
+        preempted: true,
+        workerId: this.id,
+      }
+    );
+
+    currentTask.reject(timeoutErr);
+
+    this.emit('task_preempted', {
+      worker: this,
+      workerId: this.id,
+      taskId: currentTask.id,
+      timeoutMs: currentTask.timeoutMs,
+      preempted: true,
+    });
+
+    if (this.#worker) {
+      this.#worker.terminate().catch(() => {});
+    }
   }
 
   /**
@@ -233,10 +338,14 @@ export class WorkerHandle extends EventEmitter {
    * Gracefully terminates the worker thread.
    */
   async terminate() {
-    this.#status = 'terminating';
-    if (this.#worker) {
-      await this.#worker.terminate();
+    this.#clearWatchdog();
+    if (this.#status !== 'preempting') {
+      this.#status = 'terminating';
+    }
+    const worker = this.#worker;
+    if (worker) {
       this.#worker = null;
+      await worker.terminate();
     }
     this.#status = 'terminated';
   }

@@ -512,7 +512,10 @@ describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () =>
       }
 
       // Wait for any remaining recycling events to settle
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      const deadline = Date.now() + 3000;
+      while (runtime.stats.totalWorkers !== 3 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
 
       assert.ok(runtime.stats.recycledWorkersCount > 0, 'Recycling must have occurred during stress run');
       assert.equal(runtime.stats.totalWorkers, 3, 'Pool size must remain constant at 3');
@@ -552,11 +555,17 @@ describe('Worker Recycling - Telemetry in Stats and TypeScript Types (T5)', () =
       assert.equal(runtime.stats.recycledWorkersCount, 0);
 
       await runtime.execute({ fn: () => 'task 1' });
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      const deadline1 = Date.now() + 3000;
+      while (runtime.stats.recycledWorkersCount < 1 && Date.now() < deadline1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
       assert.equal(runtime.stats.recycledWorkersCount, 1);
 
       await runtime.execute({ fn: () => 'task 2' });
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      const deadline2 = Date.now() + 3000;
+      while (runtime.stats.recycledWorkersCount < 2 && Date.now() < deadline2) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
       assert.equal(runtime.stats.recycledWorkersCount, 2);
     } finally {
       await runtime.shutdown();
