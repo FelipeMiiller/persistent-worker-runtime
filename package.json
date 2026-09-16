@@ -19,7 +19,11 @@
   "scripts": {
     "test": "node --test test/**/*.test.js",
     "test:coverage": "node --test --experimental-test-coverage test/**/*.test.js",
-    "benchmark": "node benchmarks/event-loop-lag.benchmark.js"
+    "benchmark": "node benchmarks/event-loop-lag.benchmark.js",
+    "benchmark:stateful": "node benchmarks/stateful-vs-stateless.benchmark.js",
+    "benchmark:concurrency": "node benchmarks/batch-concurrency.benchmark.js",
+    "benchmark:outbox": "node benchmarks/outbox-throughput.benchmark.js",
+    "benchmark:all": "node benchmarks/event-loop-lag.benchmark.js && node benchmarks/stateful-vs-stateless.benchmark.js && node benchmarks/batch-concurrency.benchmark.js && node benchmarks/outbox-throughput.benchmark.js"
   },
   "repository": {
     "type": "git",

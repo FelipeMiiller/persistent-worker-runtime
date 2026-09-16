@@ -37,8 +37,8 @@ jobs:
       - name: Run Test Coverage Report
         run: npm run test:coverage
 
-      - name: Run Event Loop Lag Benchmark
-        run: npm run benchmark
+      - name: Run Full Concurrency & Performance Benchmarks
+        run: npm run benchmark:all
 
       - name: Verify ESM Package Exports Sanity
         run: node --input-type=module -e "import * as mod from './src/index.js'; console.log('Exports verified successfully:', Object.keys(mod));"
