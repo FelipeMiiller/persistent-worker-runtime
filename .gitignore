@@ -9,10 +9,9 @@ coverage/
 .specs/
 
 # Tech Leads Club agent-skills installer local state.
-# Other developers run `npx @tech-leads-club/agent-skills install --skill <name>`
-# in their environment to populate these directories.
+# The .agents/skills/ directory is the canonical local install target
+# (other developers run `npx @tech-leads-club/agent-skills install --skill <name>`
+# to populate it). Lock files are machine-specific and should not be tracked.
 .agents/.skill-lock.json
 .agents/.skill-lock.json.backup
 .agents/skills/
-.claude/
-.windsurf/
