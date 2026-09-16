@@ -23,104 +23,111 @@
 2. **Zero External Dependencies**: `package.json` has `dependencies: {}`. Do NOT install external runtime npm packages under any circumstances. Everything must use standard Node.js built-ins (`node:worker_threads`, `node:test`, `node:events`, `node:async_hooks`, `node:perf_hooks`).
 3. **Language**: **100% English** across all code, docstrings, tests, ADRs, specs, and commit messages.
 4. **Testing Gate**: Every single task must have tests. All tests (`npm test`) must pass with 100% approval before making any commit.
-5. **Atomic Conventional Commits**: Commit each task atomically (`feat:`, `fix:`, `test:`, `docs:`).
+5. **Atomic Conventional Commits**: Commit each task atomically (`feat:`, `fix:`, `test:`, `docs:`, `perf:`, `chore:`, `ci:`, `refactor:`).
 
 ---
 
-## 📍 3. Current State & Where to Start
+## 📍 3. Current State Snapshot
 
-### What was completed in the previous session:
-1. Initial version `v0.1.0` built, tested (13/13 passing tests, >80% coverage), tagged, released, and published to NPM.
-2. 5 enterprise Architecture Decision Records (ADRs) were created, reviewed, and committed to `develop`:
-   - [`ADR-0010: Automatic Worker Recycling and Heap Rejuvenation`](docs/adr/0010-automatic-worker-recycling-anti-memory-leak.md)
-   - [`ADR-0011: Hard Preemption and Thread Termination for Runaway Tasks`](docs/adr/0011-hard-preemption-and-timeout-termination-for-runaway-tasks.md)
-   - [`ADR-0012: Streaming Task Results via Async Generators and Structured IPC`](docs/adr/0012-streaming-task-results-via-async-generators.md)
-   - [`ADR-0013: Worker Inter-Communication via Native BroadcastChannel`](docs/adr/0013-worker-inter-communication-via-broadcast-channel.md)
-   - [`ADR-0014: Adaptive Concurrency Auto-Tuning via Event Loop Utilization (ELU)`](docs/adr/0014-adaptive-concurrency-auto-tuning-via-event-loop-utilization.md)
-3. The specification and task breakdown for the **FIRST feature (ADR-0010)** was created and strictly validated:
-   - **Spec**: [`.specs/features/worker-recycling/spec.md`](.specs/features/worker-recycling/spec.md) (Validated: 0 errors, 0 warnings)
-   - **Tasks**: [`.specs/features/worker-recycling/tasks.md`](.specs/features/worker-recycling/tasks.md) (Validated: 0 errors, 0 warnings)
-   - **State Snapshot**: [`.specs/STATE.md`](.specs/STATE.md) (Decisions AD-001 to AD-014 logged)
+### Code Health (as of last commit)
+- **149 tests passing** across 50 suites (0 failures, 0 skipped).
+- **Coverage**: ~94.7% lines / ~91.0% branches / ~90.4% functions across `src/`.
+- **Benchmarks**: 10 reproducible benchmarks covering event-loop lag, warm-state, batch concurrency, outbox throughput, zero-copy transfer, priority routing, cancellation latency, throughput scaling, hard preemption, and worker recycling.
+- **Examples**: 6 runnable scripts demonstrating the public API.
+
+### Completed Features (in `.specs/features/`)
+1. **`persistent-worker-runtime/`** — Initial implementation (ADR-0001 to ADR-0009).
+2. **`worker-recycling/`** — Complete (ADR-0010, T1-T5 all merged).
+3. **`hard-preemption/`** — Complete (ADR-0011, T1-T5 all merged).
+
+### Recent Quality Wins (last session)
+- **Bug fix**: `task-queue.js` was leaking unhandled rejections — `destroy()` now rejects enqueue promises on waiters, and `drainWaiters()` cleans up abandoned settled-waiter timers.
+- **Coverage**: task-queue.js 65% → 100%, errors.js 82% → 100%, worker-runtime.js 91% → 99.7%.
+- **New dedicated unit tests**: `task-queue.test.js` (19), `errors.test.js` (14), `supervisor-units.test.js` (15), `state-and-affinity.test.js` (14), `zero-copy.test.js` (4), `priority-routing.test.js` (5), `cancel-signal.test.js` (5).
+- **New benchmarks**: `zero-copy-transfer`, `priority-routing`, `abort-cancellation`, `throughput-scaling`.
+- **New examples**: `priority-routing.js`, `zero-copy-image.js`, `cancel-on-disconnect.js`.
+
+### Documented but NOT YET implemented (deferred ADRs)
+- **ADR-0012** — Streaming task results via `AsyncGenerator` (`runtime.stream()`). Documented, declared in `src/index.d.ts` as a future addition; not in runtime yet.
+- **ADR-0013** — Inter-worker communication via `BroadcastChannel`. Documented; not in runtime yet.
+- **ADR-0014** — Adaptive concurrency auto-tuning via ELU. Documented; not in runtime yet.
 
 ---
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Your immediate goal**: Implement **Phase 1: Worker Recycling (ADR-0010)** following the tasks defined in [`.specs/features/worker-recycling/tasks.md`](.specs/features/worker-recycling/tasks.md).
+**Your immediate goal**: Define and implement the next feature spec.
 
-### Step-by-Step Execution Plan:
+### Recommended candidates (in priority order)
 
-1. **Verify Baseline**:
+1. **ELU Adaptive Concurrency (ADR-0014)** — Most impactful for production HTTP servers. Auto-throttles pool size under load to protect p99 latency.
+2. **Inter-worker `BroadcastChannel` (ADR-0013)** — Useful for cache invalidation and pub/sub between workers.
+3. **Streaming task results (ADR-0012)** — Useful for LLM token streaming and large dataset exports.
+
+### Workflow
+
+1. **Verify baseline**:
    ```bash
-   git status
-   npm test
+   git status              # should be clean on develop
+   npm test                # 149/149 passing
+   npm run test:coverage   # >90% line coverage
    ```
-   Confirm you are on `develop` and all 13 tests pass.
-
-2. **Execute Task T1** (`src/worker-runtime.js`):
-   - Add `maxTasksPerWorker` (default `Infinity`) and `maxMemoryMb` (default `Infinity`) to `WorkerRuntime` constructor options.
-   - Validate options (must be positive numbers or `Infinity`, throw `TypeError` or `RangeError` on invalid values).
-   - Pass options down to `Supervisor`.
-   - Write unit tests in `test/recycling.test.js`.
-   - Run `npm test`. Commit: `feat(runtime): add maxTasksPerWorker and maxMemoryMb configuration and validation`.
-
-3. **Execute Task T2** (`src/worker-thread-entry.js`):
-   - In worker thread task completion handler, sample heap usage via `process.memoryUsage().heapUsed`.
-   - Return `{ memoryUsageBytes }` in the task completion IPC message payload.
-   - Run `npm test`. Commit: `feat(worker): report memory usage on task completion in worker thread`.
-
-4. **Execute Task T3** (`src/worker-handle.js`):
-   - Add `'recycling'` status to `WorkerHandle`.
-   - Ensure `isIdle` returns `false` when status is `'recycling'`.
-   - Add `markRecycling()` and `isRecycling` getter.
-   - Record last sampled memory usage.
-   - Run `npm test`. Commit: `feat(worker-handle): add recycling state and lifecycle checks`.
-
-5. **Execute Task T4** (`src/supervisor.js`):
-   - In `Supervisor`, check `maxTasksPerWorker` and `maxMemoryMb` after each task completes.
-   - If exceeded:
-     - Mark worker as recycling via `worker.markRecycling()`.
-     - Emit `worker_recycling` event with `{ workerId, reason, tasksCompleted, memoryUsage }`.
-     - Spawn a replacement worker to maintain pool capacity.
-     - Once replacement is ready and current task is settled, terminate the old worker via `worker.terminate()`.
-     - Emit `worker_recycled` event with `{ oldWorkerId, newWorkerId }`.
-   - Write integration test verifying zero dropped tasks during recycling under concurrent load.
-   - Run `npm test`. Commit: `feat(supervisor): implement graceful worker recycling and replacement`.
-
-6. **Execute Task T5** (`src/index.d.ts` & `src/worker-runtime.js`):
-   - Expose cumulative `recycledWorkersCount` in `runtime.stats()`.
-   - Update `src/index.d.ts` with all new types, options, events, and stats properties.
-   - Run full suite and coverage:
-     ```bash
-     npm test
-     npm run test:coverage
-     ```
-   - Commit: `feat(types): expose recycling telemetry and update TypeScript declarations`.
-
-7. **Push and Proceed**:
-   - Once all 5 tasks pass and are committed, push to `develop`:
-     ```bash
-     git push origin develop
-     ```
-   - Proceed to feature 2 (**ADR-0011: Hard Preemption Watchdog**).
+2. **Pick a feature** from the candidates above.
+3. **Create the spec** under `.specs/features/<feature-name>/spec.md` and `tasks.md` (see existing specs for structure).
+4. **Update `.specs/STATE.md`** with the new Handoff block pointing to the new feature.
+5. **Implement T1 → T2 → ...** following the same conventional-commit cadence used by the previous features.
 
 ---
 
 ## 🛠 5. Useful Verification Commands
 
 ```bash
-# Run unit and integration tests
+# Run all unit and integration tests
 npm test
 
-# Run code coverage (>80% required)
+# Run code coverage report
 npm run test:coverage
 
-# Run benchmarks
+# Run all 10 benchmarks
 npm run benchmark:all
 
-# Validate spec.md structure (Python 3)
-python <skill-dir>/scripts/validate_spec.py .specs/features/worker-recycling/spec.md --root .
+# Run individual benchmarks
+npm run benchmark              # Event Loop lag
+npm run benchmark:stateful     # Warm L1 vs stateless
+npm run benchmark:concurrency  # Bounded batch
+npm run benchmark:outbox       # Outbox throughput
+npm run benchmark:zero-copy    # ArrayBuffer transfer
+npm run benchmark:priority     # Priority routing
+npm run benchmark:cancel       # AbortController latency
+npm run benchmark:scaling      # Worker count scaling
+npm run benchmark:preemption   # Hard preemption watchdog
+npm run benchmark:recycling    # Automatic recycling
 
-# Validate tasks.md structure (Python 3)
-python <skill-dir>/scripts/validate_tasks.py .specs/features/worker-recycling/tasks.md --root .
+# Run any example
+node examples/<name>.js
 ```
+
+## 📂 6. Key Files Quick Reference
+
+| Purpose | Path |
+|---|---|
+| Public API entry | `src/index.js` |
+| TypeScript types | `src/index.d.ts` |
+| Execution engine | `src/worker-runtime.js` |
+| Worker pool | `src/supervisor.js` |
+| Worker wrapper | `src/worker-handle.js` |
+| In-thread loop | `src/worker-thread-entry.js` |
+| Task model | `src/task-handle.js` |
+| Priority queue | `src/task-queue.js` |
+| Error hierarchy | `src/errors.js` |
+| Architectural decisions | `docs/adr/0001..0014-*.md` |
+| Local spec/state | `.specs/STATE.md` (gitignored) |
+
+## 🧭 7. Common Pitfalls to Avoid
+
+1. **Don't `await enqueue()` without cleanup** — if the task gets cancelled mid-wait, the abandoned waiter promise stays pending until destroy(). Either always await the task's `handle.promise` or wrap with `.catch()`.
+2. **Don't dispatch after `shutdown()`** — the runtime throws `WorkerRuntimeError('Cannot dispatch tasks: Runtime is shutting down')`.
+3. **`fnCode` runs in a worker thread, not the main thread** — closures and outer-scope variables don't carry over. Use `payload` to pass data in.
+4. **`transferList` detaches the buffer on the sender** — you cannot reuse the same `ArrayBuffer` after transfer; the runtime uses it as a one-way move.
+5. **`forceKillOnTimeout: true` will terminate the worker** — the task promise rejects with `TaskTimeoutError(preempted: true)` and the supervisor spawns a replacement.
+6. **`.specs/` is gitignored** — STATE.md updates only affect the local working tree, not the repo. Don't try to commit it.
