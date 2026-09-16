@@ -19,3 +19,5 @@ This directory contains the formal Architecture Decision Records for the **Persi
 | **[ADR-0013](0013-worker-inter-communication-via-broadcast-channel.md)** | Worker Inter-Communication via Native BroadcastChannel | Accepted | 2026-09-16 |
 | **[ADR-0014](0014-adaptive-concurrency-auto-tuning-via-event-loop-utilization.md)** | Adaptive Concurrency Auto-Tuning via Event Loop Utilization (ELU) | Accepted | 2026-09-16 |
 | **[ADR-0015](0015-promise-rejection-contract-for-task-queue-waiters.md)** | Promise Rejection Contract for TaskQueue Waiters | Accepted | 2026-09-16 |
+| **[ADR-0016](0016-priority-routing-and-fairness.md)** | Priority Routing and Fairness via Numeric Task Priority | Accepted | 2026-09-16 |
+| **[ADR-0017](0017-cooperative-cancellation-via-abortsignal.md)** | Cooperative Cancellation via Standard `AbortSignal` | Accepted | 2026-09-16 |
