@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WorkerRuntime, Supervisor, WorkerHandle, TaskHandle } from '../src/index.js';
+import { WorkerRuntime, Supervisor, WorkerHandle, TaskHandle, createWorkerRuntime } from '../src/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -393,5 +393,150 @@ describe('Worker Recycling - Recycling State in WorkerHandle (T3)', () => {
     worker.markRecycling();
     assert.equal(worker.status, 'terminated');
     assert.equal(worker.isRecycling, false);
+  });
+});
+
+describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () => {
+  it('recycles worker when maxTasksPerWorker is reached and preserves pool capacity', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 2,
+      maxTasksPerWorker: 2,
+    });
+
+    try {
+      const recyclingEvents = [];
+      const recycledEvents = [];
+
+      runtime.on('worker_recycling', (e) => recyclingEvents.push(e));
+      runtime.on('worker_recycled', (e) => recycledEvents.push(e));
+
+      // Dispatch 4 sequential tasks
+      const r1 = await runtime.execute({ fn: () => 1 });
+      const r2 = await runtime.execute({ fn: () => 2 });
+      const r3 = await runtime.execute({ fn: () => 3 });
+      const r4 = await runtime.execute({ fn: () => 4 });
+
+      assert.deepEqual([r1, r2, r3, r4], [1, 2, 3, 4]);
+
+      // Give worker thread replacement a moment to complete settlement
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      assert.ok(recyclingEvents.length >= 1, 'At least one worker must trigger recycling');
+      assert.equal(recyclingEvents[0].reason, 'tasks_exceeded');
+      assert.ok(recyclingEvents[0].workerId);
+      assert.ok(recyclingEvents[0].tasksCompleted >= 2);
+      assert.ok(recyclingEvents[0].memoryUsage > 0);
+
+      assert.ok(recycledEvents.length >= 1, 'At least one worker must be recycled');
+      assert.ok(recycledEvents[0].oldWorkerId);
+      assert.ok(recycledEvents[0].newWorkerId);
+      assert.notEqual(recycledEvents[0].oldWorkerId, recycledEvents[0].newWorkerId);
+
+      // Verify pool size remains 2
+      assert.equal(runtime.stats.totalWorkers, 2);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('recycles worker when maxMemoryMb threshold is exceeded', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 1,
+      maxMemoryMb: 20,
+    });
+
+    try {
+      const recyclingEvents = [];
+      const recycledEvents = [];
+
+      runtime.on('worker_recycling', (e) => recyclingEvents.push(e));
+      runtime.on('worker_recycled', (e) => recycledEvents.push(e));
+
+      // Execute a task allocating >20MB on V8 heap and storing in state
+      const result = await runtime.execute({
+        fn: (_, state) => {
+          const arr = [];
+          for (let i = 0; i < 400000; i++) {
+            arr.push({ id: i, text: 'leak-simulation-payload' });
+          }
+          state.set('memory_leak', arr);
+          return { allocated: arr.length };
+        },
+      });
+
+      assert.equal(result.allocated, 400000);
+
+      // Wait for recycling to settle
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      assert.equal(recyclingEvents.length, 1);
+      assert.equal(recyclingEvents[0].reason, 'memory_exceeded');
+      assert.ok(recyclingEvents[0].memoryUsage > 20 * 1024 * 1024);
+
+      assert.equal(recycledEvents.length, 1);
+      assert.equal(runtime.stats.totalWorkers, 1);
+
+      // Verify replacement worker can execute a subsequent task and has clean L1 state
+      const nextResult = await runtime.execute({
+        fn: (_, state) => {
+          return { hasOldState: state.has('memory_leak') };
+        },
+      });
+
+      assert.equal(nextResult.hasOldState, false, 'Replacement worker must have fresh clean L1 heap');
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('guarantees zero dropped tasks during high-concurrency recycling stress', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 3,
+      maxTasksPerWorker: 3, // frequent recycling
+    });
+
+    try {
+      const taskCount = 30;
+      const tasks = Array.from({ length: taskCount }, (_, i) => ({
+        type: `task_${i}`,
+        payload: { i },
+        fn: (p) => p.i * 10,
+      }));
+
+      // Execute all 30 tasks concurrently
+      const results = await runtime.executeAll(tasks);
+
+      assert.equal(results.length, taskCount);
+      for (let i = 0; i < taskCount; i++) {
+        assert.equal(results[i], i * 10, `Task ${i} result must match`);
+      }
+
+      // Wait for any remaining recycling events to settle
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      assert.ok(runtime.stats.recycledWorkersCount > 0, 'Recycling must have occurred during stress run');
+      assert.equal(runtime.stats.totalWorkers, 3, 'Pool size must remain constant at 3');
+      assert.equal(runtime.stats.completedTasks, taskCount);
+      assert.equal(runtime.stats.failedTasks, 0);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('shuts down cleanly while worker recycling is in progress', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 2,
+      maxTasksPerWorker: 1,
+    });
+
+    // Fire task that triggers recycling
+    await runtime.execute({ fn: () => 'trigger' });
+
+    // Immediate shutdown during/right after recycling trigger
+    await assert.doesNotReject(async () => {
+      await runtime.shutdown();
+    });
+
+    assert.equal(runtime.stats.totalWorkers, 0);
   });
 });

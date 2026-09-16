@@ -11,6 +11,7 @@ export class Supervisor extends EventEmitter {
   #targetWorkers;
   #maxTasksPerWorker;
   #maxMemoryMb;
+  #recycledCount = 0;
 
   constructor(options = {}) {
     super();
@@ -30,6 +31,10 @@ export class Supervisor extends EventEmitter {
 
   get maxMemoryMb() {
     return this.#maxMemoryMb;
+  }
+
+  get recycledCount() {
+    return this.#recycledCount;
   }
 
   get totalWorkers() {
@@ -86,6 +91,58 @@ export class Supervisor extends EventEmitter {
   }
 
   /**
+   * Checks whether a worker has exceeded task or memory limits and initiates recycling.
+   */
+  #checkRecycling(worker) {
+    if (this.#isShuttingDown) return;
+    if (worker.isDedicated) return;
+    if (worker.isRecycling || worker.status === 'terminating' || worker.status === 'terminated') return;
+
+    let reason = null;
+    if (worker.tasksCompleted >= this.#maxTasksPerWorker) {
+      reason = 'tasks_exceeded';
+    } else if (
+      this.#maxMemoryMb !== Infinity &&
+      (worker.lastMemoryUsageBytes / (1024 * 1024)) >= this.#maxMemoryMb
+    ) {
+      reason = 'memory_exceeded';
+    }
+
+    if (!reason) return;
+
+    worker.markRecycling();
+
+    this.emit('worker_recycling', {
+      workerId: worker.id,
+      reason,
+      tasksCompleted: worker.tasksCompleted,
+      memoryUsage: worker.lastMemoryUsageBytes,
+    });
+
+    this.#spawnWorker()
+      .then(async (replacement) => {
+        if (!replacement) return;
+
+        if (this.#isShuttingDown) {
+          await replacement.terminate();
+          await worker.terminate();
+          return;
+        }
+
+        await worker.terminate();
+        this.#recycledCount++;
+
+        this.emit('worker_recycled', {
+          oldWorkerId: worker.id,
+          newWorkerId: replacement.id,
+        });
+      })
+      .catch((err) => {
+        this.emit('error', err);
+      });
+  }
+
+  /**
    * Spawns a new worker thread and registers lifecycle monitoring.
    */
   async #spawnWorker(overrides = {}) {
@@ -103,7 +160,13 @@ export class Supervisor extends EventEmitter {
       this.emit('worker_exit', { workerId: worker.id, exitCode, prevStatus });
 
       // If worker crashed and we are not shutting down, automatically spawn a replacement
-      if (!this.#isShuttingDown && !worker.isDedicated && prevStatus !== 'terminating') {
+      if (
+        !this.#isShuttingDown &&
+        !worker.isDedicated &&
+        prevStatus !== 'terminating' &&
+        prevStatus !== 'recycling' &&
+        !worker.isRecycling
+      ) {
         this.emit('worker_restarting', { crashedWorkerId: worker.id, exitCode });
         this.#spawnWorker().then((replacement) => {
           if (replacement) {
@@ -115,8 +178,15 @@ export class Supervisor extends EventEmitter {
       }
     });
 
-    worker.on('task_completed', (data) => this.emit('task_completed', data));
-    worker.on('task_failed', (data) => this.emit('task_failed', data));
+    worker.on('task_completed', (data) => {
+      this.#checkRecycling(data.worker);
+      this.emit('task_completed', data);
+    });
+
+    worker.on('task_failed', (data) => {
+      this.#checkRecycling(data.worker);
+      this.emit('task_failed', data);
+    });
 
     await worker.waitUntilReady();
     this.emit('worker_ready', worker);

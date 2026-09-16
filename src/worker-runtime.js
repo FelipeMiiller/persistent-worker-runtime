@@ -72,6 +72,17 @@ export class WorkerRuntime extends EventEmitter {
       this.emit('worker:replaced', { oldId, newId });
     });
 
+    this.#supervisor.on('worker_recycling', (data) => {
+      this.emit('worker_recycling', data);
+      this.emit('worker:recycling', data);
+    });
+
+    this.#supervisor.on('worker_recycled', (data) => {
+      this.#scheduleNext();
+      this.emit('worker_recycled', data);
+      this.emit('worker:recycled', data);
+    });
+
     this.#supervisor.on('task_completed', ({ task, result }) => {
       this.#stats.completedTasks++;
       this.emit('task:completed', {
@@ -129,6 +140,7 @@ export class WorkerRuntime extends EventEmitter {
       submittedTasks: this.#stats.submittedTasks,
       completedTasks: this.#stats.completedTasks,
       failedTasks: this.#stats.failedTasks,
+      recycledWorkersCount: this.#supervisor.recycledCount,
     };
   }
 
