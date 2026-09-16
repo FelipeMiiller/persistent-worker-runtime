@@ -11,6 +11,8 @@ export class Supervisor extends EventEmitter {
   #targetWorkers;
   #maxTasksPerWorker;
   #maxMemoryMb;
+  #forceKillOnTimeout;
+  #killGracePeriodMs;
   #recycledCount = 0;
 
   constructor(options = {}) {
@@ -18,6 +20,8 @@ export class Supervisor extends EventEmitter {
     this.#targetWorkers = options.workers || 4;
     this.#maxTasksPerWorker = options.maxTasksPerWorker === undefined ? Infinity : options.maxTasksPerWorker;
     this.#maxMemoryMb = options.maxMemoryMb === undefined ? Infinity : options.maxMemoryMb;
+    this.#forceKillOnTimeout = Boolean(options.forceKillOnTimeout);
+    this.#killGracePeriodMs = options.killGracePeriodMs === undefined ? 500 : options.killGracePeriodMs;
     this.#workerOptions = {
       workerScript: options.workerScript,
       handlerPath: options.handlerPath,
@@ -31,6 +35,14 @@ export class Supervisor extends EventEmitter {
 
   get maxMemoryMb() {
     return this.#maxMemoryMb;
+  }
+
+  get forceKillOnTimeout() {
+    return this.#forceKillOnTimeout;
+  }
+
+  get killGracePeriodMs() {
+    return this.#killGracePeriodMs;
   }
 
   get recycledCount() {

@@ -35,6 +35,8 @@ export class TaskTimeoutError extends WorkerRuntimeError {
     super(message, { ...options, code: 'ERR_TASK_TIMEOUT' });
     this.taskId = options.taskId;
     this.timeoutMs = options.timeoutMs;
+    this.workerId = options.workerId || null;
+    this.preempted = Boolean(options.preempted);
   }
 }
 

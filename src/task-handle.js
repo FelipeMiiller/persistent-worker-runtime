@@ -22,6 +22,17 @@ export class TaskHandle {
     this.timeoutMs = options.timeoutMs || 0;
     this.queueTimeoutMs = options.queueTimeoutMs || 30000;
     this.signal = options.signal || null;
+    this.forceKillOnTimeout = Boolean(options.forceKillOnTimeout);
+
+    const killGracePeriodMs = options.killGracePeriodMs === undefined ? 500 : options.killGracePeriodMs;
+    if (typeof killGracePeriodMs !== 'number' || Number.isNaN(killGracePeriodMs)) {
+      throw new TypeError('killGracePeriodMs must be a non-negative number');
+    }
+    if (killGracePeriodMs < 0) {
+      throw new RangeError('killGracePeriodMs must be a non-negative number');
+    }
+    this.killGracePeriodMs = killGracePeriodMs;
+
     this.fnCode = options.fnCode || (typeof options.fn === 'function' ? options.fn.toString() : null);
     this.transferList = options.transferList || [];
     this.retries = options.retries || 0;
@@ -103,12 +114,13 @@ export class TaskHandle {
   markStarted() {
     this.startedAt = performance.now();
 
-    if (this.timeoutMs > 0) {
+    if (this.timeoutMs > 0 && !this.forceKillOnTimeout) {
       this.#executionTimer = setTimeout(() => {
         this.reject(
           new TaskTimeoutError(`Task ${this.id} exceeded execution timeout of ${this.timeoutMs}ms`, {
             taskId: this.id,
             timeoutMs: this.timeoutMs,
+            preempted: false,
           })
         );
       }, this.timeoutMs);

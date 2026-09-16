@@ -16,6 +16,8 @@ export class WorkerRuntime extends EventEmitter {
   #isShuttingDown = false;
   #maxTasksPerWorker;
   #maxMemoryMb;
+  #forceKillOnTimeout;
+  #killGracePeriodMs;
   #stats = {
     submittedTasks: 0,
     completedTasks: 0,
@@ -41,8 +43,19 @@ export class WorkerRuntime extends EventEmitter {
       throw new RangeError('maxMemoryMb must be greater than 0');
     }
 
+    const forceKillOnTimeout = Boolean(options.forceKillOnTimeout);
+    const killGracePeriodMs = options.killGracePeriodMs === undefined ? 500 : options.killGracePeriodMs;
+    if (typeof killGracePeriodMs !== 'number' || Number.isNaN(killGracePeriodMs)) {
+      throw new TypeError('killGracePeriodMs must be a non-negative number');
+    }
+    if (killGracePeriodMs < 0) {
+      throw new RangeError('killGracePeriodMs must be a non-negative number');
+    }
+
     this.#maxTasksPerWorker = maxTasksPerWorker;
     this.#maxMemoryMb = maxMemoryMb;
+    this.#forceKillOnTimeout = forceKillOnTimeout;
+    this.#killGracePeriodMs = killGracePeriodMs;
 
     const defaultWorkers = Math.max(1, availableParallelism() - 1);
     const workerCount = options.workers || defaultWorkers;
@@ -59,6 +72,8 @@ export class WorkerRuntime extends EventEmitter {
       resourceLimits: options.resourceLimits,
       maxTasksPerWorker: this.#maxTasksPerWorker,
       maxMemoryMb: this.#maxMemoryMb,
+      forceKillOnTimeout: this.#forceKillOnTimeout,
+      killGracePeriodMs: this.#killGracePeriodMs,
     });
 
     // Wire supervisor events to runtime events
@@ -152,6 +167,14 @@ export class WorkerRuntime extends EventEmitter {
     return this.#maxMemoryMb;
   }
 
+  get forceKillOnTimeout() {
+    return this.#forceKillOnTimeout;
+  }
+
+  get killGracePeriodMs() {
+    return this.#killGracePeriodMs;
+  }
+
   /**
    * Initializes the pool and starts persistent workers.
    */
@@ -196,6 +219,13 @@ export class WorkerRuntime extends EventEmitter {
       }
     } else {
       throw new TypeError('Task definition must be an object or a function');
+    }
+
+    if (taskOptions.forceKillOnTimeout === undefined) {
+      taskOptions.forceKillOnTimeout = this.#forceKillOnTimeout;
+    }
+    if (taskOptions.killGracePeriodMs === undefined) {
+      taskOptions.killGracePeriodMs = this.#killGracePeriodMs;
     }
 
     const task = new TaskHandle(taskOptions);
