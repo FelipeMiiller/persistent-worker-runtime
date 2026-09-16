@@ -49,6 +49,10 @@ export class TaskQueue {
           this.#insert(task);
           resolve();
         },
+        reject: (err) => {
+          if (waitEntry.timer) clearTimeout(waitEntry.timer);
+          reject(err);
+        },
       };
 
       waitEntry.timer = setTimeout(() => {
@@ -140,10 +144,17 @@ export class TaskQueue {
   #drainWaiters() {
     while (this.#waiters.length > 0 && this.#queue.length < this.#maxQueueSize) {
       const nextWaiter = this.#waiters.shift();
-      if (!nextWaiter.task.isSettled) {
-        nextWaiter.resolve();
-        break;
+      if (nextWaiter.task.isSettled) {
+        // Abandoned waiter: clear its timer and reject the enqueue promise
+        // so callers awaiting enqueue() don't leak unhandled rejections.
+        if (nextWaiter.timer) clearTimeout(nextWaiter.timer);
+        nextWaiter.reject(
+          new Error('Task was settled before queue capacity was available')
+        );
+        continue;
       }
+      nextWaiter.resolve();
+      break;
     }
   }
 
@@ -154,6 +165,7 @@ export class TaskQueue {
     for (const waiter of this.#waiters) {
       if (waiter.timer) clearTimeout(waiter.timer);
       waiter.task.reject(reason);
+      waiter.reject(reason);
     }
     this.#waiters = [];
 
