@@ -1,6 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { Worker } from 'node:worker_threads';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WorkerRuntime, Supervisor } from '../src/index.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const WORKER_SCRIPT = join(__dirname, '../src/worker-thread-entry.js');
 
 describe('Worker Recycling - Configuration & Validation (T1)', () => {
   describe('Default configuration', () => {
@@ -195,5 +202,78 @@ describe('Worker Recycling - Configuration & Validation (T1)', () => {
         }
       );
     });
+  });
+});
+
+describe('Worker Recycling - Memory Reporting in worker-thread-entry (T2)', () => {
+  it('reports memoryUsageBytes on successful task completion', async () => {
+    const worker = new Worker(WORKER_SCRIPT);
+
+    try {
+      await new Promise((resolve) => {
+        worker.once('message', (msg) => {
+          if (msg.type === 'ready') resolve();
+        });
+      });
+
+      const responsePromise = new Promise((resolve) => {
+        worker.once('message', (msg) => {
+          resolve(msg);
+        });
+      });
+
+      worker.postMessage({
+        taskId: 't2-success-task',
+        type: 'compute',
+        payload: { value: 42 },
+        fnCode: 'p => p.value * 2',
+      });
+
+      const response = await responsePromise;
+
+      assert.equal(response.taskId, 't2-success-task');
+      assert.equal(response.success, true);
+      assert.equal(response.result, 84);
+      assert.equal(typeof response.memoryUsageBytes, 'number');
+      assert.ok(response.memoryUsageBytes > 0, 'memoryUsageBytes must be greater than 0');
+    } finally {
+      await worker.terminate();
+    }
+  });
+
+  it('reports memoryUsageBytes on task execution failure', async () => {
+    const worker = new Worker(WORKER_SCRIPT);
+
+    try {
+      await new Promise((resolve) => {
+        worker.once('message', (msg) => {
+          if (msg.type === 'ready') resolve();
+        });
+      });
+
+      const responsePromise = new Promise((resolve) => {
+        worker.once('message', (msg) => {
+          resolve(msg);
+        });
+      });
+
+      worker.postMessage({
+        taskId: 't2-fail-task',
+        type: 'failing_compute',
+        payload: {},
+        fnCode: '() => { throw new Error("intentional task failure"); }',
+      });
+
+      const response = await responsePromise;
+
+      assert.equal(response.taskId, 't2-fail-task');
+      assert.equal(response.success, false);
+      assert.ok(response.error);
+      assert.equal(response.error.message, 'intentional task failure');
+      assert.equal(typeof response.memoryUsageBytes, 'number');
+      assert.ok(response.memoryUsageBytes > 0, 'memoryUsageBytes must be greater than 0');
+    } finally {
+      await worker.terminate();
+    }
   });
 });

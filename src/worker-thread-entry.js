@@ -58,12 +58,16 @@ async function processTask(message) {
       result = { executed: true, type, payload };
     }
 
+    const memoryUsageBytes = process.memoryUsage().heapUsed;
+
     parentPort.postMessage({
       taskId,
       success: true,
       result,
+      memoryUsageBytes,
     });
   } catch (err) {
+    const memoryUsageBytes = process.memoryUsage().heapUsed;
     parentPort.postMessage({
       taskId,
       success: false,
@@ -72,6 +76,7 @@ async function processTask(message) {
         stack: err.stack,
         code: err.code || 'ERR_TASK_EXECUTION',
       },
+      memoryUsageBytes,
     });
   }
 }
