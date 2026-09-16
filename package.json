@@ -4,9 +4,26 @@
   "description": "A persistent worker execution runtime for Node.js to offload CPU-bound tasks and preserve Event Loop responsiveness with stateful workers.",
   "type": "module",
   "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test test/**/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage test/**/*.test.js",
     "benchmark": "node benchmarks/event-loop-lag.benchmark.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FelipeMiiller/persistent-worker-runtime.git"
   },
   "keywords": [
     "nodejs",
@@ -15,11 +32,14 @@
     "cpu-bound",
     "event-loop",
     "pool",
-    "runtime"
+    "runtime",
+    "outbox-pattern",
+    "background-jobs",
+    "stateful-workers"
   ],
   "author": "Felipe Miiller",
   "license": "MIT",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   }
 }
