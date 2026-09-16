@@ -1,5 +1,6 @@
 # Persistent Worker Runtime for Node.js
 
+[![NPM Version](https://img.shields.io/npm/v/persistent-worker-runtime.svg)](https://www.npmjs.com/package/persistent-worker-runtime)
 [![CI](https://github.com/FelipeMiiller/persistent-worker-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/FelipeMiiller/persistent-worker-runtime/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.0.0-green.svg)](https://nodejs.org/)
