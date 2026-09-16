@@ -325,6 +325,11 @@ Every major architectural choice is documented following the **MADR** format in 
 * **[ADR-0007](docs/adr/0007-automatic-retry-policies-with-exponential-backoff.md)**: Automatic Retry Policies with Exponential Backoff for Background Tasks
 * **[ADR-0008](docs/adr/0008-zero-copy-binary-data-transfer-via-transferable-objects.md)**: Zero-Copy Binary Data Transfer via Transferable Objects
 * **[ADR-0009](docs/adr/0009-elastic-worker-pool-auto-scaling.md)**: Elastic Worker Pool Auto-Scaling with Min/Max Bounds and Idle Timeout
+* **[ADR-0010](docs/adr/0010-automatic-worker-recycling-anti-memory-leak.md)**: Automatic Worker Recycling and Heap Rejuvenation
+* **[ADR-0011](docs/adr/0011-hard-preemption-and-timeout-termination-for-runaway-tasks.md)**: Hard Preemption and Thread Termination for Runaway Tasks
+* **[ADR-0012](docs/adr/0012-streaming-task-results-via-async-generators.md)**: Streaming Task Results via Async Generators and Structured IPC
+* **[ADR-0013](docs/adr/0013-worker-inter-communication-via-broadcast-channel.md)**: Worker Inter-Communication via Native BroadcastChannel
+* **[ADR-0014](docs/adr/0014-adaptive-concurrency-auto-tuning-via-event-loop-utilization.md)**: Adaptive Concurrency Auto-Tuning via Event Loop Utilization (ELU)
 
 ---
 

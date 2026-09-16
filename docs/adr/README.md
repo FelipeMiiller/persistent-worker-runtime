@@ -13,3 +13,8 @@ This directory contains the formal Architecture Decision Records for the **Persi
 | **[ADR-0007](0007-automatic-retry-policies-with-exponential-backoff.md)** | Automatic Retry Policies with Exponential Backoff for Background Tasks | Accepted | 2026-09-16 |
 | **[ADR-0008](0008-zero-copy-binary-data-transfer-via-transferable-objects.md)** | Zero-Copy Binary Data Transfer via Transferable Objects | Accepted | 2026-09-16 |
 | **[ADR-0009](0009-elastic-worker-pool-auto-scaling.md)** | Elastic Worker Pool Auto-Scaling with Min/Max Bounds and Idle Timeout | Accepted | 2026-09-16 |
+| **[ADR-0010](0010-automatic-worker-recycling-anti-memory-leak.md)** | Automatic Worker Recycling and Heap Rejuvenation | Accepted | 2026-09-16 |
+| **[ADR-0011](0011-hard-preemption-and-timeout-termination-for-runaway-tasks.md)** | Hard Preemption and Thread Termination for Runaway Tasks | Accepted | 2026-09-16 |
+| **[ADR-0012](0012-streaming-task-results-via-async-generators.md)** | Streaming Task Results via Async Generators and Structured IPC | Accepted | 2026-09-16 |
+| **[ADR-0013](0013-worker-inter-communication-via-broadcast-channel.md)** | Worker Inter-Communication via Native BroadcastChannel | Accepted | 2026-09-16 |
+| **[ADR-0014](0014-adaptive-concurrency-auto-tuning-via-event-loop-utilization.md)** | Adaptive Concurrency Auto-Tuning via Event Loop Utilization (ELU) | Accepted | 2026-09-16 |
