@@ -23,7 +23,13 @@
     "benchmark:stateful": "node benchmarks/stateful-vs-stateless.benchmark.js",
     "benchmark:concurrency": "node benchmarks/batch-concurrency.benchmark.js",
     "benchmark:outbox": "node benchmarks/outbox-throughput.benchmark.js",
-    "benchmark:all": "node benchmarks/event-loop-lag.benchmark.js && node benchmarks/stateful-vs-stateless.benchmark.js && node benchmarks/batch-concurrency.benchmark.js && node benchmarks/outbox-throughput.benchmark.js",
+    "benchmark:zero-copy": "node benchmarks/zero-copy-transfer.benchmark.js",
+    "benchmark:preemption": "node benchmarks/preemption-recovery.benchmark.js",
+    "benchmark:recycling": "node benchmarks/worker-recycling.benchmark.js",
+    "benchmark:priority": "node benchmarks/priority-routing.benchmark.js",
+    "benchmark:cancel": "node benchmarks/abort-cancellation.benchmark.js",
+    "benchmark:scaling": "node benchmarks/throughput-scaling.benchmark.js",
+    "benchmark:all": "node benchmarks/event-loop-lag.benchmark.js && node benchmarks/stateful-vs-stateless.benchmark.js && node benchmarks/batch-concurrency.benchmark.js && node benchmarks/outbox-throughput.benchmark.js && node benchmarks/zero-copy-transfer.benchmark.js && node benchmarks/priority-routing.benchmark.js && node benchmarks/abort-cancellation.benchmark.js && node benchmarks/throughput-scaling.benchmark.js && node benchmarks/preemption-recovery.benchmark.js && node benchmarks/worker-recycling.benchmark.js",
     "prepublishOnly": "npm test"
   },
   "repository": {
