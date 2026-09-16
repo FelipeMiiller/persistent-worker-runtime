@@ -1,12 +1,19 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   WorkerRuntime,
   Supervisor,
   WorkerHandle,
   TaskHandle,
   TaskTimeoutError,
+  createWorkerRuntime,
 } from '../src/index.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 describe('Hard Preemption - Config, Error & Validation (T1)', () => {
   describe('TaskTimeoutError preemption enhancement', () => {
@@ -327,5 +334,312 @@ describe('Hard Preemption - Watchdog & WorkerHandle Preemption (T2)', () => {
     assert.equal(worker.status, 'idle');
 
     await worker.terminate();
+  });
+});
+
+describe('Hard Preemption - Supervisor Autonomous Pool Healing (T3)', () => {
+  it('restores pool capacity and executes subsequent tasks when a worker thread is preempted', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 2,
+      forceKillOnTimeout: true,
+      killGracePeriodMs: 0,
+    });
+
+    try {
+      let preemptedEvent = null;
+      let replacedEvent = null;
+
+      runtime.on('worker_preempted', (ev) => {
+        preemptedEvent = ev;
+      });
+
+      runtime.on('worker_replaced', (ev) => {
+        replacedEvent = ev;
+      });
+
+      // Dispatch one unyielding runaway task and one normal task in parallel
+      const runawayTask = runtime.execute({
+        timeoutMs: 40,
+        fn: () => {
+          while (true) {}
+        },
+      });
+
+      const normalTask1 = runtime.execute({
+        fn: () => 'normal_1',
+      });
+
+      const res1 = await normalTask1;
+      assert.equal(res1, 'normal_1');
+
+      await assert.rejects(runawayTask, (err) => {
+        assert.equal(err.name, 'TaskTimeoutError');
+        assert.equal(err.preempted, true);
+        return true;
+      });
+
+      // Wait for preemption and replacement events to arrive
+      const deadline = Date.now() + 3000;
+      while ((!preemptedEvent || !replacedEvent) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      assert.ok(preemptedEvent, 'worker_preempted event was emitted');
+      assert.ok(replacedEvent, 'worker_replaced event was emitted');
+      assert.equal(runtime.stats.totalWorkers, 2, 'Pool size restored to configured concurrency');
+
+      // Dispatch a subsequent task on the healed pool to verify it executes cleanly
+      const normalTask2 = await runtime.execute({
+        fn: (p) => p * 2,
+        payload: 21,
+      });
+
+      assert.equal(normalTask2, 42);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('emits task_preempted and worker_preempted events with complete telemetry', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 1,
+      forceKillOnTimeout: true,
+      killGracePeriodMs: 0,
+    });
+
+    try {
+      let taskPreemptedData = null;
+      let workerPreemptedData = null;
+
+      runtime.on('task_preempted', (data) => {
+        taskPreemptedData = data;
+      });
+
+      runtime.on('worker:preempted', (data) => {
+        workerPreemptedData = data;
+      });
+
+      await assert.rejects(
+        runtime.execute({
+          timeoutMs: 30,
+          fn: () => {
+            while (true) {}
+          },
+        }),
+        (err) => err.preempted === true
+      );
+
+      // Wait for preemption events to arrive
+      const deadline = Date.now() + 3000;
+      while ((!taskPreemptedData || !workerPreemptedData) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      assert.ok(taskPreemptedData, 'task_preempted event received');
+      assert.equal(taskPreemptedData.preempted, true);
+      assert.equal(taskPreemptedData.timeoutMs, 30);
+      assert.ok(taskPreemptedData.workerId);
+      assert.ok(taskPreemptedData.taskId);
+
+      assert.ok(workerPreemptedData, 'worker:preempted event received');
+      assert.equal(workerPreemptedData.workerId, taskPreemptedData.workerId);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+});
+
+describe('Hard Preemption - Telemetry & Types (T4)', () => {
+  it('exposes and increments preemptedTasksCount in runtime.stats', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 1,
+      forceKillOnTimeout: true,
+      killGracePeriodMs: 0,
+    });
+
+    try {
+      assert.equal(runtime.stats.preemptedTasksCount, 0);
+
+      await assert.rejects(
+        runtime.execute({
+          timeoutMs: 30,
+          fn: () => {
+            while (true) {}
+          },
+        })
+      );
+
+      const deadline1 = Date.now() + 3000;
+      while (runtime.stats.preemptedTasksCount < 1 && Date.now() < deadline1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      assert.equal(runtime.stats.preemptedTasksCount, 1);
+      assert.equal(runtime.stats.failedTasks, 1);
+
+      // Preempt a second task
+      await assert.rejects(
+        runtime.execute({
+          timeoutMs: 30,
+          fn: () => {
+            while (true) {}
+          },
+        })
+      );
+
+      const deadline2 = Date.now() + 3000;
+      while (runtime.stats.preemptedTasksCount < 2 && Date.now() < deadline2) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      assert.equal(runtime.stats.preemptedTasksCount, 2);
+      assert.equal(runtime.stats.failedTasks, 2);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('declares all preemption types, options, and events in src/index.d.ts', () => {
+    const dtsContent = readFileSync(join(__dirname, '../src/index.d.ts'), 'utf8');
+
+    assert.ok(dtsContent.includes('forceKillOnTimeout?: boolean;'));
+    assert.ok(dtsContent.includes('killGracePeriodMs?: number;'));
+    assert.ok(dtsContent.includes('preemptedTasksCount: number;'));
+    assert.ok(dtsContent.includes('export interface TaskPreemptedEvent'));
+    assert.ok(dtsContent.includes('export interface WorkerPreemptedEvent'));
+    assert.ok(dtsContent.includes("'preempting'"));
+    assert.ok(dtsContent.includes('readonly isPreempted: boolean;'));
+    assert.ok(dtsContent.includes('preempted: boolean;'));
+    assert.ok(dtsContent.includes('workerId: string | null;'));
+    assert.ok(dtsContent.includes('get preemptedCount(): number;'));
+  });
+});
+
+describe('Hard Preemption - Concurrency & ReDoS Integration Tests (T5)', () => {
+  it('terminates a catastrophic Regular Expression Backtracking (ReDoS) runaway computation', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 2,
+      forceKillOnTimeout: true,
+      killGracePeriodMs: 0,
+    });
+
+    try {
+      let workerReplaced = false;
+      runtime.on('worker_replaced', () => {
+        workerReplaced = true;
+      });
+
+      // Catastrophic exponential backtracking regex: (a+)+$ on a string of 28 'a's followed by '!'
+      const redosTask = runtime.execute({
+        type: 'redos_attack_simulation',
+        timeoutMs: 50,
+        fn: () => {
+          const redosPattern = /^([a-zA-Z0-9]+)+$/;
+          const maliciousInput = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaa!';
+          return redosPattern.test(maliciousInput);
+        },
+      });
+
+      await assert.rejects(redosTask, (err) => {
+        assert.equal(err.name, 'TaskTimeoutError');
+        assert.equal(err.preempted, true);
+        return true;
+      });
+
+      // Wait for replacement worker
+      const deadline = Date.now() + 3000;
+      while (!workerReplaced && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      assert.ok(workerReplaced, 'Worker was replaced after ReDoS preemption');
+      assert.equal(runtime.stats.totalWorkers, 2, 'Pool size restored to 2');
+
+      // Subsequent task executes cleanly
+      const cleanResult = await runtime.execute({
+        fn: () => 'recovered_from_redos',
+      });
+      assert.equal(cleanResult, 'recovered_from_redos');
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('handles concurrent load with interleaved runaway loops and legitimate tasks without starvation', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 3,
+      forceKillOnTimeout: true,
+      killGracePeriodMs: 0,
+    });
+
+    try {
+      const totalTasks = 20;
+      const runawayIndices = new Set([2, 6, 11, 15, 18]); // 5 runaways, 15 valid tasks
+      const taskPromises = [];
+
+      for (let i = 0; i < totalTasks; i++) {
+        const isRunaway = runawayIndices.has(i);
+        if (isRunaway) {
+          taskPromises.push(
+            runtime.execute({
+              type: `runaway_${i}`,
+              timeoutMs: 40,
+              fn: () => {
+                while (true) {}
+              },
+            })
+          );
+        } else {
+          taskPromises.push(
+            runtime.execute({
+              type: `valid_${i}`,
+              payload: { val: i * 3 },
+              fn: (p) => p.val + 1,
+            })
+          );
+        }
+      }
+
+      const settledResults = await Promise.allSettled(taskPromises);
+
+      let fulfilledCount = 0;
+      let preemptedCount = 0;
+
+      for (let i = 0; i < settledResults.length; i++) {
+        const res = settledResults[i];
+        if (runawayIndices.has(i)) {
+          assert.equal(res.status, 'rejected', `Runaway task ${i} must reject`);
+          assert.equal(res.reason.name, 'TaskTimeoutError');
+          assert.equal(res.reason.preempted, true);
+          preemptedCount++;
+        } else {
+          assert.equal(res.status, 'fulfilled', `Valid task ${i} must fulfill`);
+          assert.equal(res.value, i * 3 + 1);
+          fulfilledCount++;
+        }
+      }
+
+      assert.equal(preemptedCount, 5, 'All 5 runaway tasks were preempted');
+      assert.equal(fulfilledCount, 15, 'All 15 legitimate tasks completed');
+
+      // Wait for all replacements to settle
+      const deadline = Date.now() + 3000;
+      while (runtime.stats.totalWorkers !== 3 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      assert.equal(runtime.stats.totalWorkers, 3, 'Worker pool restored to 3 workers');
+      assert.equal(runtime.stats.preemptedTasksCount, 5);
+      assert.equal(runtime.stats.completedTasks, 15);
+      assert.equal(runtime.stats.failedTasks, 5);
+
+      // Verify the healed pool continues processing new tasks
+      const postRecoveryResult = await runtime.execute({
+        fn: () => 'pool_healthy',
+      });
+      assert.equal(postRecoveryResult, 'pool_healthy');
+    } finally {
+      await runtime.shutdown();
+    }
   });
 });
