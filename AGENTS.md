@@ -27,13 +27,6 @@ persistent-worker-runtime/
 ├── package.json                        # Node.js >= 22, pure ESM, zero external dependencies
 ├── LICENSE                             # MIT License
 ├── .github/workflows/ci.yml            # Multi-OS matrix CI (Ubuntu, macOS, Windows)
-├── .agents/rules/                      # Enforced rules and constraints
-├── .specs/                             # TLC Spec-Driven development artifacts
-│   ├── STATE.md                        # Project state snapshot and decision log
-│   └── features/persistent-worker-runtime/
-│       ├── spec.md                     # EARS notation requirements
-│       ├── tasks.md                    # Implementation roadmap and task tracking
-│       └── validation.md               # Empirical evidence and test verification
 ├── docs/
 │   └── adr/                            # Architecture Decision Records (MADR format)
 ├── src/                                # Core implementation (pure JavaScript ESM)
