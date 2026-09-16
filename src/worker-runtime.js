@@ -3,6 +3,7 @@ import { availableParallelism } from 'node:os';
 import { TaskHandle } from './task-handle.js';
 import { TaskQueue } from './task-queue.js';
 import { Supervisor } from './supervisor.js';
+import { ChannelRegistry } from './broadcast-channel.js';
 import { WorkerRuntimeError } from './errors.js';
 
 /**
@@ -18,6 +19,8 @@ export class WorkerRuntime extends EventEmitter {
   #maxMemoryMb;
   #forceKillOnTimeout;
   #killGracePeriodMs;
+  /** Main-thread BroadcastChannel registry. Workers have their own. */
+  #channelRegistry = new ChannelRegistry();
   #stats = {
     submittedTasks: 0,
     completedTasks: 0,
@@ -335,7 +338,56 @@ export class WorkerRuntime extends EventEmitter {
   async shutdown() {
     this.#isShuttingDown = true;
     this.#queue.destroy(new WorkerRuntimeError('Runtime is shutting down'));
+    // Close every main-thread BroadcastChannel so the native BC handles
+    // do not keep the Event Loop alive after worker shutdown.
+    this.#channelRegistry.closeAll();
     await this.#supervisor.shutdown();
+  }
+
+  /**
+   * Publishes a message to all subscribers of the named channel.
+   *
+   * The message is structured-cloned before delivery, so it may contain
+   * any JSON-safe value (plain objects, arrays, primitives, Dates,
+   * Maps, Sets, ArrayBuffers, etc.). The native BroadcastChannel bus
+   * delivers directly to all subscribers in the same process and to
+   * worker threads without involving the main-thread Event Loop as a
+   * router.
+   *
+   * Returns once the bus has accepted the message. Does NOT wait for
+   * consumer processing.
+   *
+   * @param {string} name Channel name (non-empty string).
+   * @param {*} message Structured-clone-serializable payload.
+   * @throws {TypeError} If `name` is not a string.
+   * @throws {RangeError} If `name` is empty.
+   * @throws {WorkerRuntimeError} If the runtime is shutting down.
+   */
+  broadcast(name, message) {
+    if (this.#isShuttingDown) {
+      throw new WorkerRuntimeError('Cannot broadcast: Runtime is shutting down');
+    }
+    this.#channelRegistry.publish(name, message);
+  }
+
+  /**
+   * Subscribes to broadcasts on the named channel from the main thread.
+   *
+   * Useful for observability, logging, or coordinated shutdown signals.
+   * Worker-side subscribers are managed via `context.channel(name).subscribe(handler)`
+   * inside tasks; main-thread subscribers are useful for the orchestrator.
+   *
+   * @param {string} name Channel name (non-empty string).
+   * @param {(message: any) => void} handler Subscriber function.
+   * @returns {() => boolean} Unsubscribe function. Idempotent.
+   * @throws {TypeError} If `name` is not a string or `handler` is not a function.
+   * @throws {RangeError} If `name` is empty.
+   */
+  subscribe(name, handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('subscribe() requires a function handler');
+    }
+    return this.#channelRegistry.subscribe(name, handler);
   }
 }
 
