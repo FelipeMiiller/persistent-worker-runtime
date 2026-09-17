@@ -33,8 +33,9 @@
 - **213 tests passing** across 72 suites (0 failures, 0 skipped, 0 cancelled).
 - **Coverage**: 95.23% lines / 92.25% branches / 90.68% functions across `src/`.
 - **Lint**: 0 errors, 0 warnings across `src/`, `test/`, `examples/`, `benchmarks/` (Biome 2.x).
-- **Benchmarks**: 11 reproducible benchmarks. Full empirical results in `BENCHMARKS.md`.
-- **Examples**: 7 runnable scripts demonstrating the public API.
+- **Benchmarks**: 14 reproducible benchmarks (3 streaming + 11 others). Full empirical results in `BENCHMARKS.md`.
+- **Examples**: 9 runnable scripts demonstrating the public API (7 prior + `streaming-llm.js` + `streaming-csv-export.js`).
+- **Tests**: 323 passing across 105 suites (`node:test`).
 - **Embedded Skill**: `skills/persistent-worker-runtime/` shipped in npm tarball, ~1k tokens on activation + 6 lazy-loaded references.
 
 ### Completed Features (all implemented and merged into `develop`)
@@ -42,28 +43,28 @@
 2. **`worker-recycling/`** — Complete (ADR-0010).
 3. **`hard-preemption/`** — Complete (ADR-0011).
 4. **`broadcast-channel/`** — Complete (ADR-0013). Inter-worker `BroadcastChannel` for L1 cache invalidation and pub/sub.
+5. **`streaming-results/`** — Complete (ADR-0012). `runtime.stream()` API with AsyncGenerator / structured IPC / per-stream backpressure / queue-aware scheduling / runtime-level telemetry events. T1–T7 delivered across commits `87afbf3`, `36cd760`, `38401b3`, `8fd3b36`, `d493eb8`, `32c9c9d`, `49f6cf6`. Two runnable examples in `examples/`; three dedicated benchmarks (throughput, memory, stress).
 
 ### Recent Quality Wins (latest session)
-- **Biome 2.x** + **husky 9** + **lint-staged 15** for lint infrastructure: pre-commit auto-fixes safe style, blocks on non-fixable errors; pre-push runs full validate.
-- **`npm run validate`** wired into pre-push, prepublish; `npm run lint` and `npm run format` scripts.
-- **Skill split** — SKILL.md body reduced from ~3,500 tokens to ~1,000 tokens; 5 new topic-specific `references/` files loaded on demand.
+- **T5–T7 streaming delivery** — cancellation refinement (unified `stream:aborted`, `MSG_STREAM_PAUSE`/`RESUME` backpressure, `#pendingStreams` queue), runtime-level telemetry (`stream:created`/`chunk`/`end`/`aborted`/`backpressure` + `activeStreams` stats), two runnable examples, README §Streaming section.
+- **CI alignment to nodejs/node** — split workflows (lint, coverage, commit-lint), SHA-pinned actions, concurrency + cancel-in-progress, paths-ignore, draft PR skip, `core-validate-commit@6.0.0`, dependabot zero-deps block, CODEOWNERS, PR template + DCO 1.1.
+- **Biome 2.x** + **husky 9** + **lint-staged 15** for lint infrastructure.
 - **CI flake fix** — `runtime.execute()` without await caused `WorkerCrashError` to fire after test exit on slower CI runners (macOS Node 22). Fixed by `await`ing.
-- **ADR-0013 delivery** — full BroadcastChannel feature: `ChannelRegistry`, main-thread `broadcast()`/`subscribe()`/`unsubscribe()`/`hasSubscribers()`, worker-side `context.channel()`, 25+ new tests, `examples/broadcast-cache-invalidation.js`, `benchmarks/broadcast-fanout.benchmark.js` (18× faster than per-worker dispatch), embedded-skill section.
+- **ADR-0013 delivery** — full BroadcastChannel feature.
 
 ### Documented but NOT YET Implemented (deferred ADRs)
-- **ADR-0012** — Streaming task results via `AsyncGenerator` (`runtime.stream()`). Declared in `src/index.d.ts` as future addition.
 - **ADR-0014** — Adaptive concurrency auto-tuning via ELU.
 
 ---
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Your immediate goal**: Define and implement the next feature spec.
+**Your immediate goal**: PR the completed work to `nodejs/node` for inclusion in stdlib, or implement the next deferred feature (ADR-0014 ELU adaptive concurrency).
 
 ### Recommended candidates (in priority order)
 
-1. **ELU Adaptive Concurrency (ADR-0014)** — Most impactful for production HTTP servers. Auto-throttles pool size under load to protect p99 latency.
-2. **Streaming Task Results (ADR-0012)** — Useful for LLM token streaming and large dataset exports.
+1. **Open PR against `nodejs/node`** — all five T1–T7 commits are pushed to `origin/develop`; CI matrix (Node 22×24 × ubuntu/macos/windows) is green; CI layout mirrors `nodejs/node/.github` so reviewers will find it familiar. See `CONTRIBUTING_TO_NODEJS_PROCESS.md` for the PR template + acceptance criteria nodejs uses.
+2. **ELU Adaptive Concurrency (ADR-0014)** — Most impactful for production HTTP servers. Auto-throttles pool size under load to protect p99 latency.
 
 ### Workflow
 
@@ -71,7 +72,7 @@
    ```bash
    git status              # should be clean on develop
    npm run validate        # lint + test (must pass)
-   npm run benchmark:all   # confirm all 11 benchmarks run
+   npm run benchmark:all   # confirm all 14 benchmarks run
    ```
 2. **Pick a feature** from the candidates above.
 3. **Create the spec** under `.specs/features/<feature-name>/spec.md` and `tasks.md` (see existing specs for structure).
@@ -84,15 +85,16 @@
 
 ```bash
 # Tests + lint
-npm test                 # 213 tests
+npm test                 # 323 tests
 npm run test:coverage    # >95% line coverage
 npm run lint             # biome check (no auto-fix)
+npm run lint:ci          # biome ci (CI strict mode; used by lint.yml)
 npm run lint:fix         # biome check --write --unsafe
 npm run format           # biome format --write
 npm run format:check     # biome format (no fix)
 npm run validate         # lint + test (used by pre-push, prepublish)
 
-# Benchmarks (11 total — full results in BENCHMARKS.md)
+# Benchmarks (14 total — full results in BENCHMARKS.md)
 npm run benchmark:all
 npm run benchmark                  # Event Loop lag under load
 npm run benchmark:stateful         # Warm L1 vs stateless reload (30.7× faster)
@@ -105,9 +107,15 @@ npm run benchmark:scaling          # Worker count scaling
 npm run benchmark:preemption       # Hard preemption watchdog + pool healing
 npm run benchmark:recycling        # Automatic recycling
 npm run benchmark:broadcast        # BroadcastChannel fan-out (18.3× faster)
+npm run benchmark:streaming-throughput  # chunks/sec by stream length × HWM
+npm run benchmark:streaming-memory      # RSS steady-state + queue footprint
+npm run benchmark:streaming-stress      # concurrent streams + 50k chunks + abort latency
+npm run benchmark:default-sizing-memory # ADR-0019 (default workers=1 is 6.45× cheaper)
 
-# Examples (7 total)
+# Examples (9 total)
 node examples/broadcast-cache-invalidation.js
+node examples/streaming-llm.js          # TTFT + signal abort + runtime events
+node examples/streaming-csv-export.js   # backpressure with slow consumer
 
 # Verify ESM exports
 node --input-type=module -e "import * as mod from './src/index.js'; console.log(Object.keys(mod));"
