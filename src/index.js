@@ -14,6 +14,7 @@ export {
   WorkerCrashError,
   WorkerRuntimeError,
 } from './errors.js';
+export { Stream } from './streaming.js';
 export { Supervisor } from './supervisor.js';
 export { TaskHandle } from './task-handle.js';
 export { TaskQueue } from './task-queue.js';
