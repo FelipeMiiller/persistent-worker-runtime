@@ -18,7 +18,7 @@ A production-grade, concurrent execution layer built atop `node:worker_threads`.
 - [The Problem: Event Loop Starvation](#-the-problem-event-loop-starvation)
 - [Architectural Philosophy](#-architectural-philosophy)
 - [Key Capabilities](#-key-capabilities)
-- [Empirical Benchmarks](#-empirical-benchmarks)
+- [Empirical Benchmarks](#-empirical-benchmarks) · [Full results →](BENCHMARKS.md)
 - [Quick Start](#-quick-start)
   - [1. Interactive Computation (Request-Response)](#1-interactive-computation-request-response)
   - [2. Bounded Batch Concurrency (Promise.all Style)](#2-bounded-batch-concurrency-promiseall-style)
@@ -33,6 +33,9 @@ A production-grade, concurrent execution layer built atop `node:worker_threads`.
 - [Comparison with Existing Solutions](#-comparison-with-existing-solutions)
 - [Architecture Decision Records (ADRs)](#-architecture-decision-records-adrs)
 - [Node.js Core RFC Proposal](#-nodejs-core-rfc-proposal)
+- [Benchmarks & Empirical Results](BENCHMARKS.md)
+- [Development Conventions (AGENTS.md)](AGENTS.md)
+- [Handover Guide (HANDOVER.md)](HANDOVER.md)
 - [Running Tests & Benchmarks](#-running-tests--benchmarks)
 - [Examples](#-examples)
 - [License](#-license)
@@ -500,6 +503,9 @@ Every major architectural choice is documented following the **MADR** format in 
 * **[ADR-0012](docs/adr/0012-streaming-task-results-via-async-generators.md)**: Streaming Task Results via Async Generators and Structured IPC
 * **[ADR-0013](docs/adr/0013-worker-inter-communication-via-broadcast-channel.md)**: Worker Inter-Communication via Native BroadcastChannel
 * **[ADR-0014](docs/adr/0014-adaptive-concurrency-auto-tuning-via-event-loop-utilization.md)**: Adaptive Concurrency Auto-Tuning via Event Loop Utilization (ELU)
+* **[ADR-0015](docs/adr/0015-promise-rejection-contract-for-task-queue-waiters.md)**: Promise Rejection Contract for TaskQueue Waiters (destroy() rejects in-flight enqueue Promises)
+* **[ADR-0016](docs/adr/0016-priority-routing-and-fairness.md)**: Priority Routing and Fairness (priority tier dequeue + FIFO-within-tier)
+* **[ADR-0017](docs/adr/0017-cooperative-cancellation-via-abortsignal.md)**: Cooperative Cancellation via AbortSignal (TaskAbortedError, signal-aware dispatch)
 
 ---
 
@@ -511,19 +517,19 @@ This codebase serves as the reference implementation for a proposal to the **Nod
 
 ---
 
-## 🧪 Running Tests & Benchmarks
+## 🧪 Running Tests, Lint & Benchmarks
 
 ```bash
-# Run all unit tests with native Node.js test runner
-npm test
+# ── Quality gates ──────────────────────────────────────────────────────
+npm test                # 213 tests across 72 suites (native node:test)
+npm run test:coverage   # >95% line coverage report
+npm run lint            # biome check (lint src/test/examples/benchmarks)
+npm run lint:fix        # biome check --write --unsafe (auto-fix what's safe)
+npm run format          # biome format --write (apply formatter)
+npm run validate        # lint + test (wired into pre-push + prepublish)
 
-# Run code coverage report (>90% line coverage across all files)
-npm run test:coverage
-
-# Run the full benchmark suite (10 benchmarks)
-npm run benchmark:all
-
-# Or run individual benchmarks
+# ── Benchmarks (11 total — full results in BENCHMARKS.md) ─────────────
+npm run benchmark:all   # Run all 11 (~2 minutes on a modern workstation)
 npm run benchmark              # Event Loop lag under load
 npm run benchmark:stateful     # Warm L1 memory vs stateless reload
 npm run benchmark:concurrency  # Bounded batch concurrency
@@ -536,6 +542,18 @@ npm run benchmark:preemption   # Hard preemption watchdog + pool healing
 npm run benchmark:recycling    # Automatic worker recycling
 npm run benchmark:broadcast    # BroadcastChannel fan-out vs. per-worker dispatch
 ```
+
+### Pre-commit hooks
+
+This repo uses **husky 9** + **lint-staged 15**:
+
+| Hook | Runs |
+| --- | --- |
+| `pre-commit` | `lint-staged` (biome auto-fix on staged files) + `npm test` |
+| `pre-push` | `npm run validate` (full lint + test) |
+| `prepublish` | `npm run validate` |
+
+Lint violations that can't be auto-fixed (e.g. `debugger`, suspicious code) **block the commit**.
 
 ## 📚 Examples
 
