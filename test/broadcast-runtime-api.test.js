@@ -60,9 +60,11 @@ describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => 
       assert.deepEqual(result, { received: { from: 'main', n: 1 } });
     });
 
-    it('returns immediately (does not wait for consumer processing)', () => {
-      // Subscribe but never resolve; broadcast should not hang.
-      runtime.execute({
+    it('returns immediately (does not wait for consumer processing)', async () => {
+      // Wait for a worker to settle before measuring broadcast latency, so
+      // an in-flight task cannot crash mid-measurement and turn this into
+      // an async-after-test-end error.
+      await runtime.execute({
         type: 'no-listener-task',
         fn: (_p, _s, _context) => 'done',
       });
