@@ -28,27 +28,33 @@
 
 ## 📍 3. Current State Snapshot
 
-### Code Health (as of last commit `7acdfe6`)
-- **213 tests passing** across 72 suites (0 failures, 0 skipped, 0 cancelled).
-- **Coverage**: 95.23% lines / 92.25% branches / 90.68% functions across `src/`.
+### Code Health (as of last commit `77394f6`)
+- **Tests**: 323 passing across 105 suites (`node:test`), 0 failures, 0 skipped, 0 cancelled.
+- **Coverage**: 95.62% lines / 90.57% branches / 92.56% functions across `src/`.
 - **Lint**: 0 errors, 0 warnings across `src/`, `test/`, `examples/`, `benchmarks/` (Biome 2.x).
-- **Benchmarks**: 14 reproducible benchmarks (3 streaming + 11 others). Full empirical results in `BENCHMARKS.md`.
-- **Examples**: 9 runnable scripts demonstrating the public API (7 prior + `streaming-llm.js` + `streaming-csv-export.js`).
-- **Tests**: 323 passing across 105 suites (`node:test`).
+- **Benchmarks**: 17 reproducible scripts (5 streaming + 12 others). Full empirical results in `BENCHMARKS.md`.
+- **Examples**: 9 runnable scripts demonstrating the public API.
 - **Embedded Skill**: `skills/persistent-worker-runtime/` shipped in npm tarball, ~1k tokens on activation + 6 lazy-loaded references.
 
 ### Completed Features (all implemented and merged into `develop`)
 1. **`persistent-worker-runtime/`** — Initial implementation (ADR-0001..0009).
 2. **`worker-recycling/`** — Complete (ADR-0010).
 3. **`hard-preemption/`** — Complete (ADR-0011).
-4. **`broadcast-channel/`** — Complete (ADR-0013). Inter-worker `BroadcastChannel` for L1 cache invalidation and pub/sub.
-5. **`streaming-results/`** — Complete (ADR-0012). `runtime.stream()` API with AsyncGenerator / structured IPC / per-stream backpressure / queue-aware scheduling / runtime-level telemetry events. T1–T7 delivered across commits `87afbf3`, `36cd760`, `38401b3`, `8fd3b36`, `d493eb8`, `32c9c9d`, `49f6cf6`. Two runnable examples in `examples/`; three dedicated benchmarks (throughput, memory, stress).
+4. **`streaming-results/`** — Complete (ADR-0012). `runtime.stream()` API with AsyncGenerator / structured IPC / per-stream backpressure / queue-aware scheduling / runtime-level telemetry events. T1–T7 delivered across commits `87afbf3`, `36cd760`, `38401b3`, `8fd3b36`, `d493eb8`, `32c9c9d`, `49f6cf6`. Two runnable examples in `examples/`; five dedicated benchmarks (throughput, memory, stress, queue-dispatch, abort-latency).
+5. **`broadcast-channel/`** — Complete (ADR-0013). Inter-worker `BroadcastChannel` for L1 cache invalidation and pub/sub.
+6. **`task-queue-waiters/`** — Complete (ADR-0015). Promise rejection contract: `destroy()` rejects in-flight enqueue Promises so abandoned waiters can't strand the queue.
+7. **`priority-routing/`** — Complete (ADR-0016). Numeric task priority with tier dequeue + FIFO-within-tier.
+8. **`cooperative-cancellation/`** — Complete (ADR-0017). `AbortSignal` integration; emits `TaskAbortedError`, signal-aware dispatch.
+9. **`fire-and-forget-hazard/`** — Complete (ADR-0018). Test flake prevention by always `await`ing `runtime.execute()` (or using `dispatch()`).
+10. **`default-pool-sizing/`** — Complete (ADR-0019). `workers=1` default + warning on >4 cores; empirically 6.95× cheaper than legacy `os.availableParallelism()` on multi-core hosts.
 
-### Recent Quality Wins (latest session)
+### Recent Quality Wins (since last handover at `7acdfe6`)
 - **T5–T7 streaming delivery** — cancellation refinement (unified `stream:aborted`, `MSG_STREAM_PAUSE`/`RESUME` backpressure, `#pendingStreams` queue), runtime-level telemetry (`stream:created`/`chunk`/`end`/`aborted`/`backpressure` + `activeStreams` stats), two runnable examples, README §Streaming section.
+- **Streaming benchmarks** (`e60c348`) — added `streaming-queue-dispatch` + `streaming-abort-latency`; total benchmark count now 17.
+- **CI layout hardened** (`010b49b`) — split workflows (lint, coverage, commit-lint), SHA-pinned actions, concurrency + cancel-in-progress, paths-ignore, draft PR skip, `core-validate-commit@6.0.0`, dependabot zero-deps block, CODEOWNERS, PR template + DCO 1.1.
+- **CI flake fix** — `runtime.execute()` without await caused `WorkerCrashError` to fire after test exit on slower CI runners (macOS Node 22). Fixed by `await`ing in tests.
 - **Biome 2.x** + **husky 9** + **lint-staged 15** for lint infrastructure.
-- **CI flake fix** — `runtime.execute()` without await caused `WorkerCrashError` to fire after test exit on slower CI runners (macOS Node 22). Fixed by `await`ing.
-- **ADR-0013 delivery** — full BroadcastChannel feature.
+- **Docs cleanup** (`77394f6`) — stripped internal Node.js core submission language from the repository (per Felipe's direction). The RFC draft itself (`NODEJS_RFC_PROPOSAL_DRAFT.md`) is preserved as a design proposal without the upstream PR roadmap context.
 
 ### Documented but NOT YET Implemented (deferred ADRs)
 - **ADR-0014** — Adaptive concurrency auto-tuning via ELU.
@@ -70,7 +76,7 @@
    ```bash
    git status              # should be clean on develop
    npm run validate        # lint + test (must pass)
-   npm run benchmark:all   # confirm all 14 benchmarks run
+   npm run benchmark:all   # confirm all 17 benchmarks run
    ```
 2. **Create the spec** under `.specs/features/<feature-name>/spec.md` and `tasks.md` (see existing specs for structure).
 3. **Implement T1 → T2 → ...** following the same conventional-commit cadence used by the previous features.

@@ -572,7 +572,7 @@ Every major architectural choice is documented following the **MADR** format in 
 
 ```bash
 # ── Quality gates ──────────────────────────────────────────────────────
-npm test                # 213 tests across 72 suites (native node:test)
+npm test                # 323 tests across 105 suites (native node:test)
 npm run test:coverage   # >95% line coverage report
 npm run lint            # biome check (lint src/test/examples/benchmarks)
 npm run lint:fix        # biome check --write --unsafe (auto-fix what's safe)
