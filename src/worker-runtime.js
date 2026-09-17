@@ -58,13 +58,47 @@ export class WorkerRuntime extends EventEmitter {
       throw new RangeError('killGracePeriodMs must be a non-negative number');
     }
 
+    // Validate resourceLimits before any worker spawn. See ADR-0019 §2.
+    if (options.resourceLimits !== undefined) {
+      const rl = options.resourceLimits;
+      if (rl === null || typeof rl !== 'object') {
+        throw new TypeError('resourceLimits must be an object or undefined');
+      }
+      for (const k of [
+        'maxYoungGenerationSizeMb',
+        'maxOldGenerationSizeMb',
+        'codeRangeSizeMb',
+        'stackSizeMb',
+      ]) {
+        if (rl[k] !== undefined && (typeof rl[k] !== 'number' || rl[k] <= 0)) {
+          throw new RangeError(`resourceLimits.${k} must be a positive number (got ${rl[k]})`);
+        }
+      }
+    }
+
     this.#maxTasksPerWorker = maxTasksPerWorker;
     this.#maxMemoryMb = maxMemoryMb;
     this.#forceKillOnTimeout = forceKillOnTimeout;
     this.#killGracePeriodMs = killGracePeriodMs;
 
-    const defaultWorkers = Math.max(1, availableParallelism() - 1);
-    const workerCount = options.workers || defaultWorkers;
+    // Default worker pool size = 1 (was availableParallelism() - 1; see ADR-0019).
+    // On hosts with >4 cores, emit a startup warning so users on big boxes know
+    // they can opt up via createWorkerRuntime({ workers: N }).
+    const userSpecifiedWorkerCount = typeof options.workers === 'number';
+    const defaultWorkers = 1;
+    const workerCount = userSpecifiedWorkerCount ? options.workers : defaultWorkers;
+    if (!userSpecifiedWorkerCount) {
+      const cores = availableParallelism();
+      if (cores > 4) {
+        process.emitWarning(
+          `persistent-worker-runtime: started with default workers=1 on a ${cores}-core host. ` +
+            `Each Node worker is a separate V8 isolate (~30-50 MB RSS) and uses a parallel OS thread; ` +
+            `size the pool explicitly via createWorkerRuntime({ workers: N }) where N <= ` +
+            `os.availableParallelism() - 1. See BENCHMARKS.md §Memory and ADR-0019 for sizing guidance.`,
+          'PersistentWorkerRuntimeDefaultSizing',
+        );
+      }
+    }
 
     this.#queue = new TaskQueue({
       maxQueueSize: options.maxQueueSize || 2000,
