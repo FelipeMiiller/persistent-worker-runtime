@@ -1,8 +1,8 @@
-import { Worker } from 'node:worker_threads';
 import { EventEmitter } from 'node:events';
-import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { WorkerCrashError, WorkerRuntimeError, TaskTimeoutError } from './errors.js';
+import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
+import { TaskTimeoutError, WorkerCrashError, WorkerRuntimeError } from './errors.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -130,7 +130,11 @@ export class WorkerHandle extends EventEmitter {
           this.#lastMemoryUsageBytes = message.memoryUsageBytes;
         }
 
-        if (this.#status !== 'recycling' && this.#status !== 'terminating' && this.#status !== 'terminated') {
+        if (
+          this.#status !== 'recycling' &&
+          this.#status !== 'terminating' &&
+          this.#status !== 'terminated'
+        ) {
           this.#status = 'idle';
         }
         this.#tasksCompleted++;
@@ -174,8 +178,8 @@ export class WorkerHandle extends EventEmitter {
         task.reject(
           new WorkerCrashError(
             `Worker ${this.id} crashed with exit code ${exitCode} while running task ${task.id}`,
-            { workerId: this.id, exitCode, taskId: task.id }
-          )
+            { workerId: this.id, exitCode, taskId: task.id },
+          ),
         );
       }
 
@@ -291,7 +295,7 @@ export class WorkerHandle extends EventEmitter {
         timeoutMs: currentTask.timeoutMs,
         preempted: true,
         workerId: this.id,
-      }
+      },
     );
 
     currentTask.reject(timeoutErr);
@@ -305,7 +309,10 @@ export class WorkerHandle extends EventEmitter {
     });
 
     if (this.#worker) {
-      this.#worker.terminate().catch(() => {});
+      this.#worker.terminate().catch(() => {
+        // Intentional: termination errors are not actionable — the
+        // worker is already in a crash state.
+      });
     }
   }
 

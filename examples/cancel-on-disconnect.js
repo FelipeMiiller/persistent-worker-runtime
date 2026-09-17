@@ -10,8 +10,8 @@
  * Run: `node examples/cancel-on-disconnect.js`
  */
 
-import { createWorkerRuntime } from '../src/index.js';
 import { TaskAbortedError } from '../src/errors.js';
+import { createWorkerRuntime } from '../src/index.js';
 
 async function main() {
   const runtime = await createWorkerRuntime({ workers: 2 });

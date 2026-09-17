@@ -36,7 +36,7 @@ async function main() {
           processedPixels: totalPixels,
         };
       },
-    }))
+    })),
   );
 
   console.log('All images resized successfully:');

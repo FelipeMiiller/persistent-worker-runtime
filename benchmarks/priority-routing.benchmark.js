@@ -49,12 +49,17 @@ async function runBenchmark() {
   const firstHighIdxT1 = completionOrder.findIndex((r) => r.priority === 10);
   const lastHighIdxT1 = completionOrder.map((r) => r.priority).lastIndexOf(10);
   const firstLowIdxT1 = completionOrder.findIndex((r) => r.priority === 0);
-  const allHighBeforeLow = firstHighIdxT1 !== -1 && firstLowIdxT1 !== -1 && lastHighIdxT1 < firstLowIdxT1;
-  console.log(`  -> All priority-10 tasks completed before any priority-0 task: ${allHighBeforeLow ? 'YES' : 'NO'}`);
+  const allHighBeforeLow =
+    firstHighIdxT1 !== -1 && firstLowIdxT1 !== -1 && lastHighIdxT1 < firstLowIdxT1;
+  console.log(
+    `  -> All priority-10 tasks completed before any priority-0 task: ${allHighBeforeLow ? 'YES' : 'NO'}`,
+  );
   console.log(`  -> Completion order honors priority tiers: ${allHighBeforeLow ? 'YES' : 'NO'}\n`);
 
   // === Test 2: Starvation resistance ===
-  console.log('[2/3] Starvation test: stream low-priority traffic while injecting high-priority bursts...');
+  console.log(
+    '[2/3] Starvation test: stream low-priority traffic while injecting high-priority bursts...',
+  );
   const runtime2 = await createWorkerRuntime({ workers: 1 });
   const seenTags = [];
   const allPromises2 = [];
@@ -98,12 +103,16 @@ async function runBenchmark() {
   // Find first high-priority completion; count how many low-priority tasks completed before it
   const firstHighIdx = seenTags.findIndex((s) => s.priority === 10);
   const lowBeforeFirstHigh = seenTags.slice(0, firstHighIdx).filter((s) => s.priority === 0).length;
-  console.log(`  -> Tasks completed before first high-priority: ${firstHighIdx} (low: ${lowBeforeFirstHigh})`);
+  console.log(
+    `  -> Tasks completed before first high-priority: ${firstHighIdx} (low: ${lowBeforeFirstHigh})`,
+  );
   console.log(`  -> High-priority tasks observed: ${highPriortySeen}/25`);
   console.log(`  -> Low-priority tasks observed: ${lowPrioritySeen}/50\n`);
 
   // === Test 3: Dispatch latency by priority ===
-  console.log('[3/3] Dispatch latency: how fast does dispatch() return at high vs low priority?...');
+  console.log(
+    '[3/3] Dispatch latency: how fast does dispatch() return at high vs low priority?...',
+  );
   const runtime3 = await createWorkerRuntime({ workers: 1 });
   const samples = { high: [], low: [] };
   const allPromises3 = [];
@@ -122,14 +131,20 @@ async function runBenchmark() {
   await runtime3.shutdown();
 
   const avg = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
-  console.log(`  -> Average dispatch latency (priority=10): ${(avg(samples.high) * 1000).toFixed(2)} microseconds`);
-  console.log(`  -> Average dispatch latency (priority=0):  ${(avg(samples.low) * 1000).toFixed(2)} microseconds`);
+  console.log(
+    `  -> Average dispatch latency (priority=10): ${(avg(samples.high) * 1000).toFixed(2)} microseconds`,
+  );
+  console.log(
+    `  -> Average dispatch latency (priority=0):  ${(avg(samples.low) * 1000).toFixed(2)} microseconds`,
+  );
   console.log('  -> Dispatch() never blocks the Event Loop regardless of priority.\n');
 
   console.log('=====================================================================');
   console.log('CONCLUSION:');
   console.log('- Higher-priority tasks are dequeued first; ties preserve FIFO order.');
-  console.log('- The queue is starvation-resistant: low-priority work still progresses between bursts.');
+  console.log(
+    '- The queue is starvation-resistant: low-priority work still progresses between bursts.',
+  );
   console.log('- Dispatch() latency is sub-millisecond and identical regardless of priority.');
   console.log('=====================================================================');
 }

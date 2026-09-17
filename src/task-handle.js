@@ -24,7 +24,8 @@ export class TaskHandle {
     this.signal = options.signal || null;
     this.forceKillOnTimeout = Boolean(options.forceKillOnTimeout);
 
-    const killGracePeriodMs = options.killGracePeriodMs === undefined ? 500 : options.killGracePeriodMs;
+    const killGracePeriodMs =
+      options.killGracePeriodMs === undefined ? 500 : options.killGracePeriodMs;
     if (typeof killGracePeriodMs !== 'number' || Number.isNaN(killGracePeriodMs)) {
       throw new TypeError('killGracePeriodMs must be a non-negative number');
     }
@@ -33,7 +34,8 @@ export class TaskHandle {
     }
     this.killGracePeriodMs = killGracePeriodMs;
 
-    this.fnCode = options.fnCode || (typeof options.fn === 'function' ? options.fn.toString() : null);
+    this.fnCode =
+      options.fnCode || (typeof options.fn === 'function' ? options.fn.toString() : null);
     this.transferList = options.transferList || [];
     this.retries = options.retries || 0;
     this.retryDelayMs = options.retryDelayMs || 500;
@@ -117,11 +119,14 @@ export class TaskHandle {
     if (this.timeoutMs > 0 && !this.forceKillOnTimeout) {
       this.#executionTimer = setTimeout(() => {
         this.reject(
-          new TaskTimeoutError(`Task ${this.id} exceeded execution timeout of ${this.timeoutMs}ms`, {
-            taskId: this.id,
-            timeoutMs: this.timeoutMs,
-            preempted: false,
-          })
+          new TaskTimeoutError(
+            `Task ${this.id} exceeded execution timeout of ${this.timeoutMs}ms`,
+            {
+              taskId: this.id,
+              timeoutMs: this.timeoutMs,
+              preempted: false,
+            },
+          ),
         );
       }, this.timeoutMs);
     }
@@ -145,6 +150,7 @@ export class TaskHandle {
         try {
           cb(result);
         } catch (err) {
+          // biome-ignore lint/suspicious/noConsole: legitimate error logging when user callbacks throw
           console.error(`Unhandled error in TaskHandle ${this.id} onComplete:`, err);
         }
       }
@@ -169,6 +175,7 @@ export class TaskHandle {
         try {
           cb(error);
         } catch (err) {
+          // biome-ignore lint/suspicious/noConsole: legitimate error logging when user callbacks throw
           console.error(`Unhandled error in TaskHandle ${this.id} onError:`, err);
         }
       }

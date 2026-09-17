@@ -31,7 +31,7 @@ async function runBenchmark() {
 
     try {
       await promise;
-    } catch (err) {
+    } catch (_err) {
       const latency = performance.now() - t0;
       latencies.push(latency);
     }
@@ -46,7 +46,9 @@ async function runBenchmark() {
 
   console.log(`  -> ${latencies.length}/${iterations} cancellations observed`);
   console.log(`  -> Latency avg: ${avg(latencies).toFixed(2)}ms`);
-  console.log(`  -> Latency p50: ${p50.toFixed(2)}ms | p95: ${p95.toFixed(2)}ms | p99: ${p99.toFixed(2)}ms | max: ${max.toFixed(2)}ms`);
+  console.log(
+    `  -> Latency p50: ${p50.toFixed(2)}ms | p95: ${p95.toFixed(2)}ms | p99: ${p99.toFixed(2)}ms | max: ${max.toFixed(2)}ms`,
+  );
   console.log('  -> Note: latency = abort trigger time (~50ms) + worker check interval\n');
 
   // === Test 2: Pre-aborted signal ===
@@ -87,12 +89,14 @@ async function runBenchmark() {
             return i;
           },
         })
-        .catch((err) => ({ tag: i, error: err.name }))
+        .catch((err) => ({ tag: i, error: err.name })),
     );
   }
 
   // Cancel all at once
-  setTimeout(() => controllers.forEach((c) => c.abort()), 30);
+  setTimeout(() => {
+    for (const c of controllers) c.abort();
+  }, 30);
 
   const results = await Promise.all(promises);
   const aborted = results.filter((r) => r.error).length;
@@ -100,7 +104,9 @@ async function runBenchmark() {
 
   console.log(`  -> Submitted: 50 | Cancelled: ${aborted}/50`);
   console.log(`  -> Wall time for batch cancel: ${wallTime.toFixed(2)}ms`);
-  console.log(`  -> Per-cancel throughput: ${(aborted / (wallTime / 1000)).toFixed(0)} cancels/sec`);
+  console.log(
+    `  -> Per-cancel throughput: ${(aborted / (wallTime / 1000)).toFixed(0)} cancels/sec`,
+  );
 
   await runtime.shutdown();
 

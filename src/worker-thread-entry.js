@@ -77,7 +77,7 @@ async function processTask(message) {
         'payload',
         'state',
         'context',
-        `return (${fnCode})(payload, state, context);`
+        `return (${fnCode})(payload, state, context);`,
       );
       result = await fn(payload, localState, context);
     } else if (typeof customHandler === 'function') {
@@ -117,7 +117,7 @@ async function processTask(message) {
 
 // Listen for tasks from the main thread
 parentPort.on('message', (message) => {
-  if (!message || !message.taskId) return;
+  if (!message?.taskId) return;
   processTask(message);
 });
 

@@ -1,9 +1,9 @@
-import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { Supervisor } from '../src/supervisor.js';
-import { WorkerRuntime } from '../src/worker-runtime.js';
+import { after, before, describe, it } from 'node:test';
 import { WorkerRuntimeError } from '../src/errors.js';
 import { createWorkerRuntime } from '../src/index.js';
+import { Supervisor } from '../src/supervisor.js';
+import { WorkerRuntime } from '../src/worker-runtime.js';
 
 describe('Supervisor — unit-level coverage', () => {
   let runtime;
@@ -101,7 +101,7 @@ describe('WorkerRuntime — dispatch validation paths', () => {
           assert.ok(err instanceof WorkerRuntimeError);
           assert.equal(err.message, 'Cannot dispatch tasks: Runtime is shutting down');
           return true;
-        }
+        },
       );
     });
 
@@ -114,10 +114,7 @@ describe('WorkerRuntime — dispatch validation paths', () => {
 
   describe('executeAll()', () => {
     it('throws TypeError when given non-array', async () => {
-      await assert.rejects(
-        runtime.executeAll('not-an-array'),
-        (err) => err instanceof TypeError
-      );
+      await assert.rejects(runtime.executeAll('not-an-array'), (err) => err instanceof TypeError);
     });
   });
 
@@ -125,14 +122,20 @@ describe('WorkerRuntime — dispatch validation paths', () => {
     it('throws TypeError when given non-array', async () => {
       await assert.rejects(
         runtime.executeAllSettled({ not: 'array' }),
-        (err) => err instanceof TypeError
+        (err) => err instanceof TypeError,
       );
     });
 
     it('returns one entry per task with status fulfilled or rejected', async () => {
       const tasks = [
         { type: 'noop_ok', fn: () => 1 },
-        { type: 'noop_err', fn: () => { throw new Error('boom'); }, retries: 0 },
+        {
+          type: 'noop_err',
+          fn: () => {
+            throw new Error('boom');
+          },
+          retries: 0,
+        },
       ];
       const results = await runtime.executeAllSettled(tasks);
       assert.equal(results.length, 2);
@@ -156,7 +159,7 @@ describe('WorkerRuntime — dispatch validation paths', () => {
         { type: 'noop_2', fn: () => 2 },
       ]);
       assert.equal(handles.length, 2);
-      handles.forEach((h) => h.promise.catch(() => {}));
+      for (const h of handles) h.promise.catch(() => {});
     });
   });
 
@@ -164,37 +167,25 @@ describe('WorkerRuntime — dispatch validation paths', () => {
     it('rejects calls during shutdown', async () => {
       const r = await createWorkerRuntime({ workers: 1 });
       await r.shutdown();
-      await assert.rejects(
-        r.createWorker(),
-        (err) => {
-          assert.ok(err instanceof WorkerRuntimeError);
-          assert.equal(err.message, 'Cannot create worker: Runtime is shutting down');
-          return true;
-        }
-      );
+      await assert.rejects(r.createWorker(), (err) => {
+        assert.ok(err instanceof WorkerRuntimeError);
+        assert.equal(err.message, 'Cannot create worker: Runtime is shutting down');
+        return true;
+      });
     });
   });
 
   describe('Constructor validation', () => {
     it('rejects NaN killGracePeriodMs with TypeError', () => {
-      assert.throws(
-        () => new WorkerRuntime({ killGracePeriodMs: NaN }),
-        TypeError
-      );
+      assert.throws(() => new WorkerRuntime({ killGracePeriodMs: NaN }), TypeError);
     });
 
     it('rejects negative killGracePeriodMs with RangeError', () => {
-      assert.throws(
-        () => new WorkerRuntime({ killGracePeriodMs: -1 }),
-        RangeError
-      );
+      assert.throws(() => new WorkerRuntime({ killGracePeriodMs: -1 }), RangeError);
     });
 
     it('rejects non-number killGracePeriodMs with TypeError', () => {
-      assert.throws(
-        () => new WorkerRuntime({ killGracePeriodMs: 'oops' }),
-        TypeError
-      );
+      assert.throws(() => new WorkerRuntime({ killGracePeriodMs: 'oops' }), TypeError);
     });
   });
 });

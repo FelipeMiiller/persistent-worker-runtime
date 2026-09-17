@@ -1,6 +1,6 @@
-import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createWorkerRuntime, WorkerRuntime } from '../src/index.js';
+import { after, before, describe, it } from 'node:test';
+import { createWorkerRuntime } from '../src/index.js';
 
 describe('Persistent Worker Runtime Test Suite', () => {
   let runtime;
@@ -105,7 +105,7 @@ describe('Persistent Worker Runtime Test Suite', () => {
           state.set('user:101', user);
           return user;
         },
-      })
+      }),
     );
 
     assert.equal(result.credits, 150);

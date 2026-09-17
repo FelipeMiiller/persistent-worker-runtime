@@ -20,7 +20,7 @@ function makeFakeImage(width, height) {
   const view = new Uint8Array(buf);
   // Fill with a deterministic gradient so we can verify the worker received it intact.
   for (let i = 0; i < view.length; i++) {
-    view[i] = (i % 256);
+    view[i] = i % 256;
   }
   return buf;
 }
@@ -55,13 +55,17 @@ async function main() {
   });
   const elapsed = performance.now() - t0;
 
-  console.log(`\nWorker processed ${result.pixels.toLocaleString()} pixels in ${elapsed.toFixed(2)}ms`);
+  console.log(
+    `\nWorker processed ${result.pixels.toLocaleString()} pixels in ${elapsed.toFixed(2)}ms`,
+  );
   console.log(`Average brightness (red channel): ${result.averageBrightness.toFixed(2)}`);
   console.log(`Sender buffer after transfer: ${imageBuffer.byteLength} bytes (should be 0)`);
 
   if (imageBuffer.byteLength === 0) {
     console.log('\n✅ Buffer was transferred (zero-copy); sender cannot reuse it.');
-    console.log('   In a real app you would NOT keep a reference to the buffer on the sender side.');
+    console.log(
+      '   In a real app you would NOT keep a reference to the buffer on the sender side.',
+    );
   } else {
     console.log('\n⚠️  Buffer still has data on sender side (transfer may have failed).');
   }

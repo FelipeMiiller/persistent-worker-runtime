@@ -66,7 +66,7 @@ export class TaskQueue {
             taskId: task.id,
             waitedMs: timeoutMs,
             queueDepth: this.#queue.length,
-          }
+          },
         );
         task.reject(err);
         reject(err);
@@ -91,14 +91,14 @@ export class TaskQueue {
     if (worker && (worker.affinityKey || worker.name)) {
       const targetKey = worker.affinityKey || worker.name;
       selectedIndex = this.#queue.findIndex(
-        (task) => !task.isSettled && task.affinityKey === targetKey
+        (task) => !task.isSettled && task.affinityKey === targetKey,
       );
     }
 
     // 2. Otherwise, check for any unpinned task (affinityKey is null)
     if (selectedIndex === -1) {
       selectedIndex = this.#queue.findIndex(
-        (task) => !task.isSettled && (!task.affinityKey || !worker?.isDedicated)
+        (task) => !task.isSettled && (!task.affinityKey || !worker?.isDedicated),
       );
     }
 
@@ -148,9 +148,7 @@ export class TaskQueue {
         // Abandoned waiter: clear its timer and reject the enqueue promise
         // so callers awaiting enqueue() don't leak unhandled rejections.
         if (nextWaiter.timer) clearTimeout(nextWaiter.timer);
-        nextWaiter.reject(
-          new Error('Task was settled before queue capacity was available')
-        );
+        nextWaiter.reject(new Error('Task was settled before queue capacity was available'));
         continue;
       }
       nextWaiter.resolve();

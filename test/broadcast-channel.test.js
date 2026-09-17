@@ -1,5 +1,5 @@
-import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { afterEach, beforeEach, describe, it } from 'node:test';
 import { ChannelRegistry, validateChannelName } from '../src/broadcast-channel.js';
 
 /**
@@ -257,7 +257,10 @@ describe('ChannelRegistry', () => {
 
       const original = {
         when: new Date('2026-09-16T19:00:00.000Z'),
-        tags: new Map([['a', 1], ['b', 2]]),
+        tags: new Map([
+          ['a', 1],
+          ['b', 2],
+        ]),
         items: new Set([1, 2, 3, 4]),
         buffer: new ArrayBuffer(8),
         nested: { deep: { value: [1, 'two', null] } },
@@ -324,7 +327,7 @@ describe('ChannelRegistry', () => {
       // Use a Promise-resolved-on-first-message signal so we know exactly
       // when delivery has actually happened (setImmediate alone was racy).
       const firstArrived = new Promise((resolve) => {
-        receiver.subscribe((msg) => {
+        receiver.subscribe((_msg) => {
           count++;
           if (count === 1) resolve();
         });

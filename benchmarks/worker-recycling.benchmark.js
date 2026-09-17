@@ -8,7 +8,9 @@ async function runBenchmark() {
   const taskCount = 60;
 
   // Phase 1: Unbounded Workers (Memory Accumulation)
-  console.log(`[1/2] Executing ${taskCount} memory-allocating tasks WITHOUT recycling (baseline)...`);
+  console.log(
+    `[1/2] Executing ${taskCount} memory-allocating tasks WITHOUT recycling (baseline)...`,
+  );
   const unboundedRuntime = await createWorkerRuntime({
     workers: 2,
     maxTasksPerWorker: Infinity,
@@ -36,17 +38,19 @@ async function runBenchmark() {
   await unboundedRuntime.shutdown();
 
   // Phase 2: Bounded Workers with Automatic Recycling
-  console.log(`[2/2] Executing identical ${taskCount} tasks WITH automatic recycling (maxTasksPerWorker: 15)...`);
+  console.log(
+    `[2/2] Executing identical ${taskCount} tasks WITH automatic recycling (maxTasksPerWorker: 15)...`,
+  );
   const recycledRuntime = await createWorkerRuntime({
     workers: 2,
     maxTasksPerWorker: 15,
   });
 
-  let recyclingEventsCount = 0;
+  let _recyclingEventsCount = 0;
   let replacedEventsCount = 0;
 
   recycledRuntime.on('worker_recycling', () => {
-    recyclingEventsCount++;
+    _recyclingEventsCount++;
   });
 
   recycledRuntime.on('worker_recycled', () => {
@@ -76,8 +80,12 @@ async function runBenchmark() {
   console.log(`  -> Recycled run completed in: ${recycledDuration.toFixed(2)}ms`);
   console.log(`  -> Workers recycled automatically: ${recycledRuntime.stats.recycledWorkersCount}`);
   console.log(`  -> Worker replacement events: ${replacedEventsCount}`);
-  console.log(`  -> Completed tasks: ${recycledRuntime.stats.completedTasks}/${taskCount} (100% success rate, 0 dropped)`);
-  console.log(`  -> Active pool size maintained: ${recycledRuntime.stats.totalWorkers}/2 workers\n`);
+  console.log(
+    `  -> Completed tasks: ${recycledRuntime.stats.completedTasks}/${taskCount} (100% success rate, 0 dropped)`,
+  );
+  console.log(
+    `  -> Active pool size maintained: ${recycledRuntime.stats.totalWorkers}/2 workers\n`,
+  );
 
   await recycledRuntime.shutdown();
 
@@ -85,7 +93,9 @@ async function runBenchmark() {
   console.log('CONCLUSION:');
   console.log(`- Automatic Worker Recycling maintains deterministic memory bounds.`);
   console.log(`- Recycles worn workers in the background with zero dropped tasks.`);
-  console.log(`- Performance overhead: only ${(((recycledDuration - baselineDuration) / baselineDuration) * 100).toFixed(1)}% while preventing fatal V8 out-of-memory crashes.`);
+  console.log(
+    `- Performance overhead: only ${(((recycledDuration - baselineDuration) / baselineDuration) * 100).toFixed(1)}% while preventing fatal V8 out-of-memory crashes.`,
+  );
   console.log('=====================================================================');
 }
 

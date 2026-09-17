@@ -1,7 +1,7 @@
-import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createWorkerRuntime } from '../src/index.js';
+import { after, before, describe, it } from 'node:test';
 import { TaskAbortedError } from '../src/errors.js';
+import { createWorkerRuntime } from '../src/index.js';
 
 describe('Cancellation via AbortSignal', () => {
   let runtime;
@@ -25,7 +25,7 @@ describe('Cancellation via AbortSignal', () => {
         signal: controller.signal,
         fn: () => 'unreachable',
       }),
-      (err) => err instanceof TaskAbortedError
+      (err) => err instanceof TaskAbortedError,
     );
   });
 

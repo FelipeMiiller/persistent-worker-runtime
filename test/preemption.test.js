@@ -1,15 +1,15 @@
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
-  WorkerRuntime,
+  createWorkerRuntime,
   Supervisor,
-  WorkerHandle,
   TaskHandle,
   TaskTimeoutError,
-  createWorkerRuntime,
+  WorkerHandle,
+  WorkerRuntime,
 } from '../src/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -72,33 +72,24 @@ describe('Hard Preemption - Config, Error & Validation (T1)', () => {
     });
 
     it('throws TypeError if killGracePeriodMs is a string', () => {
-      assert.throws(
-        () => new TaskHandle({ killGracePeriodMs: '500' }),
-        {
-          name: 'TypeError',
-          message: 'killGracePeriodMs must be a non-negative number',
-        }
-      );
+      assert.throws(() => new TaskHandle({ killGracePeriodMs: '500' }), {
+        name: 'TypeError',
+        message: 'killGracePeriodMs must be a non-negative number',
+      });
     });
 
     it('throws TypeError if killGracePeriodMs is NaN', () => {
-      assert.throws(
-        () => new TaskHandle({ killGracePeriodMs: NaN }),
-        {
-          name: 'TypeError',
-          message: 'killGracePeriodMs must be a non-negative number',
-        }
-      );
+      assert.throws(() => new TaskHandle({ killGracePeriodMs: NaN }), {
+        name: 'TypeError',
+        message: 'killGracePeriodMs must be a non-negative number',
+      });
     });
 
     it('throws RangeError if killGracePeriodMs is negative', () => {
-      assert.throws(
-        () => new TaskHandle({ killGracePeriodMs: -1 }),
-        {
-          name: 'RangeError',
-          message: 'killGracePeriodMs must be a non-negative number',
-        }
-      );
+      assert.throws(() => new TaskHandle({ killGracePeriodMs: -1 }), {
+        name: 'RangeError',
+        message: 'killGracePeriodMs must be a non-negative number',
+      });
     });
 
     it('cooperative timeout rejects with preempted: false when forceKillOnTimeout is false', async () => {
@@ -140,33 +131,24 @@ describe('Hard Preemption - Config, Error & Validation (T1)', () => {
     });
 
     it('throws TypeError if killGracePeriodMs is a string in WorkerRuntime', () => {
-      assert.throws(
-        () => new WorkerRuntime({ killGracePeriodMs: '500' }),
-        {
-          name: 'TypeError',
-          message: 'killGracePeriodMs must be a non-negative number',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ killGracePeriodMs: '500' }), {
+        name: 'TypeError',
+        message: 'killGracePeriodMs must be a non-negative number',
+      });
     });
 
     it('throws TypeError if killGracePeriodMs is NaN in WorkerRuntime', () => {
-      assert.throws(
-        () => new WorkerRuntime({ killGracePeriodMs: NaN }),
-        {
-          name: 'TypeError',
-          message: 'killGracePeriodMs must be a non-negative number',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ killGracePeriodMs: NaN }), {
+        name: 'TypeError',
+        message: 'killGracePeriodMs must be a non-negative number',
+      });
     });
 
     it('throws RangeError if killGracePeriodMs is negative in WorkerRuntime', () => {
-      assert.throws(
-        () => new WorkerRuntime({ killGracePeriodMs: -50 }),
-        {
-          name: 'RangeError',
-          message: 'killGracePeriodMs must be a non-negative number',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ killGracePeriodMs: -50 }), {
+        name: 'RangeError',
+        message: 'killGracePeriodMs must be a non-negative number',
+      });
     });
 
     it('dispatched task inherits runtime preemption options by default', () => {
@@ -426,7 +408,7 @@ describe('Hard Preemption - Supervisor Autonomous Pool Healing (T3)', () => {
             while (true) {}
           },
         }),
-        (err) => err.preempted === true
+        (err) => err.preempted === true,
       );
 
       // Wait for preemption events to arrive
@@ -466,7 +448,7 @@ describe('Hard Preemption - Telemetry & Types (T4)', () => {
           fn: () => {
             while (true) {}
           },
-        })
+        }),
       );
 
       const deadline1 = Date.now() + 3000;
@@ -484,7 +466,7 @@ describe('Hard Preemption - Telemetry & Types (T4)', () => {
           fn: () => {
             while (true) {}
           },
-        })
+        }),
       );
 
       const deadline2 = Date.now() + 3000;
@@ -587,7 +569,7 @@ describe('Hard Preemption - Concurrency & ReDoS Integration Tests (T5)', () => {
               fn: () => {
                 while (true) {}
               },
-            })
+            }),
           );
         } else {
           taskPromises.push(
@@ -595,7 +577,7 @@ describe('Hard Preemption - Concurrency & ReDoS Integration Tests (T5)', () => {
               type: `valid_${i}`,
               payload: { val: i * 3 },
               fn: (p) => p.val + 1,
-            })
+            }),
           );
         }
       }

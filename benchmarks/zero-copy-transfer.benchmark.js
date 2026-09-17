@@ -34,7 +34,9 @@ async function runBenchmark() {
   const transferPerOp = transferDuration / iterations;
   console.log(`  -> ${iterations} transfers in: ${transferDuration.toFixed(2)}ms`);
   console.log(`  -> Per-op latency: ${transferPerOp.toFixed(3)}ms`);
-  console.log(`  -> Throughput: ${((bufferBytes * iterations) / (1024 * 1024) / (transferDuration / 1000)).toFixed(2)} MB/s\n`);
+  console.log(
+    `  -> Throughput: ${((bufferBytes * iterations) / (1024 * 1024) / (transferDuration / 1000)).toFixed(2)} MB/s\n`,
+  );
 
   // === Test 2: Structured clone (default; copies the buffer) ===
   console.log(`[2/2] Transferring ${bufferSizeMb}MB ArrayBuffer via structured clone (copy)...`);
@@ -58,16 +60,24 @@ async function runBenchmark() {
   const clonePerOp = cloneDuration / iterations;
   console.log(`  -> ${iterations} copies in: ${cloneDuration.toFixed(2)}ms`);
   console.log(`  -> Per-op latency: ${clonePerOp.toFixed(3)}ms`);
-  console.log(`  -> Throughput: ${((bufferBytes * iterations) / (1024 * 1024) / (cloneDuration / 1000)).toFixed(2)} MB/s\n`);
+  console.log(
+    `  -> Throughput: ${((bufferBytes * iterations) / (1024 * 1024) / (cloneDuration / 1000)).toFixed(2)} MB/s\n`,
+  );
 
   await runtime.shutdown();
 
   const speedup = cloneDuration / transferDuration;
   console.log('=====================================================================');
   console.log('CONCLUSION:');
-  console.log(`- Zero-copy transferList is ${speedup.toFixed(2)}x faster than structured clone for ${bufferSizeMb}MB buffers.`);
-  console.log(`- Per-op cost drops from ${clonePerOp.toFixed(3)}ms to ${transferPerOp.toFixed(3)}ms.`);
-  console.log(`- For multi-megabyte payloads (audio, video, ML tensors), transferList is mandatory.`);
+  console.log(
+    `- Zero-copy transferList is ${speedup.toFixed(2)}x faster than structured clone for ${bufferSizeMb}MB buffers.`,
+  );
+  console.log(
+    `- Per-op cost drops from ${clonePerOp.toFixed(3)}ms to ${transferPerOp.toFixed(3)}ms.`,
+  );
+  console.log(
+    `- For multi-megabyte payloads (audio, video, ML tensors), transferList is mandatory.`,
+  );
   console.log('=====================================================================');
 }
 

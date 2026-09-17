@@ -1,12 +1,12 @@
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
 import {
-  WorkerRuntimeError,
-  WorkerCrashError,
+  QueueOverflowError,
+  TaskAbortedError,
   TaskQueueTimeoutError,
   TaskTimeoutError,
-  TaskAbortedError,
-  QueueOverflowError,
+  WorkerCrashError,
+  WorkerRuntimeError,
 } from '../src/errors.js';
 
 describe('Error Hierarchy', () => {

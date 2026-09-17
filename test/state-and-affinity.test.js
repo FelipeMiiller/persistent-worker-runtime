@@ -1,8 +1,8 @@
-import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createWorkerRuntime, WorkerRuntime } from '../src/index.js';
-import { TaskHandle } from '../src/task-handle.js';
+import { after, before, describe, it } from 'node:test';
+import { createWorkerRuntime } from '../src/index.js';
 import { Supervisor } from '../src/supervisor.js';
+import { TaskHandle } from '../src/task-handle.js';
 
 describe('Built-in L1 State Operations (via worker thread)', () => {
   let runtime;
@@ -73,7 +73,7 @@ describe('Supervisor — affinity-based worker selection', () => {
           type: 'noop',
           payload: { hi: 'from-db' },
           fnCode: '(p) => p',
-        })
+        }),
       );
       assert.deepEqual(result, { hi: 'from-db' });
     } finally {
@@ -162,7 +162,7 @@ describe('WorkerRuntime — task failure and retry path', () => {
           throw new Error('always-fail');
         },
       }),
-      /always-fail/
+      /always-fail/,
     );
     const elapsed = Date.now() - start;
     // 2 retry events (initial attempt + 2 retries = 3 total runs)
@@ -189,7 +189,7 @@ describe('WorkerRuntime — task failure and retry path', () => {
           throw new Error('boom');
         },
       }),
-      /boom/
+      /boom/,
     );
     const elapsed = Date.now() - start;
     assert.equal(retryEvents.length, 2);
@@ -210,7 +210,7 @@ describe('WorkerRuntime — task failure and retry path', () => {
           throw new Error('first');
         },
       }),
-      /first/
+      /first/,
     );
     assert.ok(retryEvents.length >= 1, 'at least one retrying event');
     assert.equal(retryEvents[0].attempt, 1);
@@ -228,7 +228,7 @@ describe('WorkerRuntime — task failure and retry path', () => {
           throw new Error('once');
         },
       }),
-      /once/
+      /once/,
     );
     assert.equal(retryEvents.length, 0, 'no retries should have been attempted');
   });

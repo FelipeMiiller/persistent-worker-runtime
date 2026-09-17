@@ -1,5 +1,5 @@
-import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { after, before, describe, it } from 'node:test';
 import { createWorkerRuntime } from '../src/index.js';
 
 describe('Worker-context channel() integration', () => {
@@ -126,7 +126,7 @@ describe('Worker-context channel() integration', () => {
           return 'should-not-reach';
         },
       }),
-      /must be a string/
+      /must be a string/,
     );
 
     await assert.rejects(
@@ -137,7 +137,7 @@ describe('Worker-context channel() integration', () => {
           return 'should-not-reach';
         },
       }),
-      /non-empty string/
+      /non-empty string/,
     );
   });
 
@@ -150,9 +150,11 @@ describe('Worker-context channel() integration', () => {
     // cross-worker subscription visibility is tested by integration in T3+.
     const r1 = await runtime.execute({
       type: 'iso_test',
-      fn: (_p, _s, context) => ({
-        sameWrapper: context.channel('iso-x') === context.channel('iso-x'),
-      }),
+      fn: (_p, _s, context) => {
+        const w1 = context.channel('iso-x');
+        const w2 = context.channel('iso-x');
+        return { sameWrapper: w1 === w2 };
+      },
     });
     assert.equal(r1.sameWrapper, true);
   });

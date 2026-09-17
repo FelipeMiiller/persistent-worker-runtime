@@ -19,10 +19,12 @@ export class Supervisor extends EventEmitter {
   constructor(options = {}) {
     super();
     this.#targetWorkers = options.workers || 4;
-    this.#maxTasksPerWorker = options.maxTasksPerWorker === undefined ? Infinity : options.maxTasksPerWorker;
+    this.#maxTasksPerWorker =
+      options.maxTasksPerWorker === undefined ? Infinity : options.maxTasksPerWorker;
     this.#maxMemoryMb = options.maxMemoryMb === undefined ? Infinity : options.maxMemoryMb;
     this.#forceKillOnTimeout = Boolean(options.forceKillOnTimeout);
-    this.#killGracePeriodMs = options.killGracePeriodMs === undefined ? 500 : options.killGracePeriodMs;
+    this.#killGracePeriodMs =
+      options.killGracePeriodMs === undefined ? 500 : options.killGracePeriodMs;
     this.#workerOptions = {
       workerScript: options.workerScript,
       handlerPath: options.handlerPath,
@@ -94,7 +96,7 @@ export class Supervisor extends EventEmitter {
     if (task.affinityKey) {
       // Look for a worker already pinned to this affinity
       const matched = idle.find(
-        (w) => w.affinityKey === task.affinityKey || w.name === task.affinityKey
+        (w) => w.affinityKey === task.affinityKey || w.name === task.affinityKey,
       );
       if (matched) return matched;
 
@@ -113,14 +115,15 @@ export class Supervisor extends EventEmitter {
   #checkRecycling(worker) {
     if (this.#isShuttingDown) return;
     if (worker.isDedicated) return;
-    if (worker.isRecycling || worker.status === 'terminating' || worker.status === 'terminated') return;
+    if (worker.isRecycling || worker.status === 'terminating' || worker.status === 'terminated')
+      return;
 
     let reason = null;
     if (worker.tasksCompleted >= this.#maxTasksPerWorker) {
       reason = 'tasks_exceeded';
     } else if (
       this.#maxMemoryMb !== Infinity &&
-      (worker.lastMemoryUsageBytes / (1024 * 1024)) >= this.#maxMemoryMb
+      worker.lastMemoryUsageBytes / (1024 * 1024) >= this.#maxMemoryMb
     ) {
       reason = 'memory_exceeded';
     }
@@ -183,13 +186,15 @@ export class Supervisor extends EventEmitter {
         (isPreempted || prevStatus === 'preempting' || worker.isPreempted)
       ) {
         this.emit('worker_preempted', { workerId: worker.id, exitCode });
-        this.#spawnWorker().then((replacement) => {
-          if (replacement) {
-            this.emit('worker_replaced', { oldId: worker.id, newId: replacement.id });
-          }
-        }).catch((err) => {
-          this.emit('error', err);
-        });
+        this.#spawnWorker()
+          .then((replacement) => {
+            if (replacement) {
+              this.emit('worker_replaced', { oldId: worker.id, newId: replacement.id });
+            }
+          })
+          .catch((err) => {
+            this.emit('error', err);
+          });
         return;
       }
 
@@ -202,13 +207,15 @@ export class Supervisor extends EventEmitter {
         !worker.isRecycling
       ) {
         this.emit('worker_restarting', { crashedWorkerId: worker.id, exitCode });
-        this.#spawnWorker().then((replacement) => {
-          if (replacement) {
-            this.emit('worker_replaced', { oldId: worker.id, newId: replacement.id });
-          }
-        }).catch((err) => {
-          this.emit('error', err);
-        });
+        this.#spawnWorker()
+          .then((replacement) => {
+            if (replacement) {
+              this.emit('worker_replaced', { oldId: worker.id, newId: replacement.id });
+            }
+          })
+          .catch((err) => {
+            this.emit('error', err);
+          });
       }
     });
 

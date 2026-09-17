@@ -39,10 +39,13 @@ async function runBenchmark() {
       type: 'subscribe-bench',
       payload: { channel: 'bench-channel', workerIdx: idx },
       fn: (_p, _s, context) => {
-        context.channel('bench-channel').subscribe(() => {});
+        context.channel('bench-channel').subscribe(() => {
+          // Intentional no-op: subscriber exists only to keep the
+          // channel alive for the publish throughput measurement.
+        });
         return 'subscribed';
       },
-    }))
+    })),
   );
 
   // Give subscriptions time to register before publishing
@@ -56,7 +59,9 @@ async function runBenchmark() {
   const broadcastPerOp = (broadcastDuration / iterations) * 1000; // microseconds
   console.log(`  -> ${iterations} broadcasts in: ${broadcastDuration.toFixed(2)}ms`);
   console.log(`  -> Per-publish latency: ${broadcastPerOp.toFixed(2)}μs`);
-  console.log(`  -> Throughput: ${((iterations / (broadcastDuration / 1000)) / 1000).toFixed(1)}k msg/s`);
+  console.log(
+    `  -> Throughput: ${(iterations / (broadcastDuration / 1000) / 1000).toFixed(1)}k msg/s`,
+  );
 
   await r1.shutdown();
   console.log('');
@@ -65,7 +70,9 @@ async function runBenchmark() {
   // Equivalent semantics without BroadcastChannel: main thread fires a
   // separate `dispatch()` per worker for each "broadcast" event. This is
   // what users would write if they had no BC.
-  console.log(`[2/2] Publishing ${dispatchIterations} messages via per-worker runtime.dispatch()...`);
+  console.log(
+    `[2/2] Publishing ${dispatchIterations} messages via per-worker runtime.dispatch()...`,
+  );
 
   const r2 = await createWorkerRuntime({ workers: 4 });
   await new Promise((r) => setTimeout(r, 50));
@@ -84,9 +91,13 @@ async function runBenchmark() {
   }
   const dispatchDuration = performance.now() - dispatchStart;
   const dispatchPerOp = (dispatchDuration / dispatchIterations) * 1000; // microseconds per "broadcast" (4 dispatch calls)
-  console.log(`  -> ${dispatchIterations} fan-out cycles (4 dispatches each) in: ${dispatchDuration.toFixed(2)}ms`);
+  console.log(
+    `  -> ${dispatchIterations} fan-out cycles (4 dispatches each) in: ${dispatchDuration.toFixed(2)}ms`,
+  );
   console.log(`  -> Per-fan-out-cycle cost: ${dispatchPerOp.toFixed(2)}μs`);
-  console.log(`  -> Effective throughput: ${((dispatchIterations / (dispatchDuration / 1000)) / 1000).toFixed(1)}k fan-outs/s`);
+  console.log(
+    `  -> Effective throughput: ${(dispatchIterations / (dispatchDuration / 1000) / 1000).toFixed(1)}k fan-outs/s`,
+  );
 
   // Drain pending invalidates before shutdown so the queue doesn't block
   await new Promise((r) => setTimeout(r, 200));
@@ -97,10 +108,12 @@ async function runBenchmark() {
   // dispatch costs ~4x as much per call and 500 iterations already
   // produces 2000 task objects. Speedup is computed against the same
   // wall-clock cost ratio.
-  const speedup = (dispatchDuration / dispatchIterations) / (broadcastDuration / iterations);
+  const speedup = dispatchDuration / dispatchIterations / (broadcastDuration / iterations);
   console.log('=====================================================================');
   console.log('CONCLUSION:');
-  console.log(`- BroadcastChannel fan-out is ${speedup.toFixed(2)}x faster than per-worker dispatch.`);
+  console.log(
+    `- BroadcastChannel fan-out is ${speedup.toFixed(2)}x faster than per-worker dispatch.`,
+  );
   console.log(`- Per-publish cost (BroadcastChannel): ${broadcastPerOp.toFixed(2)}μs`);
   console.log(`- Per-fan-out-cycle cost (dispatch×4):  ${dispatchPerOp.toFixed(2)}μs`);
   console.log(`- The BC path stays O(1) in the publisher regardless of subscriber count.`);

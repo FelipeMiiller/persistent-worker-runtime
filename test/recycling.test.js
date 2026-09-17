@@ -1,9 +1,15 @@
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { Worker } from 'node:worker_threads';
-import { join, dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { WorkerRuntime, Supervisor, WorkerHandle, TaskHandle, createWorkerRuntime } from '../src/index.js';
+import { Worker } from 'node:worker_threads';
+import {
+  createWorkerRuntime,
+  Supervisor,
+  TaskHandle,
+  WorkerHandle,
+  WorkerRuntime,
+} from '../src/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -62,145 +68,103 @@ describe('Worker Recycling - Configuration & Validation (T1)', () => {
 
   describe('Validation of maxTasksPerWorker', () => {
     it('throws TypeError if maxTasksPerWorker is a string', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxTasksPerWorker: '100' }),
-        {
-          name: 'TypeError',
-          message: 'maxTasksPerWorker must be a positive number or Infinity',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxTasksPerWorker: '100' }), {
+        name: 'TypeError',
+        message: 'maxTasksPerWorker must be a positive number or Infinity',
+      });
     });
 
     it('throws TypeError if maxTasksPerWorker is a boolean', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxTasksPerWorker: true }),
-        {
-          name: 'TypeError',
-          message: 'maxTasksPerWorker must be a positive number or Infinity',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxTasksPerWorker: true }), {
+        name: 'TypeError',
+        message: 'maxTasksPerWorker must be a positive number or Infinity',
+      });
     });
 
     it('throws TypeError if maxTasksPerWorker is null', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxTasksPerWorker: null }),
-        {
-          name: 'TypeError',
-          message: 'maxTasksPerWorker must be a positive number or Infinity',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxTasksPerWorker: null }), {
+        name: 'TypeError',
+        message: 'maxTasksPerWorker must be a positive number or Infinity',
+      });
     });
 
     it('throws TypeError if maxTasksPerWorker is an object', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxTasksPerWorker: {} }),
-        {
-          name: 'TypeError',
-          message: 'maxTasksPerWorker must be a positive number or Infinity',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxTasksPerWorker: {} }), {
+        name: 'TypeError',
+        message: 'maxTasksPerWorker must be a positive number or Infinity',
+      });
     });
 
     it('throws TypeError if maxTasksPerWorker is NaN', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxTasksPerWorker: NaN }),
-        {
-          name: 'TypeError',
-          message: 'maxTasksPerWorker must be a positive number or Infinity',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxTasksPerWorker: NaN }), {
+        name: 'TypeError',
+        message: 'maxTasksPerWorker must be a positive number or Infinity',
+      });
     });
 
     it('throws RangeError if maxTasksPerWorker is 0', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxTasksPerWorker: 0 }),
-        {
-          name: 'RangeError',
-          message: 'maxTasksPerWorker must be greater than 0',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxTasksPerWorker: 0 }), {
+        name: 'RangeError',
+        message: 'maxTasksPerWorker must be greater than 0',
+      });
     });
 
     it('throws RangeError if maxTasksPerWorker is negative', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxTasksPerWorker: -5 }),
-        {
-          name: 'RangeError',
-          message: 'maxTasksPerWorker must be greater than 0',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxTasksPerWorker: -5 }), {
+        name: 'RangeError',
+        message: 'maxTasksPerWorker must be greater than 0',
+      });
     });
   });
 
   describe('Validation of maxMemoryMb', () => {
     it('throws TypeError if maxMemoryMb is a string', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxMemoryMb: '256' }),
-        {
-          name: 'TypeError',
-          message: 'maxMemoryMb must be a positive number or Infinity',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxMemoryMb: '256' }), {
+        name: 'TypeError',
+        message: 'maxMemoryMb must be a positive number or Infinity',
+      });
     });
 
     it('throws TypeError if maxMemoryMb is a boolean', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxMemoryMb: false }),
-        {
-          name: 'TypeError',
-          message: 'maxMemoryMb must be a positive number or Infinity',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxMemoryMb: false }), {
+        name: 'TypeError',
+        message: 'maxMemoryMb must be a positive number or Infinity',
+      });
     });
 
     it('throws TypeError if maxMemoryMb is null', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxMemoryMb: null }),
-        {
-          name: 'TypeError',
-          message: 'maxMemoryMb must be a positive number or Infinity',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxMemoryMb: null }), {
+        name: 'TypeError',
+        message: 'maxMemoryMb must be a positive number or Infinity',
+      });
     });
 
     it('throws TypeError if maxMemoryMb is an object', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxMemoryMb: [] }),
-        {
-          name: 'TypeError',
-          message: 'maxMemoryMb must be a positive number or Infinity',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxMemoryMb: [] }), {
+        name: 'TypeError',
+        message: 'maxMemoryMb must be a positive number or Infinity',
+      });
     });
 
     it('throws TypeError if maxMemoryMb is NaN', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxMemoryMb: NaN }),
-        {
-          name: 'TypeError',
-          message: 'maxMemoryMb must be a positive number or Infinity',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxMemoryMb: NaN }), {
+        name: 'TypeError',
+        message: 'maxMemoryMb must be a positive number or Infinity',
+      });
     });
 
     it('throws RangeError if maxMemoryMb is 0', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxMemoryMb: 0 }),
-        {
-          name: 'RangeError',
-          message: 'maxMemoryMb must be greater than 0',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxMemoryMb: 0 }), {
+        name: 'RangeError',
+        message: 'maxMemoryMb must be greater than 0',
+      });
     });
 
     it('throws RangeError if maxMemoryMb is negative', () => {
-      assert.throws(
-        () => new WorkerRuntime({ maxMemoryMb: -50 }),
-        {
-          name: 'RangeError',
-          message: 'maxMemoryMb must be greater than 0',
-        }
-      );
+      assert.throws(() => new WorkerRuntime({ maxMemoryMb: -50 }), {
+        name: 'RangeError',
+        message: 'maxMemoryMb must be greater than 0',
+      });
     });
   });
 });
@@ -311,13 +275,10 @@ describe('Worker Recycling - Recycling State in WorkerHandle (T3)', () => {
         fn: () => 'should not run',
       });
 
-      await assert.rejects(
-        () => worker.executeTask(task),
-        {
-          name: 'WorkerRuntimeError',
-          message: `Worker ${worker.id} is busy with status: recycling`,
-        }
-      );
+      await assert.rejects(() => worker.executeTask(task), {
+        name: 'WorkerRuntimeError',
+        message: `Worker ${worker.id} is busy with status: recycling`,
+      });
     } finally {
       await worker.terminate();
     }
@@ -483,7 +444,11 @@ describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () =>
         },
       });
 
-      assert.equal(nextResult.hasOldState, false, 'Replacement worker must have fresh clean L1 heap');
+      assert.equal(
+        nextResult.hasOldState,
+        false,
+        'Replacement worker must have fresh clean L1 heap',
+      );
     } finally {
       await runtime.shutdown();
     }
@@ -517,7 +482,10 @@ describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () =>
         await new Promise((r) => setTimeout(r, 50));
       }
 
-      assert.ok(runtime.stats.recycledWorkersCount > 0, 'Recycling must have occurred during stress run');
+      assert.ok(
+        runtime.stats.recycledWorkersCount > 0,
+        'Recycling must have occurred during stress run',
+      );
       assert.equal(runtime.stats.totalWorkers, 3, 'Pool size must remain constant at 3');
       assert.equal(runtime.stats.completedTasks, taskCount);
       assert.equal(runtime.stats.failedTasks, 0);

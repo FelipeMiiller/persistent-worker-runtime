@@ -1,5 +1,5 @@
-import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { after, before, describe, it } from 'node:test';
 import { createWorkerRuntime } from '../src/index.js';
 
 describe('Zero-Copy ArrayBuffer Transfer', () => {

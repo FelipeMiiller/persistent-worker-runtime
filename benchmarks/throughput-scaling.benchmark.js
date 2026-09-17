@@ -1,5 +1,5 @@
-import { createWorkerRuntime } from '../src/index.js';
 import { availableParallelism } from 'node:os';
+import { createWorkerRuntime } from '../src/index.js';
 
 async function runBenchmark() {
   console.log('=====================================================================');
@@ -37,7 +37,7 @@ async function runBenchmark() {
 
     results.push({ workers, durationMs: duration, throughput });
     console.log(
-      `  workers=${String(workers).padStart(2)}: ${duration.toFixed(0)}ms total -> ${throughput.toFixed(0)} tasks/sec`
+      `  workers=${String(workers).padStart(2)}: ${duration.toFixed(0)}ms total -> ${throughput.toFixed(0)} tasks/sec`,
     );
 
     await runtime.shutdown();
@@ -50,7 +50,7 @@ async function runBenchmark() {
     const ideal = baseline * r.workers;
     const efficiency = (r.throughput / ideal) * 100;
     console.log(
-      `  ${String(r.workers).padStart(2)} workers: ${r.throughput.toFixed(0)} tasks/sec (${efficiency.toFixed(1)}% of ideal linear scaling)`
+      `  ${String(r.workers).padStart(2)} workers: ${r.throughput.toFixed(0)} tasks/sec (${efficiency.toFixed(1)}% of ideal linear scaling)`,
     );
   }
 
@@ -58,7 +58,9 @@ async function runBenchmark() {
   console.log('CONCLUSION:');
   console.log('- Throughput scales with worker count up to the CPU core limit.');
   console.log('- Beyond availableParallelism(), contention introduces diminishing returns.');
-  console.log('- For I/O-bound work, oversubscription is acceptable; for CPU-bound, match core count.');
+  console.log(
+    '- For I/O-bound work, oversubscription is acceptable; for CPU-bound, match core count.',
+  );
   console.log('=====================================================================');
 }
 

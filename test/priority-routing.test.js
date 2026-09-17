@@ -1,5 +1,5 @@
-import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { after, before, describe, it } from 'node:test';
 import { createWorkerRuntime } from '../src/index.js';
 
 describe('Priority Routing', () => {
@@ -41,7 +41,10 @@ describe('Priority Routing', () => {
 
       assert.ok(firstHighIdx !== -1, 'should have at least one priority-10 task');
       assert.ok(firstLowIdx !== -1, 'should have at least one priority-0 task');
-      assert.ok(lastHighIdx < firstLowIdx, 'priority-10 tasks must complete before priority-0 tasks');
+      assert.ok(
+        lastHighIdx < firstLowIdx,
+        'priority-10 tasks must complete before priority-0 tasks',
+      );
     });
 
     it('preserves FIFO order within the same priority tier', async () => {
@@ -107,7 +110,10 @@ describe('Priority Routing', () => {
       // All 100 tasks must complete
       assert.equal(completionOrder.length, 100);
       const tags = completionOrder.map((r) => r.tag).sort((a, b) => a - b);
-      assert.deepEqual(tags, Array.from({ length: 100 }, (_, i) => i));
+      assert.deepEqual(
+        tags,
+        Array.from({ length: 100 }, (_, i) => i),
+      );
     });
 
     it('higher-priority tasks have lower average completion position when many low-priority tasks queue first', async () => {

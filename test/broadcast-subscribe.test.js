@@ -1,5 +1,5 @@
-import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { after, before, describe, it } from 'node:test';
 import { createWorkerRuntime, WorkerRuntimeError } from '../src/index.js';
 
 describe('T7 — Main-Thread subscribe() / unsubscribe() / hasSubscribers() + shutdown hardening', () => {
@@ -174,7 +174,7 @@ describe('T7 — Main-Thread subscribe() / unsubscribe() / hasSubscribers() + sh
           assert.ok(err instanceof WorkerRuntimeError, 'expected WorkerRuntimeError');
           assert.match(err.message, /shutting down/i);
           return true;
-        }
+        },
       );
     });
 
@@ -188,8 +188,7 @@ describe('T7 — Main-Thread subscribe() / unsubscribe() / hasSubscribers() + sh
       // Pre-shutdown: a worker can publish to this channel
       await r.execute({
         type: 'p',
-        fn: (_p, _s, context) =>
-          context.channel('pre-shutdown').publish({ ok: true }),
+        fn: (_p, _s, context) => context.channel('pre-shutdown').publish({ ok: true }),
       });
 
       // Give the bus a beat
@@ -205,10 +204,7 @@ describe('T7 — Main-Thread subscribe() / unsubscribe() / hasSubscribers() + sh
       assert.equal(r.hasSubscribers('pre-shutdown'), false);
 
       // After shutdown, broadcast rejects
-      assert.throws(
-        () => r.broadcast('pre-shutdown', { x: 1 }),
-        WorkerRuntimeError
-      );
+      assert.throws(() => r.broadcast('pre-shutdown', { x: 1 }), WorkerRuntimeError);
     });
   });
 
@@ -239,10 +235,7 @@ describe('T7 — Main-Thread subscribe() / unsubscribe() / hasSubscribers() + sh
       // is verified by the global test suite's `npm test` not hanging;
       // this assertion proves our shutdown returned promptly without
       // trying to leave active BC handles around.
-      assert.ok(
-        shutdownMs < 2000,
-        `shutdown took ${shutdownMs}ms; expected < 2000ms`
-      );
+      assert.ok(shutdownMs < 2000, `shutdown took ${shutdownMs}ms; expected < 2000ms`);
 
       // After shutdown, the registry has been emptied by closeAll()
       assert.equal(r.hasSubscribers('exit-channel'), false);

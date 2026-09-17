@@ -252,7 +252,7 @@ export class ChannelRegistry {
 export function validateChannelName(name) {
   if (typeof name !== 'string') {
     throw new TypeError(
-      `Channel name must be a string, got ${name === null ? 'null' : typeof name}`
+      `Channel name must be a string, got ${name === null ? 'null' : typeof name}`,
     );
   }
   if (name.length === 0) {

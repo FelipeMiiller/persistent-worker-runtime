@@ -27,7 +27,7 @@ import { createWorkerRuntime } from '../src/index.js';
 // Cache invalidation channel name. Main thread and workers MUST agree on
 // this literal — fnCode runs as a string in the worker, so closures from
 // the main module are not available there.
-const CACHE_CHANNEL = 'cache:user';
+const _CACHE_CHANNEL = 'cache:user';
 
 async function main() {
   // Mutable simulated source-of-truth — main thread observes it via the
@@ -93,7 +93,7 @@ async function main() {
     postReads.map((r) => ({
       from: r.from,
       email: r.user.email,
-    }))
+    })),
   );
 
   // ---------- 5. Shut down ----------
@@ -116,7 +116,8 @@ async function main() {
  */
 function fetchUserFn(payload, state, context) {
   // Lazy cache init (per-worker, persistent across tasks on the same worker)
-  const cache = (state.cache ||= new Map());
+  if (!state.cache) state.cache = new Map();
+  const cache = state.cache;
 
   // Subscribe to invalidation. The wrapper is idempotent per-channel,
   // and the bus only delivers to subscribers in OTHER threads, so this

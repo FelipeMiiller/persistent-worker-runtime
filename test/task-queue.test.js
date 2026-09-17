@@ -1,7 +1,7 @@
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { TaskQueue } from '../src/task-queue.js';
+import { describe, it } from 'node:test';
 import { TaskQueueTimeoutError } from '../src/errors.js';
+import { TaskQueue } from '../src/task-queue.js';
 
 /**
  * Build a minimal TaskHandle-like object. The queue only reads a few public
@@ -56,16 +56,13 @@ describe('TaskQueue', () => {
 
       // The third task will wait; its wait should time out at 25ms
       const start = Date.now();
-      await assert.rejects(
-        q.enqueue(t3),
-        (err) => {
-          assert.ok(err instanceof TaskQueueTimeoutError);
-          assert.equal(err.taskId, t3.id);
-          assert.equal(err.waitedMs, 25);
-          assert.ok(typeof err.queueDepth === 'number');
-          return true;
-        }
-      );
+      await assert.rejects(q.enqueue(t3), (err) => {
+        assert.ok(err instanceof TaskQueueTimeoutError);
+        assert.equal(err.taskId, t3.id);
+        assert.equal(err.waitedMs, 25);
+        assert.ok(typeof err.queueDepth === 'number');
+        return true;
+      });
       assert.ok(Date.now() - start >= 20, 'should respect queueTimeoutMs');
       assert.equal(q.waitingCount, 0, 'timed-out waiter must be removed');
     });
@@ -126,7 +123,10 @@ describe('TaskQueue', () => {
       await assert.rejects(q.enqueue(t));
 
       assert.equal(t.isSettled, true, 'task should be marked settled');
-      assert.ok(t.rejection instanceof TaskQueueTimeoutError, 'task.rejection must be TaskQueueTimeoutError');
+      assert.ok(
+        t.rejection instanceof TaskQueueTimeoutError,
+        'task.rejection must be TaskQueueTimeoutError',
+      );
       assert.equal(t.rejection.taskId, t.id);
     });
   });
@@ -267,10 +267,7 @@ describe('TaskQueue', () => {
 
       // The settled waiter must also be cleaned up: its enqueue promise should
       // be rejected so callers awaiting it don't leak unhandled rejections.
-      await assert.rejects(
-        pSettled,
-        /settled before queue capacity was available/
-      );
+      await assert.rejects(pSettled, /settled before queue capacity was available/);
     });
   });
 

@@ -1,10 +1,10 @@
 import { EventEmitter } from 'node:events';
 import { availableParallelism } from 'node:os';
-import { TaskHandle } from './task-handle.js';
-import { TaskQueue } from './task-queue.js';
-import { Supervisor } from './supervisor.js';
 import { ChannelRegistry } from './broadcast-channel.js';
 import { WorkerRuntimeError } from './errors.js';
+import { Supervisor } from './supervisor.js';
+import { TaskHandle } from './task-handle.js';
+import { TaskQueue } from './task-queue.js';
 
 /**
  * WorkerRuntime is the primary concurrency engine.
@@ -31,7 +31,8 @@ export class WorkerRuntime extends EventEmitter {
   constructor(options = {}) {
     super();
 
-    const maxTasksPerWorker = options.maxTasksPerWorker === undefined ? Infinity : options.maxTasksPerWorker;
+    const maxTasksPerWorker =
+      options.maxTasksPerWorker === undefined ? Infinity : options.maxTasksPerWorker;
     if (typeof maxTasksPerWorker !== 'number' || Number.isNaN(maxTasksPerWorker)) {
       throw new TypeError('maxTasksPerWorker must be a positive number or Infinity');
     }
@@ -48,7 +49,8 @@ export class WorkerRuntime extends EventEmitter {
     }
 
     const forceKillOnTimeout = Boolean(options.forceKillOnTimeout);
-    const killGracePeriodMs = options.killGracePeriodMs === undefined ? 500 : options.killGracePeriodMs;
+    const killGracePeriodMs =
+      options.killGracePeriodMs === undefined ? 500 : options.killGracePeriodMs;
     if (typeof killGracePeriodMs !== 'number' || Number.isNaN(killGracePeriodMs)) {
       throw new TypeError('killGracePeriodMs must be a non-negative number');
     }
@@ -131,9 +133,12 @@ export class WorkerRuntime extends EventEmitter {
     this.#supervisor.on('task_failed', ({ task, error }) => {
       if (task.retries > 0 && task.attempts < task.retries) {
         task.attempts++;
-        const delay = task.backoff === 'exponential'
-          ? task.retryDelayMs * Math.pow(2, task.attempts - 1)
-          : (task.backoff === 'linear' ? task.retryDelayMs * task.attempts : task.retryDelayMs);
+        const delay =
+          task.backoff === 'exponential'
+            ? task.retryDelayMs * 2 ** (task.attempts - 1)
+            : task.backoff === 'linear'
+              ? task.retryDelayMs * task.attempts
+              : task.retryDelayMs;
 
         this.emit('task:retrying', {
           taskId: task.id,
@@ -145,9 +150,13 @@ export class WorkerRuntime extends EventEmitter {
 
         setTimeout(() => {
           if (!this.#isShuttingDown && !task.isSettled) {
-            this.#queue.enqueue(task)
+            this.#queue
+              .enqueue(task)
               .then(() => this.#scheduleNext())
-              .catch(() => {});
+              .catch(() => {
+                // Intentional: rejection is handled by the task's own
+                // onError callbacks; nothing actionable here.
+              });
           }
         }, delay);
       } else {
@@ -252,11 +261,12 @@ export class WorkerRuntime extends EventEmitter {
     this.#stats.submittedTasks++;
 
     // Enqueue asynchronously without blocking the Event Loop
-    this.#queue.enqueue(task)
+    this.#queue
+      .enqueue(task)
       .then(() => {
         this.#scheduleNext();
       })
-      .catch((err) => {
+      .catch((_err) => {
         // Handled via task.reject() inside queue
       });
 

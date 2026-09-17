@@ -1,5 +1,5 @@
-import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { after, before, describe, it } from 'node:test';
 import { createWorkerRuntime, WorkerRuntimeError } from '../src/index.js';
 
 describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => {
@@ -44,7 +44,7 @@ describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => 
       await Promise.race([
         subscriberReady,
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('subscriber never became ready')), 3000)
+          setTimeout(() => reject(new Error('subscriber never became ready')), 3000),
         ),
       ]);
 
@@ -53,7 +53,7 @@ describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => 
       const result = await Promise.race([
         receivedPromise,
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('not received within 3s')), 3000)
+          setTimeout(() => reject(new Error('not received within 3s')), 3000),
         ),
       ]);
 
@@ -128,7 +128,7 @@ describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => 
       await Promise.race([
         receivedPromise,
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('did not receive in 2s')), 2000)
+          setTimeout(() => reject(new Error('did not receive in 2s')), 2000),
         ),
       ]);
       assert.deepEqual(received, { hi: 'from-worker' });
@@ -141,10 +141,12 @@ describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => 
 
       // The handler increments a closure variable. We poll it from the
       // main thread after each publish.
-      runtime.execute({
-        type: 'p',
-        fn: (_p, _s, context) => context.channel('count-channel').publish('a'),
-      }).catch(() => {});
+      runtime
+        .execute({
+          type: 'p',
+          fn: (_p, _s, context) => context.channel('count-channel').publish('a'),
+        })
+        .catch(() => {});
 
       // Wait for delivery
       let pollCount;
@@ -158,10 +160,12 @@ describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => 
       assert.equal(unsub(), true, 'first unsubscribe returns true');
       assert.equal(unsub(), false, 'second unsubscribe returns false');
 
-      runtime.execute({
-        type: 'p',
-        fn: (_p, _s, context) => context.channel('count-channel').publish('b'),
-      }).catch(() => {});
+      runtime
+        .execute({
+          type: 'p',
+          fn: (_p, _s, context) => context.channel('count-channel').publish('b'),
+        })
+        .catch(() => {});
 
       await new Promise((r) => setTimeout(r, 300));
       assert.equal(count, 1, 'unsubscribed handler must not fire again');
@@ -195,15 +199,12 @@ describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => 
 
       await runtime.execute({
         type: 'p',
-        fn: (_p, _s, context) =>
-          context.channel('multi-channel').publish({ fanout: true }),
+        fn: (_p, _s, context) => context.channel('multi-channel').publish({ fanout: true }),
       });
 
       await Promise.race([
         allReceived,
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('not received in 2s')), 2000)
-        ),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('not received in 2s')), 2000)),
       ]);
 
       assert.equal(seen.length, 2);
@@ -215,14 +216,19 @@ describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => 
     it('subscribers on different channels do NOT cross-contaminate', async () => {
       let ch1Hit = false;
       let ch2Hit = false;
-      runtime.subscribe('iso-1', () => { ch1Hit = true; });
-      runtime.subscribe('iso-2', () => { ch2Hit = true; });
+      runtime.subscribe('iso-1', () => {
+        ch1Hit = true;
+      });
+      runtime.subscribe('iso-2', () => {
+        ch2Hit = true;
+      });
 
-      await runtime.execute({
-        type: 'p',
-        fn: (_p, _s, context) =>
-          context.channel('iso-1').publish({ which: 1 }),
-      }).catch(() => {});
+      await runtime
+        .execute({
+          type: 'p',
+          fn: (_p, _s, context) => context.channel('iso-1').publish({ which: 1 }),
+        })
+        .catch(() => {});
 
       // Poll the boolean flags
       const deadline = Date.now() + 1000;
@@ -247,25 +253,22 @@ describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => 
           assert.ok(err instanceof WorkerRuntimeError);
           assert.match(err.message, /shutting down/i);
           return true;
-        }
+        },
       );
     });
 
     it('subscribe() before shutdown still works (and the BC handle is closed on shutdown)', async () => {
       const r = await createWorkerRuntime({ workers: 1 });
-      let received = null;
+      let _received = null;
       r.subscribe('pre-shutdown-channel', (msg) => {
-        received = msg;
+        _received = msg;
       });
 
       await r.shutdown();
 
       // After shutdown, the BC handle was closed; trying to publish
       // would throw because the channel is closed.
-      assert.throws(
-        () => r.broadcast('pre-shutdown-channel', { x: 1 }),
-        WorkerRuntimeError
-      );
+      assert.throws(() => r.broadcast('pre-shutdown-channel', { x: 1 }), WorkerRuntimeError);
     });
   });
 });
