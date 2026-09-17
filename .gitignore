@@ -13,3 +13,9 @@ coverage/
 # the skills automatically without running the installer.
 .agents/.skill-lock.json
 .agents/.skill-lock.json.backup
+
+# Local scratch / machine-specific artifacts (not part of the runtime).
+.agents/scratch/
+__pycache__/
+progresso_convites.json
+

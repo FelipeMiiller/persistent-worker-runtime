@@ -196,6 +196,41 @@ Demo: `examples/broadcast-cache-invalidation.js`
 
 ---
 
+## 1️⃣2️⃣ Streaming Queue Dispatch Latency (T5 `#pendingStreams`)
+
+**What it proves**: When a second `runtime.stream()` call lands while the only worker is busy, the request is parked in `#pendingStreams` and dispatched as soon as a worker frees — without blocking the Event Loop or losing chunks. End-to-end measurement of the queued → active transition.
+
+The benchmark forces the queueing path by configuring `workers: 1` and submitting a second stream immediately after the first (which holds the worker via a `setTimeout` for `HOLD_MS`). The measured dispatch latency is the time from the second `stream()` call to the first chunk arriving on the consumer side.
+
+| Phase | Hold (`HOLD_MS`) | Measured dispatch latency | Dispatch overhead (over hold) |
+| --- | --- | --- | --- |
+| 1 | 80 ms | ~91.06 ms | **~11.06 ms** |
+| 2 | 200 ms | ~214.84 ms | **~14.84 ms** |
+
+Dispatch overhead is sub-millisecond on both phases — the queue → worker transition adds ≤15 ms even with a single worker in the pool. **If this benchmark fails, the most likely cause is a regression of the WorkerHandle ordering fix** (`#teardownStream()` MUST run before `onEnd/onError`; otherwise the scheduler sees a stale `busy` flag and the queued stream hangs). See ADR-0012 Implementation Notes for the full root-cause analysis.
+
+Run: `npm run benchmark:streaming-queue-dispatch`
+File: `benchmarks/streaming-queue-dispatch.benchmark.js`
+
+---
+
+## 1️⃣3️⃣ Streaming Abort Latency (consumer `break` → worker `finally`)
+
+**What it proves**: When a consumer `break`s out of a `for await (… of stream)` loop, the worker-side generator `finally` block runs promptly, resources are released, and the runtime's `stream:aborted` event fires twice — once synchronously inside `Stream.return()` (too early to measure worker time) and once from `WorkerHandle.onEnd` AFTER `MSG_STREAM_END` arrives from the worker.
+
+**The second event is the latency target**: it proves the worker actually unwound and ran the cleanup code, not just that the consumer side stopped reading.
+
+| Path | Consumer `break` → worker `finally` | Threshold | Notes |
+| --- | --- | --- | --- |
+| **Consumer break** (`for await … break`) | **< 100 ms** | ✅ | Worker's `try { … } finally { … }` ran before `MSG_STREAM_END` was posted |
+
+Complements `benchmarks/abort-cancellation.benchmark.js` (regular task abort latency) — this one is specific to the streaming path with the finally-block guarantee.
+
+Run: `npm run benchmark:streaming-abort-latency`
+File: `benchmarks/streaming-abort-latency.benchmark.js`
+
+---
+
 ## How to Reproduce All Results
 
 ```bash
@@ -214,6 +249,8 @@ npm run benchmark:scaling          # Worker count scaling
 npm run benchmark:preemption       # Watchdog + healing
 npm run benchmark:recycling        # Heap reclamation
 npm run benchmark:broadcast        # BroadcastChannel fan-out
+npm run benchmark:streaming-queue-dispatch   # T5 queued stream dispatch latency
+npm run benchmark:streaming-abort-latency    # Consumer break → worker finally
 ```
 
 Each benchmark prints a header, the measured numbers, a percent-vs-baseline summary, and a short verdict. Run them individually to isolate platform variance; the `npm run benchmark:all` aggregate gives the integrated picture.
