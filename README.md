@@ -506,6 +506,7 @@ Every major architectural choice is documented following the **MADR** format in 
 * **[ADR-0015](docs/adr/0015-promise-rejection-contract-for-task-queue-waiters.md)**: Promise Rejection Contract for TaskQueue Waiters (destroy() rejects in-flight enqueue Promises)
 * **[ADR-0016](docs/adr/0016-priority-routing-and-fairness.md)**: Priority Routing and Fairness (priority tier dequeue + FIFO-within-tier)
 * **[ADR-0017](docs/adr/0017-cooperative-cancellation-via-abortsignal.md)**: Cooperative Cancellation via AbortSignal (TaskAbortedError, signal-aware dispatch)
+* **[ADR-0018](docs/adr/0018-fire-and-forget-hazard-with-execute-and-post-shutdown-flakes.md)**: Fire-and-Forget Hazard with `runtime.execute()` and Post-Shutdown Test Flakes (always await `execute()` or use `dispatch()`)
 
 ---
 

@@ -215,7 +215,23 @@ export class WorkerRuntime extends EventEmitter {
   }
 
   /**
-   * Submits a task and awaits its result (interactive request-response mode).
+   * Submits a task and AWAITS its result (interactive request-response mode).
+   *
+   * **Important**: the returned Promise MUST be awaited, `.then()`/`.catch()`-handled,
+   * or returned by the caller. A fire-and-forget pattern like `runtime.execute(...)`
+   * without `await` (or without attaching `.catch()`) leaves the worker vulnerable
+   * to a `WorkerCrashError` that surfaces **asynchronously after the calling scope
+   * returns**. On slower CI runners (e.g. macOS GitHub Actions Node 22), this
+   * manifests as Node test runner errors of the form:
+   *
+   *   "Test '...' generated asynchronous activity after the test ended.
+   *    ... WorkerCrashError ..."
+   *
+   * If you intentionally want fire-and-forget semantics (e.g. transactional outbox,
+   * background webhooks), use `dispatch()` instead — it returns a `TaskHandle`
+   * with `onComplete` / `onError` and an internally-captured `.promise.catch()`.
+   *
+   * @see ADR-0018 for the full fire-and-forget hazard analysis.
    * @param {Object|Function} taskDefinition
    * @returns {Promise<any>}
    */
@@ -225,8 +241,20 @@ export class WorkerRuntime extends EventEmitter {
   }
 
   /**
-   * Dispatches a task in the background without blocking, returning a TaskHandle immediately.
-   * Ideal for outbox patterns, email sending, webhooks, and asynchronous side-effects.
+   * Dispatches a task in the background without blocking, returning a TaskHandle
+   * immediately. Ideal for outbox patterns, email sending, webhooks, and
+   * asynchronous side-effects.
+   *
+   * The returned `TaskHandle` carries:
+   *   - `onComplete(result)` / `onError(err)` callbacks
+   *   - `.promise` (already `.catch()`-handled internally by the handle, so
+   *     unhandled-rejection warnings do not fire on legitimate cleanup)
+   *
+   * **Prefer `dispatch()` over `execute()` when you do not need to await the
+   * result synchronously** (background jobs, transactional outbox). See
+   * ADR-0018 for the rationale behind the two-mode distinction.
+   *
+   * @see ADR-0018 for the full fire-and-forget hazard analysis.
    * @param {Object|Function} taskDefinition
    * @returns {TaskHandle}
    */

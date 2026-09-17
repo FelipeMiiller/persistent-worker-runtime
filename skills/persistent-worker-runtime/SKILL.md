@@ -97,3 +97,4 @@ The runtime has many features; load the reference that matches the task.
 6. **Don't expect `BroadcastChannel` to loop back to the sender** — if a worker invalidates its own cache, do it explicitly in addition to `publish()`-ing.
 7. **Don't `subscribe()` after `runtime.shutdown()`** — the underlying BC has been closed; `subscribe()` will throw. Subscribe BEFORE shutdown if you need to receive late messages.
 8. **Don't assume worker affinity is permanent** — recycled workers lose their `affinityKey` mapping; re-dispatch with the same key to re-pin.
+9. **Don't use `runtime.execute()` fire-and-forget** — `execute()` returns a Promise that MUST be awaited or `.catch()`-handled. A discarded Promise becomes a worker crash error after the calling scope returns, surfacing as a CI flake ("async activity after the test ended") on slower runners (macOS Node 22). Use `dispatch()` for intentional fire-and-forget. See ADR-0018.
