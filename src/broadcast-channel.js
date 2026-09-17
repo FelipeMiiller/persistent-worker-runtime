@@ -90,6 +90,43 @@ export class ChannelRegistry {
   }
 
   /**
+   * Registry-level shortcut: unsubscribes a handler from a named channel
+   * without needing to first call `getChannel(name)`. Returns false if
+   * the channel does not exist (i.e. never created or already closed)
+   * or the handler was not registered.
+   *
+   * @param {string} name Channel name.
+   * @param {(message: any) => void} handler Subscriber function to remove.
+   * @returns {boolean} True if the handler was removed, false otherwise.
+   * @throws {TypeError} If `name` is not a string.
+   * @throws {RangeError} If `name` is an empty string.
+   */
+  unsubscribe(name, handler) {
+    validateChannelName(name);
+    const entry = this.#channels.get(name);
+    if (!entry) return false;
+    return entry.wrapper.unsubscribe(handler);
+  }
+
+  /**
+   * Returns true if the named channel exists in this registry AND has
+   * at least one active subscriber. A channel that has been closed or
+   * never created returns false. A channel whose last subscriber was
+   * removed (but the channel wrapper still exists) also returns false.
+   *
+   * @param {string} name Channel name.
+   * @returns {boolean}
+   * @throws {TypeError} If `name` is not a string.
+   * @throws {RangeError} If `name` is an empty string.
+   */
+  hasSubscribers(name) {
+    validateChannelName(name);
+    const entry = this.#channels.get(name);
+    if (!entry) return false;
+    return entry.wrapper.subscriberCount() > 0;
+  }
+
+  /**
    * Closes every channel this registry owns. Used during worker
    * recycle, runtime shutdown, or worker-thread termination.
    *
@@ -170,6 +207,10 @@ export class ChannelRegistry {
 
       unsubscribe(handler) {
         return subscribers.delete(handler);
+      },
+
+      subscriberCount() {
+        return subscribers.size;
       },
 
       close() {

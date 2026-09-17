@@ -389,6 +389,43 @@ export class WorkerRuntime extends EventEmitter {
     }
     return this.#channelRegistry.subscribe(name, handler);
   }
+
+  /**
+   * Removes a previously-registered subscriber from the named channel.
+   *
+   * Equivalent to calling the unsubscribe function returned by
+   * `subscribe()`; this is a convenience for callers that don't want
+   * to retain the unsubscribe handle.
+   *
+   * @param {string} name Channel name (non-empty string).
+   * @param {(message: any) => void} handler Subscriber function to remove.
+   * @returns {boolean} True if the handler was removed, false if not found.
+   * @throws {TypeError} If `name` is not a string or `handler` is not a function.
+   * @throws {RangeError} If `name` is empty.
+   */
+  unsubscribe(name, handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('unsubscribe() requires a function handler');
+    }
+    return this.#channelRegistry.unsubscribe(name, handler);
+  }
+
+  /**
+   * Returns true if the named channel exists in the main-thread registry
+   * AND has at least one active subscriber.
+   *
+   * A channel that has been closed (or never created) returns false.
+   * A channel whose last subscriber was removed (but the underlying BC
+   * handle is still open) also returns false.
+   *
+   * @param {string} name Channel name (non-empty string).
+   * @returns {boolean}
+   * @throws {TypeError} If `name` is not a string.
+   * @throws {RangeError} If `name` is empty.
+   */
+  hasSubscribers(name) {
+    return this.#channelRegistry.hasSubscribers(name);
+  }
 }
 
 /**
