@@ -22,3 +22,4 @@ This directory contains the formal Architecture Decision Records for the **Persi
 | **[ADR-0016](0016-priority-routing-and-fairness.md)** | Priority Routing and Fairness via Numeric Task Priority | Accepted | 2026-09-16 |
 | **[ADR-0017](0017-cooperative-cancellation-via-abortsignal.md)** | Cooperative Cancellation via Standard `AbortSignal` | Accepted | 2026-09-16 |
 | **[ADR-0018](0018-fire-and-forget-hazard-with-execute-and-post-shutdown-flakes.md)** | Fire-and-Forget Hazard with `runtime.execute()` and Post-Shutdown Test Flakes | Accepted | 2026-09-17 |
+| **[ADR-0019](0019-default-workers-reduced-from-availableparallelism-to-1.md)** | Default Worker Pool Size Reduced from `availableParallelism() - 1` to `1` (memory + sizing) | Accepted | 2026-09-17 |
