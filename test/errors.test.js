@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   QueueOverflowError,
+  StreamAbortedError,
+  StreamConfigError,
   TaskAbortedError,
   TaskQueueTimeoutError,
   TaskTimeoutError,
@@ -130,6 +132,59 @@ describe('Error Hierarchy', () => {
     it('extends WorkerRuntimeError', () => {
       const err = new QueueOverflowError('overflow', { maxQueueSize: 1 });
       assert.ok(err instanceof WorkerRuntimeError);
+    });
+  });
+
+  describe('StreamAbortedError', () => {
+    it('extends WorkerRuntimeError and uses ERR_STREAM_ABORTED by default', () => {
+      const err = new StreamAbortedError('aborted');
+      assert.ok(err instanceof WorkerRuntimeError);
+      assert.ok(err instanceof Error);
+      assert.equal(err.name, 'StreamAbortedError');
+      assert.equal(err.code, 'ERR_STREAM_ABORTED');
+      assert.equal(err.message, 'aborted');
+    });
+
+    it('captures taskId and reason', () => {
+      const err = new StreamAbortedError('aborted', {
+        taskId: 's_42',
+        reason: 'consumer-break',
+      });
+      assert.equal(err.taskId, 's_42');
+      assert.equal(err.reason, 'consumer-break');
+    });
+
+    it('propagates cause', () => {
+      const root = new Error('underlying');
+      const err = new StreamAbortedError('aborted', { cause: root });
+      assert.equal(err.cause, root);
+    });
+
+    it('honors a custom code', () => {
+      const err = new StreamAbortedError('aborted', { code: 'CUSTOM_STREAM_CODE' });
+      assert.equal(err.code, 'CUSTOM_STREAM_CODE');
+    });
+  });
+
+  describe('StreamConfigError', () => {
+    it('extends TypeError and Error', () => {
+      const err = new StreamConfigError('bad config');
+      assert.ok(err instanceof TypeError, 'StreamConfigError must be a TypeError');
+      assert.ok(err instanceof Error, 'StreamConfigError must be an Error');
+      assert.equal(err.name, 'StreamConfigError');
+      assert.equal(err.message, 'bad config');
+    });
+
+    it('propagates cause when provided', () => {
+      const root = new Error('underlying');
+      const err = new StreamConfigError('bad config', { cause: root });
+      assert.equal(err.cause, root);
+    });
+
+    it('does not expose a default code (it is a TypeError, not a WorkerRuntimeError)', () => {
+      const err = new StreamConfigError('bad config');
+      // WorkerRuntimeError-derived errors carry a `code`; StreamConfigError does not.
+      assert.equal(err.code, undefined);
     });
   });
 });

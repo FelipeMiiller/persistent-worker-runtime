@@ -6,6 +6,8 @@
 
 export {
   QueueOverflowError,
+  StreamAbortedError,
+  StreamConfigError,
   TaskAbortedError,
   TaskQueueTimeoutError,
   TaskTimeoutError,
