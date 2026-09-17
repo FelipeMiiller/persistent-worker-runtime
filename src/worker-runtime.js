@@ -1,10 +1,14 @@
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { availableParallelism } from 'node:os';
 import { ChannelRegistry } from './broadcast-channel.js';
-import { WorkerRuntimeError } from './errors.js';
+import { StreamConfigError, WorkerRuntimeError } from './errors.js';
+import { isGeneratorFunction } from './stream-runner.js';
+import { Stream } from './streaming.js';
 import { Supervisor } from './supervisor.js';
 import { TaskHandle } from './task-handle.js';
 import { TaskQueue } from './task-queue.js';
+import { WorkerHandle } from './worker-handle.js';
 
 /**
  * WorkerRuntime is the primary concurrency engine.
@@ -19,6 +23,8 @@ export class WorkerRuntime extends EventEmitter {
   #maxMemoryMb;
   #forceKillOnTimeout;
   #killGracePeriodMs;
+  /** @type {Map<string, {stream: Stream, worker: import('./worker-handle.js').WorkerHandle}>} */
+  #activeStreams = new Map();
   /** Main-thread BroadcastChannel registry. Workers have their own. */
   #channelRegistry = new ChannelRegistry();
   #stats = {
@@ -374,6 +380,89 @@ export class WorkerRuntime extends EventEmitter {
   }
 
   /**
+   * Streams chunks from a generator function running on a worker.
+   *
+   * `taskFn` MUST be an `AsyncGeneratorFunction` or `GeneratorFunction`;
+   * anything else throws a `StreamConfigError` (which is a `TypeError`).
+   * A `Stream` instance is returned immediately; chunks are yielded via
+   * the standard async-iterator protocol, and the worker's
+   * `MSG_STREAM_*` IPC frames are routed to the stream's producer side.
+   *
+   * Streams hold a worker for their full lifetime (no multiplexing), so
+   * if you intend to run multiple concurrent streams, size the pool
+   * accordingly via the `workers` constructor option.
+   *
+   * @param {Function} taskFn       An (Async)GeneratorFunction.
+   * @param {*}        payload      Caller payload.
+   * @param {Object}   [options]
+   * @param {number}   [options.highWaterMark=1024]  Buffer threshold for `stream:backpressure`.
+   * @param {AbortSignal} [options.signal]            External signal that aborts the stream.
+   * @returns {Stream}
+   * @throws {WorkerRuntimeError}  If the runtime is shutting down or no worker is idle.
+   * @throws {StreamConfigError}   If `taskFn` is not a generator function.
+   */
+  stream(taskFn, payload, options = {}) {
+    if (this.#isShuttingDown) {
+      throw new WorkerRuntimeError('Cannot stream: Runtime is shutting down');
+    }
+    if (typeof taskFn !== 'function') {
+      throw new StreamConfigError('stream() expects taskFn to be a function');
+    }
+    if (!isGeneratorFunction(taskFn)) {
+      throw new StreamConfigError(
+        'stream() taskFn must be an AsyncGeneratorFunction or GeneratorFunction',
+      );
+    }
+
+    const idleWorkers = this.#supervisor.idleWorkers;
+    if (idleWorkers.length === 0) {
+      throw new WorkerRuntimeError(
+        'No idle worker available for stream — concurrent streams are 1:1 with workers',
+      );
+    }
+    const worker = idleWorkers[0];
+
+    const taskId = `stream-${randomUUID()}`;
+    const stream = new Stream({
+      highWaterMark: options.highWaterMark,
+      signal: options.signal,
+    });
+
+    const onAbortToWorker = (reason) => worker.abortStream(taskId, reason);
+    // Both `stream:cancelled` (consumer break) and `stream:aborted`
+    // (external signal) must reach the worker so its iterator can drain
+    // and finally blocks can run.
+    stream.on('stream:cancelled', (data) => onAbortToWorker(data.reason));
+    stream.on('stream:aborted', (data) => onAbortToWorker(data.reason));
+
+    this.#activeStreams.set(taskId, { stream, worker });
+
+    worker.executeStreamTask({
+      taskId,
+      fnCode: taskFn.toString(),
+      payload,
+      onChunk: ({ chunk }) => stream.pushChunk(chunk),
+      onEnd: (info) => {
+        if (info.aborted) {
+          stream.pushAbortEnd({ reason: info.reason });
+        } else {
+          stream.pushEnd({ returnValue: info.returnValue });
+        }
+        this.#activeStreams.delete(taskId);
+        // Free the worker so it can pick up the next queued task.
+        this.#scheduleNext();
+      },
+      onError: (error) => {
+        stream.pushError(error);
+        this.#activeStreams.delete(taskId);
+        this.#scheduleNext();
+      },
+    });
+
+    return stream;
+  }
+
+  /**
    * Creates or acquires a dedicated stateful worker handle with private L1 memory.
    * @param {Object} options
    * @returns {Promise<WorkerHandle>}
@@ -410,6 +499,14 @@ export class WorkerRuntime extends EventEmitter {
   async shutdown() {
     this.#isShuttingDown = true;
     this.#queue.destroy(new WorkerRuntimeError('Runtime is shutting down'));
+    // Abort every active stream so the worker's generator can drain its
+    // finally blocks. The worker termination below tears the connection
+    // down anyway, but doing it explicitly produces a clean abort frame.
+    for (const [taskId, { stream, worker }] of this.#activeStreams) {
+      worker.abortStream(taskId, 'runtime-shutdown');
+      stream.pushAbortEnd({ reason: 'runtime-shutdown' });
+    }
+    this.#activeStreams.clear();
     // Close every main-thread BroadcastChannel so the native BC handles
     // do not keep the Event Loop alive after worker shutdown.
     this.#channelRegistry.closeAll();

@@ -22,10 +22,20 @@
  * Returns true when `fn` is an async or sync generator function.
  * Detection uses `Function.prototype.constructor.name` (per ADR-0012 spec).
  *
- * @param {*} fn
+ * When `fn` was created via `new Function(...)` (the worker's fnCode path),
+ * the generator-ness is lost — the resulting function is just a plain
+ * `Function`. To work around that, callers can pass the original
+ * `fnCode` source string and we'll fall back to a regex check for
+ * `function*` / `async function*` tokens.
+ *
+ * @param {*}     fn
+ * @param {string} [fnCode]  The original function source (optional).
  * @returns {boolean}
  */
-export function isGeneratorFunction(fn) {
+export function isGeneratorFunction(fn, fnCode) {
+  if (typeof fnCode === 'string' && /\b(?:async\s+)?function\s*\*/.test(fnCode)) {
+    return true;
+  }
   if (typeof fn !== 'function') return false;
   const name = fn.constructor?.name;
   return name === 'AsyncGeneratorFunction' || name === 'GeneratorFunction';

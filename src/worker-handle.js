@@ -16,6 +16,7 @@ let workerSequence = 1;
 export class WorkerHandle extends EventEmitter {
   #worker = null;
   #currentTask = null;
+  #streamTask = null;
   #status = 'starting';
   #tasksCompleted = 0;
   #lastMemoryUsageBytes = 0;
@@ -159,7 +160,37 @@ export class WorkerHandle extends EventEmitter {
             memoryUsageBytes: this.#lastMemoryUsageBytes,
           });
         }
+        return;
       }
+
+      // Streaming protocol — route MSG_STREAM_* frames to the registered
+      // stream handler (one active stream per worker, by design).
+      if (
+        typeof message?.type === 'string' &&
+        message.type.startsWith('MSG_STREAM_') &&
+        this.#streamTask?.taskId === message.taskId
+      ) {
+        const streamTask = this.#streamTask;
+        if (message.type === 'MSG_STREAM_CHUNK') {
+          streamTask.onChunk({ seq: message.seq, chunk: message.chunk });
+        } else if (message.type === 'MSG_STREAM_END') {
+          streamTask.onEnd({
+            returnValue: message.returnValue,
+            aborted: message.aborted,
+            reason: message.reason,
+            memoryUsageBytes: message.memoryUsageBytes,
+          });
+          this.#teardownStream();
+        } else if (message.type === 'MSG_STREAM_ERROR') {
+          streamTask.onError(message.error);
+          this.#teardownStream();
+        }
+        return;
+      }
+
+      // Incoming MSG_STREAM_ABORT from the worker? Currently the worker
+      // does not initiate aborts — the main thread does. Anything else
+      // is ignored.
     });
 
     this.#worker.on('error', (err) => {
@@ -219,6 +250,76 @@ export class WorkerHandle extends EventEmitter {
       this.#worker.postMessage(message);
     }
     return task.promise;
+  }
+
+  /**
+   * Dispatches a streaming task to this worker. The worker detects the
+   * generator function via the worker-side T2 protocol and emits
+   * MSG_STREAM_* frames back; this handle routes them to `onChunk`,
+   * `onEnd`, and `onError`. The `onAbort` callback is invoked when the
+   * consumer cancels the stream so the main thread can post
+   * MSG_STREAM_ABORT to the worker.
+   *
+   * @param {Object}   opts
+   * @param {string}   opts.taskId
+   * @param {string}   opts.fnCode
+   * @param {*}        opts.payload
+   * @param {(frame: {seq:number, chunk:any}) => void} opts.onChunk
+   * @param {(end: {returnValue:any, aborted:boolean, reason:any, memoryUsageBytes:number}) => void} opts.onEnd
+   * @param {(error: any) => void} opts.onError
+   * @param {(reason: any) => void} opts.onAbort
+   * @returns {void}
+   */
+  executeStreamTask({ taskId, fnCode, payload, onChunk, onEnd, onError, onAbort }) {
+    if (!this.isIdle) {
+      throw new WorkerRuntimeError(`Worker ${this.id} is busy with status: ${this.#status}`);
+    }
+    if (this.#streamTask) {
+      throw new WorkerRuntimeError(`Worker ${this.id} already has an active stream`);
+    }
+
+    this.#status = 'busy';
+    this.#streamTask = { taskId, onChunk, onEnd, onError, onAbort };
+
+    this.#worker.postMessage({
+      taskId,
+      type: 'stream',
+      payload,
+      fnCode,
+    });
+  }
+
+  /**
+   * Posts MSG_STREAM_ABORT to the worker for the active stream, if any.
+   * No-op if no stream is active on this worker.
+   *
+   * @param {string} taskId
+   * @param {any}    reason
+   */
+  abortStream(taskId, reason) {
+    if (!this.#streamTask || this.#streamTask.taskId !== taskId) return;
+    this.#worker.postMessage({
+      type: 'MSG_STREAM_ABORT',
+      taskId,
+      reason,
+    });
+  }
+
+  #teardownStream() {
+    if (this.#streamTask) {
+      const handler = this.#streamTask.onAbort;
+      this.#streamTask = null;
+      if (
+        this.#status !== 'recycling' &&
+        this.#status !== 'terminating' &&
+        this.#status !== 'terminated'
+      ) {
+        this.#status = 'idle';
+      }
+      // Notify caller that the stream slot is free; safe to ignore
+      // when no onAbort handler is attached.
+      if (handler) handler();
+    }
   }
 
   /**

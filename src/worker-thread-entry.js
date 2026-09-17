@@ -87,8 +87,12 @@ async function processTask(message) {
       );
 
       // 2a. Streaming path — generator function (async or sync).
-      // Detected via Function constructor name per ADR-0012.
-      if (isGeneratorFunction(fn)) {
+      // Detected via the source string (`new Function(...)` strips the
+      // AsyncGeneratorFunction / GeneratorFunction constructor identity,
+      // so we fall back to a regex on fnCode). When fnCode is not
+      // available (e.g. inline customHandler), runtime detection via
+      // Function.prototype.constructor.name is attempted.
+      if (isGeneratorFunction(fn, fnCode)) {
         const ac = new AbortController();
         activeStreams.set(taskId, ac);
         try {
