@@ -231,6 +231,12 @@ export class WorkerRuntime extends EventEmitter {
       failedTasks: this.#stats.failedTasks,
       recycledWorkersCount: this.#supervisor.recycledCount,
       preemptedTasksCount: this.#stats.preemptedTasksCount,
+      // T6 telemetry: count of streams currently dispatched to a worker.
+      // Pending streams (queued because the pool was saturated) are
+      // tracked separately via `pendingStreams` so observers can tell
+      // "running" from "waiting to run".
+      activeStreams: this.#activeStreams.size,
+      pendingStreams: this.#pendingStreams.length,
     };
   }
 
@@ -431,6 +437,12 @@ export class WorkerRuntime extends EventEmitter {
       signal: options.signal,
     });
 
+    // T6 telemetry: fire `stream:created` synchronously from stream() so
+    // observers see the stream at the same moment the user does (queued
+    // or dispatched, doesn't matter — the stream exists from the caller's
+    // POV).
+    this.emit('stream:created', { taskId });
+
     const idleWorkers = this.#supervisor.idleWorkers;
     if (idleWorkers.length === 0) {
       // Queue the stream; it'll be picked up when a worker frees.
@@ -443,9 +455,16 @@ export class WorkerRuntime extends EventEmitter {
       const fnCode = taskFn.toString();
       const request = { taskId, taskFn, fnCode, payload, options, stream };
       this.#pendingStreams.push(request);
-      stream.on('stream:aborted', () => {
+      stream.on('stream:aborted', (data) => {
         const idx = this.#pendingStreams.indexOf(request);
-        if (idx >= 0) this.#pendingStreams.splice(idx, 1);
+        if (idx >= 0) {
+          this.#pendingStreams.splice(idx, 1);
+          // T6: only the queue-listener emits while the request is still
+          // queued. After dispatch the indexOf returns -1 and the
+          // dispatch-listener (added in #assignStreamToWorker) takes
+          // over. This avoids duplicate `stream:aborted` emissions.
+          this.emit('stream:aborted', { taskId, reason: data.reason });
+        }
       });
       // Kick the scheduler in case a worker freed between the
       // idleWorkers check above and this point.
@@ -468,19 +487,28 @@ export class WorkerRuntime extends EventEmitter {
     // `stream:aborted` fires for both consumer-initiated cancellation
     // (`break` / `return()`) and external-signal aborts (T5 unification).
     // Both paths must reach the worker so its iterator can drain and
-    // `finally` blocks can run deterministically.
-    stream.on('stream:aborted', (data) => onAbortToWorker(data.reason));
+    // `finally` blocks can run deterministically. T6 also re-emits on
+    // the runtime's EventEmitter so cross-stream observers can react.
+    stream.on('stream:aborted', (data) => {
+      onAbortToWorker(data.reason);
+      this.emit('stream:aborted', { taskId, reason: data.reason });
+    });
     // Backpressure: the bounded buffer flips `stream:backpressure
     // {state:'paused'}` on the upward crossing and `{state:'resumed'}`
     // when it drains below HWM / 2. Forward both to the worker so its
     // generator parks between yields instead of posting into a full
-    // IPC channel.
+    // IPC channel. T6 also re-emits on the runtime's EventEmitter.
     stream.on('stream:backpressure', (data) => {
       if (data?.state === 'paused') {
         worker.pauseStream(taskId);
       } else if (data?.state === 'resumed') {
         worker.resumeStream(taskId);
       }
+      this.emit('stream:backpressure', {
+        taskId,
+        state: data?.state,
+        queueLength: data?.queueLength,
+      });
     });
 
     this.#activeStreams.set(taskId, { stream, worker });
@@ -489,11 +517,27 @@ export class WorkerRuntime extends EventEmitter {
       taskId,
       fnCode: taskFn.toString(),
       payload,
-      onChunk: ({ chunk }) => stream.pushChunk(chunk),
+      onChunk: ({ seq, chunk }) => {
+        stream.pushChunk(chunk);
+        // T6 telemetry: stream:chunk { taskId, seq } fires per delivered
+        // chunk. seq is the per-stream monotonic counter from the worker.
+        this.emit('stream:chunk', { taskId, seq });
+      },
       onEnd: (info) => {
+        // Emit the runtime event BEFORE pushAbortEnd / pushEnd so the
+        // notification fires regardless of whether the consumer-facing
+        // push*() is a no-op (e.g. when an external AbortSignal already
+        // flipped Stream._settled=true via _abort(), the abort-path
+        // pushAbortEnd is a guarded early return).
         if (info.aborted) {
+          this.emit('stream:aborted', { taskId, reason: info.reason });
           stream.pushAbortEnd({ reason: info.reason });
         } else {
+          this.emit('stream:end', {
+            taskId,
+            totalChunks: stream.stats.totalChunks,
+            returnValue: info.returnValue,
+          });
           stream.pushEnd({ returnValue: info.returnValue });
         }
         this.#activeStreams.delete(taskId);
@@ -502,6 +546,10 @@ export class WorkerRuntime extends EventEmitter {
         this.#scheduleNext();
       },
       onError: (error) => {
+        this.emit('stream:aborted', {
+          taskId,
+          reason: error?.message || 'generator-throw',
+        });
         stream.pushError(error);
         this.#activeStreams.delete(taskId);
         this.#scheduleNext();
@@ -586,17 +634,21 @@ export class WorkerRuntime extends EventEmitter {
     // listener set up in stream() forwards to worker.abortStream(); the
     // explicit abortStream() call here is therefore redundant but kept
     // for the case where a stream has been registered before the
-    // listener could be wired (defensive: belt + suspenders).
+    // listener could be wired (defensive: belt + suspenders). T6 also
+    // emits `stream:aborted` on the runtime's EventEmitter so observers
+    // see the shutdown-driven aborts.
     for (const [taskId, { stream, worker }] of this.#activeStreams) {
       worker.abortStream(taskId, 'runtime-shutdown');
       stream.pushAbortEnd({ reason: 'runtime-shutdown' });
+      this.emit('stream:aborted', { taskId, reason: 'runtime-shutdown' });
     }
     this.#activeStreams.clear();
     // Same drain for streams that were queued but never picked up a
     // worker — without this, their pending next() would hang forever
     // and prevent the Event Loop from exiting.
-    for (const { stream } of this.#pendingStreams) {
+    for (const { stream, taskId } of this.#pendingStreams) {
       stream.pushAbortEnd({ reason: 'runtime-shutdown' });
+      this.emit('stream:aborted', { taskId, reason: 'runtime-shutdown' });
     }
     this.#pendingStreams.length = 0;
     // Close every main-thread BroadcastChannel so the native BC handles

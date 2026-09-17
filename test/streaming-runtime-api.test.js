@@ -364,4 +364,211 @@ describe('ADR-0012 — runtime.stream() API (T4)', () => {
       // test/streaming.test.js (T2).
     });
   });
+
+  describe('T6 telemetry — runtime events + activeStreams counter', () => {
+    it('emits stream:created synchronously from stream()', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const events = [];
+      runtime.on('stream:created', (e) => events.push(e));
+      const stream = runtime.stream(async function* () {
+        yield 1;
+      });
+      assert.equal(events.length, 1);
+      assert.ok(stream && events[0].taskId.startsWith('stream-'));
+      // Drain so afterEach doesn't hang.
+      for await (const _c of stream) {
+        /* drain */
+      }
+    });
+
+    it('emits stream:chunk per delivered chunk with monotonic seq', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const chunks = [];
+      runtime.on('stream:chunk', (e) => chunks.push(e));
+      const stream = runtime.stream(async function* () {
+        for (let i = 0; i < 5; i++) yield i;
+      });
+      for await (const _c of stream) {
+        /* drain */
+      }
+      assert.equal(chunks.length, 5);
+      // seq must be 0..4 (worker-side monotonic).
+      assert.deepEqual(
+        chunks.map((c) => c.seq),
+        [0, 1, 2, 3, 4],
+      );
+      // All chunks share the same taskId.
+      const taskId = chunks[0].taskId;
+      assert.ok(chunks.every((c) => c.taskId === taskId));
+    });
+
+    it('emits stream:end with totalChunks on natural completion', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const ends = [];
+      runtime.on('stream:end', (e) => ends.push(e));
+      const stream = runtime.stream(async function* () {
+        yield 'a';
+        yield 'b';
+        yield 'c';
+      });
+      for await (const _c of stream) {
+        /* drain */
+      }
+      assert.equal(ends.length, 1);
+      assert.equal(ends[0].totalChunks, 3);
+      assert.ok(ends[0].taskId.startsWith('stream-'));
+    });
+
+    it('emits stream:aborted on consumer break with reason=consumer-return', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const aborts = [];
+      runtime.on('stream:aborted', (e) => aborts.push(e));
+      const stream = runtime.stream(async function* () {
+        yield 1;
+        yield 2;
+        yield 3;
+      });
+      for await (const c of stream) {
+        if (c === 1) break;
+      }
+      assert.equal(aborts.length, 1);
+      assert.equal(aborts[0].reason, 'consumer-return');
+    });
+
+    it('emits stream:aborted on external AbortSignal with the signal reason', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const aborts = [];
+      runtime.on('stream:aborted', (e) => aborts.push(e));
+      const ac = new AbortController();
+      const stream = runtime.stream(
+        async function* ({ signal }) {
+          while (!signal?.aborted) {
+            yield 'tick';
+            await new Promise((r) => setTimeout(r, 5));
+          }
+        },
+        { signal: ac.signal },
+        { signal: ac.signal },
+      );
+      // Resolve a Promise the moment the runtime's stream:aborted fires.
+      // We need this because the for-await loop exits as soon as
+      // Stream._settled flips true (the Signal listener calls _abort
+      // synchronously), which happens *before* the worker roundtrip
+      // that ultimately fires the runtime's stream:aborted event.
+      const abortFired = new Promise((resolve) => {
+        runtime.once('stream:aborted', resolve);
+      });
+      let count = 0;
+      for await (const _c of stream) {
+        count++;
+        if (count === 2) ac.abort('user-cancel');
+      }
+      await abortFired;
+      const matched = aborts.find((e) => e.reason === 'user-cancel');
+      assert.ok(matched, 'expected stream:aborted with reason=user-cancel');
+    });
+
+    it('emits stream:aborted when a queued stream is dropped via pre-aborted signal', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const blocker = runtime.stream(async function* () {
+        yield 'block';
+        await new Promise((r) => setTimeout(r, 60));
+      });
+      const blockerDrain = (async () => {
+        for await (const _c of blocker) {
+          /* drain */
+        }
+      })();
+
+      const aborts = [];
+      runtime.on('stream:aborted', (e) => aborts.push(e));
+      const ac = new AbortController();
+      const second = runtime.stream(
+        async function* () {
+          yield 'never';
+        },
+        { signal: ac.signal },
+        { signal: ac.signal },
+      );
+      ac.abort('dropped-while-queued');
+      // The queue-listener fires the runtime emit synchronously inside
+      // the abort path (the stream was never dispatched), so by the
+      // time we drain there should be at least one entry.
+      for await (const _c of second) {
+        /* drain */
+      }
+      await blockerDrain;
+      const matched = aborts.find((e) => e.reason === 'dropped-while-queued');
+      assert.ok(matched, 'expected stream:aborted with reason=dropped-while-queued');
+    });
+
+    it('emits stream:backpressure {state:paused, queueLength} and {state:resumed} on cross HWM', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const bps = [];
+      runtime.on('stream:backpressure', (e) => bps.push(e));
+      const stream = runtime.stream(
+        async function* () {
+          for (let i = 0; i < 50; i++) {
+            yield i;
+          }
+        },
+        undefined,
+        { highWaterMark: 4 },
+      );
+      const collected = [];
+      for await (const c of stream) {
+        collected.push(c);
+        // Drain slowly enough to provoke an upward crossing.
+        await new Promise((r) => setTimeout(r, 2));
+      }
+      assert.equal(collected.length, 50);
+      const paused = bps.filter((e) => e.state === 'paused');
+      const resumed = bps.filter((e) => e.state === 'resumed');
+      assert.ok(paused.length >= 1, 'expected at least one paused event');
+      assert.ok(resumed.length >= 1, 'expected at least one resumed event');
+      assert.equal(paused[0].taskId, resumed[0].taskId);
+      assert.ok(paused[0].queueLength >= 4);
+    });
+
+    it('runtime.stats() reports activeStreams and pendingStreams', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const blocker = runtime.stream(async function* () {
+        yield 'b';
+        await new Promise((r) => setTimeout(r, 60));
+        yield 'b2';
+      });
+      // Give the worker a tick so it actually enters the iterator.
+      await new Promise((r) => setImmediate(r));
+      // Queue a second stream while the first is mid-flight.
+      const queued = runtime.stream(async function* () {
+        yield 'q';
+      });
+      assert.equal(runtime.stats.activeStreams, 1, 'first stream should be active');
+      assert.equal(runtime.stats.pendingStreams, 1, 'second stream should be queued');
+      for await (const _c of blocker) {
+        /* drain */
+      }
+      for await (const _c of queued) {
+        /* drain */
+      }
+      assert.equal(runtime.stats.activeStreams, 0);
+      assert.equal(runtime.stats.pendingStreams, 0);
+    });
+
+    it('emits stream:aborted with reason=runtime-shutdown when shutdown drains streams', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const aborts = [];
+      runtime.on('stream:aborted', (e) => aborts.push(e));
+      const stream = runtime.stream(async function* () {
+        yield 'tick';
+        await new Promise((r) => setTimeout(r, 5000));
+        yield 'never';
+      });
+      // Drain the first chunk so the stream is actually active.
+      await stream.next();
+      await runtime.shutdown();
+      const matched = aborts.find((e) => e.reason === 'runtime-shutdown');
+      assert.ok(matched, 'expected stream:aborted with reason=runtime-shutdown');
+    });
+  });
 });
