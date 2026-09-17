@@ -21,6 +21,7 @@
     "test": "node --test test/**/*.test.js",
     "test:coverage": "node --test --experimental-test-coverage test/**/*.test.js",
     "lint": "biome check src/ test/ examples/ benchmarks/",
+    "lint:ci": "biome ci src/ test/ examples/ benchmarks/",
     "lint:fix": "biome check --write --unsafe src/ test/ examples/ benchmarks/",
     "format": "biome format --write src/ test/ examples/ benchmarks/",
     "format:check": "biome format src/ test/ examples/ benchmarks/",

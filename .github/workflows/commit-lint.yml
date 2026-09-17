@@ -1,0 +1,65 @@
+name: First commit message adheres to guidelines
+
+# Validates the first (and only, for this project's T1–T7 atomic-commit
+# discipline) commit message in a PR against the nodejs/node commit message
+# format via the official `core-validate-commit` tool. Matches the
+# nodejs/node convention exactly so a future PR to nodejs/node does not
+# need to rewrite commit history.
+
+on:
+  pull_request_target:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: lts/*
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lint-commit-message:
+    name: lint-commit-message
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    runs-on: ubuntu-slim
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Validate first commit message
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799c794 # v7.0.1
+        with:
+          script: |
+            const { exec } = require('@actions/exec');
+            const { data: commits } = await github.rest.pulls.listCommits({
+              ...context.repo,
+              pull_number: context.issue.number,
+              per_page: 1,
+            });
+            if (!commits || commits.length === 0) {
+              throw new Error('No commits found in pull request');
+            }
+            const commit = commits[0];
+            const { exitCode, stdout, stderr } = await exec.getExecOutput('npx', [
+              '-q', '--yes', '--ignore-scripts', 'core-validate-commit@6.0.0',
+              '--no-validate-metadata', '--tap', '-',
+            ], {
+              input: JSON.stringify([{
+                id: commit.sha,
+                message: commit.commit.message,
+                author: commit.commit.author,
+              }]),
+              silent: true,
+              ignoreReturnCode: true,
+            });
+            if (exitCode !== 0) {
+              core.setFailed(stdout || stderr || 'Commit message validation failed');
+            } else {
+              core.info('First commit message passes validation');
+            }
