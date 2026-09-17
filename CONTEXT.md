@@ -606,7 +606,7 @@ Core Metrics:
 
 1. Keep the entire codebase in **idiomatic, modern pure JavaScript (ESM)**.
 2. Target **Node.js >= 24.0.0** (using built-in `node:test`, `node:worker_threads`, `node:async_hooks`, `node:perf_hooks`).
-3. Zero external runtime dependencies (essential for Node.js Core submission).
+3. Zero external runtime dependencies (keeps the install surface and supply-chain risk at zero).
 4. Prove the core execution pipeline first:
    ```text
    submit → queue → worker → execute → result

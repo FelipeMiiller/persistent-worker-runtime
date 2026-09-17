@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
 
 # Cancel in-flight runs for the same branch when a new commit is pushed
-# (saves CI minutes — nodejs/node convention).
+# (saves CI minutes).
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -29,7 +29,7 @@ permissions:
 jobs:
   test:
     name: Test on Node ${{ matrix.node-version }} (${{ matrix.os }})
-    # Skip draft PRs but still run on push (matches nodejs/node pattern).
+    # Skip draft PRs but still run on push.
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     strategy:

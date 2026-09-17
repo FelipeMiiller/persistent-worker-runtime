@@ -2,9 +2,7 @@
 #
 # This file does not define any requirements for landing PRs. Its
 # purpose is to allow automation of courtesy pings to the relevant
-# maintainer(s) when any of the paths listed here are modified. This
-# matches the nodejs/node CODEOWNERS convention (see
-# https://github.com/nodejs/node/blob/main/.github/CODEOWNERS).
+# maintainer(s) when any of the paths listed here are modified.
 #
 # Codeowners must always be teams or maintainers, never individuals
 # without their consent. For a single-maintainer JS library the

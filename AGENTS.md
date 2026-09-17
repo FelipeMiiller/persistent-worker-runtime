@@ -11,7 +11,7 @@ The **Persistent Worker Runtime** is a concurrent execution layer for Node.js bu
 Its core architectural axiom is:
 > **"The Event Loop coordinates. Persistent Workers execute."**
 
-The ultimate goal of this project is to provide a zero-dependency reference implementation and RFC for submission to **Node.js Core (`nodejs/node`)**.
+The ultimate goal of this project is to provide a zero-dependency, pure JavaScript runtime atop `node:worker_threads` with stateful workers, priority routing, backpressure, and async-hooks-aware diagnostics.
 
 ---
 
@@ -23,8 +23,7 @@ persistent-worker-runtime/
 ├── README.md                           # Primary user and developer documentation
 ├── HANDOVER.md                         # Handoff guide for the next chat/session
 ├── CONTEXT.md                          # Foundational architectural context (51 sections)
-├── CONTRIBUTING_TO_NODEJS_PROCESS.md   # Strategic guide for Node.js Core contribution
-├── NODEJS_RFC_PROPOSAL_DRAFT.md        # Official RFC proposal draft for nodejs/node
+├── NODEJS_RFC_PROPOSAL_DRAFT.md        # Draft RFC proposal for a Node.js Persistent Worker Runtime built-in
 ├── package.json                        # Node.js >= 22, pure ESM, zero external dependencies
 ├── LICENSE                             # MIT License
 ├── .github/workflows/ci.yml            # Multi-OS matrix CI (Ubuntu, macOS, Windows)

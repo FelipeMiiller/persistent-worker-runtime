@@ -9,7 +9,7 @@
 
 > **"The Event Loop coordinates. Persistent Workers execute."**
 
-A production-grade, concurrent execution layer built atop `node:worker_threads`. Engineered in **pure modern JavaScript (zero external dependencies)** targeting **Node.js >= 22.0.0** (tested on Node.js 24), designed as a reference implementation for proposed inclusion in **Node.js Core** (`nodejs/node`).
+A production-grade, concurrent execution layer built atop `node:worker_threads`. Engineered in **pure modern JavaScript (zero external dependencies)** targeting **Node.js >= 22.0.0** (tested on Node.js 24).
 
 ---
 
@@ -32,7 +32,6 @@ A production-grade, concurrent execution layer built atop `node:worker_threads`.
 - [Architecture & Memory Hierarchy](#-architecture--memory-hierarchy)
 - [Comparison with Existing Solutions](#-comparison-with-existing-solutions)
 - [Architecture Decision Records (ADRs)](#-architecture-decision-records-adrs)
-- [Node.js Core RFC Proposal](#-nodejs-core-rfc-proposal)
 - [Benchmarks & Empirical Results](BENCHMARKS.md)
 - [Development Conventions (AGENTS.md)](AGENTS.md)
 - [Handover Guide (HANDOVER.md)](HANDOVER.md)
@@ -540,7 +539,7 @@ The runtime organizes memory into three distinct tiers:
 | **Non-blocking Queue Backpressure** | ❌ No | ⚠️ Memory limits | ⚠️ Redis queue | ✅ **Native with Timeout SLA** |
 | **Automatic Retries with Backoff** | ❌ No | ❌ No | ✅ Yes | ✅ **Native in-process** |
 | **Zero-Copy `transferList` Support** | ⚠️ Manual | ⚠️ Limited | ❌ No | ✅ **Built-in** |
-| **Node.js Core RFC Target** | N/A | ❌ No | ❌ No | ✅ **Yes (Direct Core Proposal)** |
+| **RFC Draft Available** | N/A | ❌ No | ❌ No | ✅ [`NODEJS_RFC_PROPOSAL_DRAFT.md`](NODEJS_RFC_PROPOSAL_DRAFT.md) |
 
 ---
 
@@ -566,14 +565,6 @@ Every major architectural choice is documented following the **MADR** format in 
 * **[ADR-0016](docs/adr/0016-priority-routing-and-fairness.md)**: Priority Routing and Fairness (priority tier dequeue + FIFO-within-tier)
 * **[ADR-0017](docs/adr/0017-cooperative-cancellation-via-abortsignal.md)**: Cooperative Cancellation via AbortSignal (TaskAbortedError, signal-aware dispatch)
 * **[ADR-0018](docs/adr/0018-fire-and-forget-hazard-with-execute-and-post-shutdown-flakes.md)**: Fire-and-Forget Hazard with `runtime.execute()` and Post-Shutdown Test Flakes (always await `execute()` or use `dispatch()`)
-
----
-
-## 🏛 Node.js Core RFC Proposal
-
-This codebase serves as the reference implementation for a proposal to the **Node.js Technical Steering Committee (TSC)**:
-* **[Official RFC Proposal Draft](NODEJS_RFC_PROPOSAL_DRAFT.md)**: Ready-to-submit RFC for `nodejs/node`.
-* **[Node.js Core Contribution Guide](CONTRIBUTING_TO_NODEJS_PROCESS.md)**: Strategic analysis of the "Small Core" philosophy and submission roadmap.
 
 ---
 

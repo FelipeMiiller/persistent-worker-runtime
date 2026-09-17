@@ -1,12 +1,12 @@
 ---
 title: "Pure JavaScript & Zero Dependencies"
 category: rule
-summary: "Strict requirement for runtime code to be authored in vanilla JavaScript ESM with zero external dependencies for Node.js Core alignment."
+summary: "Strict requirement for runtime code to be authored in vanilla JavaScript ESM with zero external dependencies."
 ---
 
 # Pure JavaScript & Zero Dependencies
 
-The primary target of this project is inclusion in **Node.js Core (`nodejs/node`)**.
+The runtime is built with zero external dependencies so the install footprint stays small and the code can be read top-to-bottom without chasing third-party semantics.
 
 ## Mandatory Guidelines
 

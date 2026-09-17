@@ -12,7 +12,6 @@
 - **Local Path**: `c:\repository\persistent-worker-runtime`
 - **NPM Package**: `persistent-worker-runtime` (version `0.1.0`)
 - **Goal**: Build a high-performance persistent worker runtime for Node.js over native `worker_threads`, keeping the Event Loop 100% dedicated to non-blocking I/O while persistent workers execute CPU-bound tasks and transactional outbox background jobs with warm L1 heaps.
-- **Node.js Core Target**: Designed as a zero-dependency reference implementation proposed for inclusion into Node.js core stdlib (`node:worker_threads`).
 
 ---
 
@@ -47,7 +46,6 @@
 
 ### Recent Quality Wins (latest session)
 - **T5–T7 streaming delivery** — cancellation refinement (unified `stream:aborted`, `MSG_STREAM_PAUSE`/`RESUME` backpressure, `#pendingStreams` queue), runtime-level telemetry (`stream:created`/`chunk`/`end`/`aborted`/`backpressure` + `activeStreams` stats), two runnable examples, README §Streaming section.
-- **CI alignment to nodejs/node** — split workflows (lint, coverage, commit-lint), SHA-pinned actions, concurrency + cancel-in-progress, paths-ignore, draft PR skip, `core-validate-commit@6.0.0`, dependabot zero-deps block, CODEOWNERS, PR template + DCO 1.1.
 - **Biome 2.x** + **husky 9** + **lint-staged 15** for lint infrastructure.
 - **CI flake fix** — `runtime.execute()` without await caused `WorkerCrashError` to fire after test exit on slower CI runners (macOS Node 22). Fixed by `await`ing.
 - **ADR-0013 delivery** — full BroadcastChannel feature.
@@ -59,12 +57,12 @@
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Your immediate goal**: PR the completed work to `nodejs/node` for inclusion in stdlib, or implement the next deferred feature (ADR-0014 ELU adaptive concurrency).
+**Your immediate goal**: implement the next deferred feature (ADR-0014 ELU adaptive concurrency).
 
 ### Recommended candidates (in priority order)
 
-1. **Open PR against `nodejs/node`** — all five T1–T7 commits are pushed to `origin/develop`; CI matrix (Node 22×24 × ubuntu/macos/windows) is green; CI layout mirrors `nodejs/node/.github` so reviewers will find it familiar. See `CONTRIBUTING_TO_NODEJS_PROCESS.md` for the PR template + acceptance criteria nodejs uses.
-2. **ELU Adaptive Concurrency (ADR-0014)** — Most impactful for production HTTP servers. Auto-throttles pool size under load to protect p99 latency.
+1. **ELU Adaptive Concurrency (ADR-0014)** — Most impactful for production HTTP servers. Auto-throttles pool size under load to protect p99 latency.
+2. **Phase 2 of `streaming-abort-latency` benchmark** — currently deferred (see code comment "needs more design"). Worth revisiting once ADR-0014 lands and we have a clearer picture of abort latency under adaptive concurrency.
 
 ### Workflow
 
@@ -74,10 +72,9 @@
    npm run validate        # lint + test (must pass)
    npm run benchmark:all   # confirm all 14 benchmarks run
    ```
-2. **Pick a feature** from the candidates above.
-3. **Create the spec** under `.specs/features/<feature-name>/spec.md` and `tasks.md` (see existing specs for structure).
-4. **Implement T1 → T2 → ...** following the same conventional-commit cadence used by the previous features.
-5. **Update the docs** in the same commit(s) — README.md section, BENCHMARKS.md if relevant, embedded skill references if user-facing.
+2. **Create the spec** under `.specs/features/<feature-name>/spec.md` and `tasks.md` (see existing specs for structure).
+3. **Implement T1 → T2 → ...** following the same conventional-commit cadence used by the previous features.
+4. **Update the docs** in the same commit(s) — README.md section, BENCHMARKS.md if relevant, embedded skill references if user-facing.
 
 ---
 

@@ -1,6 +1,5 @@
 # Set update schedule for GitHub Actions and npm dependencies.
-# Mirrors nodejs/node's dependabot.yml pattern: weekly for the
-# application ecosystem, monthly for tooling.
+# Weekly for the application ecosystem, monthly for tooling.
 
 version: 2
 updates:

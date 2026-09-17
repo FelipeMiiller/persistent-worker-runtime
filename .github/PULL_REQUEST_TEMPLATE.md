@@ -10,7 +10,6 @@ Before submitting this PR, please make sure:
 - [ ] `npm run benchmark:all` passes (or note why it doesn't apply)
 - [ ] Commit messages follow Conventional Commits
       (`type(scope): description`) and would pass `core-validate-commit`
-      from the nodejs/node contributor guide
 - [ ] For any architectural decision, an ADR exists under `docs/adr/`
 
 For code changes:

@@ -2,7 +2,6 @@
 
 **Author:** Felipe Miiller / Contributors  
 **Status:** Draft / Proposed for Discussion  
-**Target Repository:** `nodejs/node`  
 **Target Subsystem:** `worker_threads` / `lib/internal/worker/` / `node:worker_runtime`  
 
 ---
@@ -42,9 +41,9 @@ Main Event Loop  ◄─── BLOCKED by synchronous CPU task (e.g., 80ms)
 
 ---
 
-## 3. Why This Belongs in Node.js Core ("Small Core" Justification)
+## 3. Why This Belongs as a Built-in Concurrency Primitive
 
-In accordance with Node.js TSC principles, any addition to core must justify why it should not merely remain in userland. The justification for a native Persistent Worker Runtime is:
+A native Persistent Worker Runtime answers a question that has no canonical answer today: how should an application offload CPU-bound work from the Event Loop without sacrificing observability, error propagation, or warm in-memory worker state? The justification for a native API is:
 
 1. **Standardizing the Missing Concurrency Primitive:**
    Just as `node:test` standardized testing and `node:sqlite` provided friction-free embedded persistence, a built-in execution runtime provides a batteries-included answer to the most persistent complaint about Node.js ("Node cannot handle CPU work").
@@ -223,11 +222,11 @@ To demonstrate viability to the Node.js community, a standalone Reference Implem
   - **BroadcastChannel** (`runtime.broadcast()` / `subscribe()`): 25 unit tests; benchmark 18.3× faster than per-worker dispatch.
   - **Streaming** (`runtime.stream()`): 36 unit tests across 4 files; 3 dedicated benchmarks (`streaming-throughput` ~210k chunks/s, `streaming-memory`, `streaming-stress`); 2 runnable examples (`streaming-llm.js` with TTFT ~70 ms, `streaming-csv-export.js` with observable backpressure).
   - **Default pool sizing** (ADR-0019): benchmark proves `workers=1` default is 6.45× more memory-efficient than legacy `os.availableParallelism()` on multi-core hosts.
-- **CI matrix** mirrors `nodejs/node/.github`: lint, coverage, test (ubuntu/macos/windows × Node 22.x/24.x), and `commit-lint.yml` using `core-validate-commit@6.0.0`.
+- **CI matrix** covers Node 22.x and 24.x on ubuntu, macOS, and Windows, with separate lint, coverage, and test workflows plus `commit-lint.yml` using `core-validate-commit@6.0.0`.
 
 ---
 
-## 8. Questions for Discussion with the Node.js TSC
+## 8. Open Questions for Community Discussion
 
 1. Should this capability be introduced as a new top-level built-in module (e.g., `node:worker_runtime` / `node:worker_pool`) or as an extension to `node:worker_threads` (e.g., `worker_threads.createPool()`)?
 2. What are the community's preferences regarding functional serialization (`execute(() => { ... })` using stringified closures vs script-based tasks)?

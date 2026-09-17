@@ -1,10 +1,8 @@
 name: First commit message adheres to guidelines
 
-# Validates the first (and only, for this project's T1–T7 atomic-commit
-# discipline) commit message in a PR against the nodejs/node commit message
-# format via the official `core-validate-commit` tool. Matches the
-# nodejs/node convention exactly so a future PR to nodejs/node does not
-# need to rewrite commit history.
+# Validates the first commit message in a PR via the official
+# `core-validate-commit` tool from the Node.js core project, which is
+# the strictest public Conventional Commits linter we can wire up.
 
 on:
   pull_request_target:
