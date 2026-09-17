@@ -1,7 +1,7 @@
 {
   "name": "persistent-worker-runtime",
   "version": "0.1.0",
-  "description": "Use the persistent-worker-runtime library to offload CPU-bound work to persistent Node.js worker threads while keeping the Event Loop responsive. Covers pool setup, request-response vs outbox modes, L1 state, cancellation, priority routing, zero-copy transfer, retries, and preemption.",
+  "description": "Use the persistent-worker-runtime library to offload CPU-bound work to persistent Node.js worker threads while keeping the Event Loop responsive. Covers pool setup, request-response vs outbox modes, L1 state, cancellation, priority routing, zero-copy transfer, retries, preemption, and inter-worker BroadcastChannel for L1 cache invalidation.",
   "author": "Felipe Miiller",
   "license": "MIT",
   "package": "persistent-worker-runtime",
@@ -18,12 +18,20 @@
     "zero-copy transfer",
     "abort a worker task",
     "priority task queue",
+    "broadcast channel",
+    "inter-worker communication",
+    "cache invalidation across workers",
     "createWorkerRuntime"
   ],
   "files": [
     "SKILL.md",
     "references/quickstart.md",
     "references/api-reference.md",
-    "references/patterns.md"
+    "references/patterns.md",
+    "references/stateful-l1.md",
+    "references/cancellation-priority.md",
+    "references/zero-copy-preemption.md",
+    "references/broadcast-channel.md",
+    "references/observability.md"
   ]
 }
