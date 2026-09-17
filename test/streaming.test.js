@@ -11,7 +11,7 @@
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { isGeneratorFunction, runStream } from '../src/stream-runner.js';
+import { createPauseController, isGeneratorFunction, runStream } from '../src/stream-runner.js';
 
 function createMockPort() {
   const sent = [];
@@ -338,6 +338,162 @@ describe('ADR-0012 — streaming worker protocol (T2)', () => {
       const end = port.sent.find((m) => m.type === 'MSG_STREAM_END');
       assert.ok(end);
       assert.equal(end.aborted, undefined);
+    });
+  });
+
+  describe('createPauseController — T5 backpressure primitive', () => {
+    it('starts unpaused and resolves waitWhilePaused immediately', async () => {
+      const pc = createPauseController();
+      assert.equal(pc.paused, false);
+      // Should resolve on the next microtask, not block.
+      const start = Date.now();
+      await pc.waitWhilePaused();
+      assert.ok(Date.now() - start < 20, 'unpaused wait must not block');
+    });
+
+    it('parks waitWhilePaused() while paused and resumes on resume()', async () => {
+      const pc = createPauseController();
+      pc.pause();
+      assert.equal(pc.paused, true);
+      let resolved = false;
+      const p = pc.waitWhilePaused().then(() => {
+        resolved = true;
+      });
+      // Yield a few microtasks; the promise must still be pending.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      assert.equal(resolved, false, 'parked waiter must not resolve while paused');
+      pc.resume();
+      await p;
+      assert.equal(resolved, true);
+      assert.equal(pc.paused, false);
+    });
+
+    it('wakes every waiter on resume() (no lost wakeup)', async () => {
+      const pc = createPauseController();
+      pc.pause();
+      let a = false;
+      let b = false;
+      let c = false;
+      const pa = pc.waitWhilePaused().then(() => {
+        a = true;
+      });
+      const pb = pc.waitWhilePaused().then(() => {
+        b = true;
+      });
+      const pc2 = pc.waitWhilePaused().then(() => {
+        c = true;
+      });
+      pc.resume();
+      await Promise.all([pa, pb, pc2]);
+      assert.equal(a && b && c, true, 'every waiter must resolve on resume');
+    });
+  });
+
+  describe('runStream — pause / resume (MSG_STREAM_PAUSE / RESUME pathway, T5)', () => {
+    it('parks the generator between yields when pauseController is paused', async () => {
+      const port = createMockPort();
+      const fn = async function* () {
+        yield 'a';
+        yield 'b';
+        yield 'c';
+      };
+      const pc = createPauseController();
+      // Start paused BEFORE runStream — first iteration parks, then we
+      // resume to let everything drain.
+      pc.pause();
+      const runP = runStream({
+        parentPort: port,
+        taskId: 't_pause',
+        fn,
+        payload: null,
+        localStorage: new Map(),
+        context: {},
+        pauseController: pc,
+      });
+      // Yield a few microtasks; nothing should be posted yet.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      assert.equal(
+        port.sent.length,
+        0,
+        'paused generator must not post any MSG_STREAM_CHUNK frames yet',
+      );
+      pc.resume();
+      await runP;
+      const chunks = port.sent.filter((m) => m.type === 'MSG_STREAM_CHUNK');
+      assert.equal(chunks.length, 3, 'all three chunks should arrive after resume');
+      const end = port.sent[port.sent.length - 1];
+      assert.equal(end.type, 'MSG_STREAM_END');
+      assert.equal(end.aborted, undefined);
+    });
+
+    it('honors pause/resume toggled mid-stream', async () => {
+      const port = createMockPort();
+      const fn = async function* () {
+        for (let i = 0; i < 5; i++) yield i;
+      };
+      const pc = createPauseController();
+      const runP = runStream({
+        parentPort: port,
+        taskId: 't_mid',
+        fn,
+        payload: null,
+        localStorage: new Map(),
+        context: {},
+        pauseController: pc,
+      });
+      // Let the first chunk post, then pause, then resume.
+      await new Promise((r) => setImmediate(r));
+      const initial = port.sent.length;
+      assert.ok(initial >= 1, 'first chunk should arrive before we pause');
+      pc.pause();
+      // Give the loop time to settle on pause; no further chunks.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      const afterPause = port.sent.length;
+      pc.resume();
+      await runP;
+      const chunks = port.sent.filter((m) => m.type === 'MSG_STREAM_CHUNK');
+      assert.equal(chunks.length, 5, 'all five chunks should eventually arrive');
+      assert.ok(
+        afterPause >= initial && afterPause <= initial + 1,
+        'pause should hold the stream between yields (at most 1 extra chunk posted in flight)',
+      );
+    });
+
+    it('wakes a parked waiter when the signal aborts (no mid-stream hang)', async () => {
+      const port = createMockPort();
+      const fn = async function* () {
+        yield 'x';
+        // Generator would yield more, but we'll be paused+aborted by then.
+        yield 'y';
+      };
+      const pc = createPauseController();
+      const ac = new AbortController();
+      pc.pause();
+      const runP = runStream({
+        parentPort: port,
+        taskId: 't_abortpark',
+        fn,
+        payload: null,
+        localStorage: new Map(),
+        context: {},
+        signal: ac.signal,
+        pauseController: pc,
+      });
+      // Generator is parked at waitWhilePaused before posting 'x'.
+      await new Promise((r) => setImmediate(r));
+      assert.equal(port.sent.length, 0, 'should be parked before any post');
+      ac.abort('test-abort');
+      await runP;
+      // The abort listener should resume the pauseController so the
+      // loop re-enters, sees `aborted=true`, runs gen.return(), and
+      // posts MSG_STREAM_END {aborted:true}.
+      const end = port.sent[port.sent.length - 1];
+      assert.equal(end.type, 'MSG_STREAM_END');
+      assert.equal(end.aborted, true);
+      assert.equal(end.reason, 'test-abort');
     });
   });
 });

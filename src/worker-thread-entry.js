@@ -1,6 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { ChannelRegistry } from './broadcast-channel.js';
-import { isGeneratorFunction, runStream } from './stream-runner.js';
+import { createPauseController, isGeneratorFunction, runStream } from './stream-runner.js';
 
 if (!parentPort) {
   throw new Error('worker-thread-entry must be run as a Worker thread.');
@@ -18,6 +18,11 @@ const channelRegistry = new ChannelRegistry();
 // AbortController so an incoming MSG_STREAM_ABORT can run `gen.return()`
 // on the right iterator and let its `finally` blocks execute cleanly.
 const activeStreams = new Map();
+// Parallel map of pause controllers keyed by taskId. An incoming
+// MSG_STREAM_PAUSE / MSG_STREAM_RESUME flips the corresponding iterator's
+// pause flag; the await loop inside runStream parks between yields when
+// the flag is set so chunks stop arriving on the wire.
+const streamPauseControllers = new Map();
 
 // Optional user-provided custom task handler module
 let customHandler = null;
@@ -94,7 +99,9 @@ async function processTask(message) {
       // Function.prototype.constructor.name is attempted.
       if (isGeneratorFunction(fn, fnCode)) {
         const ac = new AbortController();
+        const pauseController = createPauseController();
         activeStreams.set(taskId, ac);
+        streamPauseControllers.set(taskId, pauseController);
         try {
           await runStream({
             parentPort,
@@ -104,9 +111,11 @@ async function processTask(message) {
             localStorage: localState,
             context,
             signal: ac.signal,
+            pauseController,
           });
         } finally {
           activeStreams.delete(taskId);
+          streamPauseControllers.delete(taskId);
         }
         // runStream handles all IPC frames for streaming tasks; do not
         // emit a final success/failure here.
@@ -155,6 +164,16 @@ parentPort.on('message', (message) => {
   if (message?.type === 'MSG_STREAM_ABORT' && message.taskId) {
     const ac = activeStreams.get(message.taskId);
     if (ac) ac.abort(message.reason);
+    return;
+  }
+  if (message?.type === 'MSG_STREAM_PAUSE' && message.taskId) {
+    const pc = streamPauseControllers.get(message.taskId);
+    if (pc) pc.pause();
+    return;
+  }
+  if (message?.type === 'MSG_STREAM_RESUME' && message.taskId) {
+    const pc = streamPauseControllers.get(message.taskId);
+    if (pc) pc.resume();
     return;
   }
   if (!message?.taskId) return;

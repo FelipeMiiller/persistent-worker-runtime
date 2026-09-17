@@ -70,6 +70,12 @@ export class Stream {
 
     this._totalChunks = 0;
     this._totalErrors = 0;
+    // T5 backpressure tracking: flips true once the buffer crosses the
+    // high-water mark upward; reset when it drops below HWM / 2. Drives
+    // `stream:backpressure { state: 'paused' | 'resumed' }` events so
+    // the runtime can post MSG_STREAM_PAUSE / MSG_STREAM_RESUME to the
+    // worker.
+    this._isBackpressured = false;
     /** @type {Map<string, Function[]>} */
     this._listeners = new Map();
 
@@ -131,7 +137,7 @@ export class Stream {
   // These are wired to MSG_STREAM_* IPC frames in T4. Exposed publicly so
   // the class can be unit-tested without a live worker.
 
-  /** @param {*} chunk  Push a chunk into the buffer; fires `stream:backpressure` once length >= highWaterMark. */
+  /** @param {*} chunk  Push a chunk into the buffer; fires `stream:backpressure {state:'paused'}` once length >= highWaterMark. */
   pushChunk(chunk) {
     if (this._settled || this._aborted) return;
     const wasBelowThreshold = this._buffered.length < this._highWaterMark;
@@ -139,13 +145,41 @@ export class Stream {
     this._totalChunks++;
     const isAtOrAbove = this._buffered.length >= this._highWaterMark;
     // Fire only on the upward crossing (spec STREAM-10). Repeated pushes
-    // while the consumer hasn't drained continue to fire because the
-    // crossing is re-detected each time length >= HWM, but only the
-    // first event after each drain counts as a "fresh" backpressure.
+    // while the consumer hasn't drained don't refire because
+    // _isBackpressured is already true.
     if (wasBelowThreshold && isAtOrAbove) {
-      this._emit('stream:backpressure', { queueLength: this._buffered.length });
+      this._isBackpressured = true;
+      this._emit('stream:backpressure', {
+        state: 'paused',
+        queueLength: this._buffered.length,
+      });
     }
     this._deliverIfWaiting();
+  }
+
+  /**
+   * Internal: if we're currently in the backpressured state and the
+   * buffer just drained past the low-water mark (HWM / 2), emit
+   * `stream:backpressure {state:'resumed'}`. Called after every shift
+   * (next() / _deliverIfWaiting()).
+   *
+   * Per spec P2 §3, the resume fires when the buffer falls *below*
+   * HWM / 2 — strictly less than, not ≤. The previous T3 lesson
+   * (see completion-checklist.md) established the same asymmetry on
+   * the pause side (crosses *above* HWM, not ≥).
+   */
+  _maybeEmitResume() {
+    if (!this._isBackpressured) return;
+    // Use the same `floor(HWM / 2)` shape as the spec wording. For HWM=4
+    // the low-water is 2, and "below 2" means strictly < 2 (i.e. 0 or 1).
+    const lowWater = Math.floor(this._highWaterMark / 2);
+    if (this._buffered.length < lowWater) {
+      this._isBackpressured = false;
+      this._emit('stream:backpressure', {
+        state: 'resumed',
+        queueLength: this._buffered.length,
+      });
+    }
   }
 
   /** @param {{returnValue?: any}} [info]  Push a normal end; subsequent next() resolves with `{value: undefined, done: true}`. */
@@ -203,7 +237,9 @@ export class Stream {
   async next() {
     // Fast path: a chunk is already buffered.
     if (this._buffered.length > 0) {
-      return { value: this._buffered.shift(), done: false };
+      const value = this._buffered.shift();
+      this._maybeEmitResume();
+      return { value, done: false };
     }
 
     // Settled but the terminal frame is still pending delivery.
@@ -234,14 +270,14 @@ export class Stream {
   /**
    * Called when the consumer uses `break` / `return` / `throw` inside a
    * `for await…of` loop. Marks the stream aborted and notifies listeners
-   * via `stream:cancelled` so the IPC layer (T4) can send MSG_STREAM_ABORT
-   * to the worker.
+   * via `stream:aborted` (unified with the external-signal abort path in
+   * T5) so the IPC layer can send MSG_STREAM_ABORT to the worker.
    */
   async return(value) {
     if (!this._aborted) {
       this._aborted = true;
       this._abortedReason = 'consumer-return';
-      this._emit('stream:cancelled', { reason: this._abortedReason });
+      this._emit('stream:aborted', { reason: this._abortedReason });
     }
     this._settled = true;
     if (this._waiter) {
@@ -310,6 +346,7 @@ export class Stream {
       const { resolve } = this._waiter;
       this._waiter = null;
       resolve({ value: this._buffered.shift(), done: false });
+      this._maybeEmitResume();
       return;
     }
     if (this._settled && this._settleInfo) {

@@ -25,6 +25,12 @@ export class WorkerRuntime extends EventEmitter {
   #killGracePeriodMs;
   /** @type {Map<string, {stream: Stream, worker: import('./worker-handle.js').WorkerHandle}>} */
   #activeStreams = new Map();
+  /** FIFO queue of stream requests waiting for a free worker. Each entry
+   * is `{ taskId, taskFn, fnCode, payload, options, stream }`. Streams
+   * are kept 1:1 with workers for their full lifetime, so the queue
+   * exists to back-pressure concurrent `runtime.stream()` calls when the
+   * pool is saturated. */
+  #pendingStreams = [];
   /** Main-thread BroadcastChannel registry. Workers have their own. */
   #channelRegistry = new ChannelRegistry();
   #stats = {
@@ -392,13 +398,18 @@ export class WorkerRuntime extends EventEmitter {
    * if you intend to run multiple concurrent streams, size the pool
    * accordingly via the `workers` constructor option.
    *
+   * When no worker is idle, the request is queued (`#pendingStreams`)
+   * and the returned `Stream` parks until a worker becomes available.
+   * The consumer can iterate immediately — `next()` will block until a
+   * worker picks up the request.
+   *
    * @param {Function} taskFn       An (Async)GeneratorFunction.
    * @param {*}        payload      Caller payload.
    * @param {Object}   [options]
    * @param {number}   [options.highWaterMark=1024]  Buffer threshold for `stream:backpressure`.
    * @param {AbortSignal} [options.signal]            External signal that aborts the stream.
    * @returns {Stream}
-   * @throws {WorkerRuntimeError}  If the runtime is shutting down or no worker is idle.
+   * @throws {WorkerRuntimeError}  If the runtime is shutting down.
    * @throws {StreamConfigError}   If `taskFn` is not a generator function.
    */
   stream(taskFn, payload, options = {}) {
@@ -414,26 +425,63 @@ export class WorkerRuntime extends EventEmitter {
       );
     }
 
-    const idleWorkers = this.#supervisor.idleWorkers;
-    if (idleWorkers.length === 0) {
-      throw new WorkerRuntimeError(
-        'No idle worker available for stream — concurrent streams are 1:1 with workers',
-      );
-    }
-    const worker = idleWorkers[0];
-
     const taskId = `stream-${randomUUID()}`;
     const stream = new Stream({
       highWaterMark: options.highWaterMark,
       signal: options.signal,
     });
 
+    const idleWorkers = this.#supervisor.idleWorkers;
+    if (idleWorkers.length === 0) {
+      // Queue the stream; it'll be picked up when a worker frees.
+      // While queued, aborts are handled by removing the request from
+      // the queue — no worker reference exists yet so we can't post
+      // MSG_STREAM_ABORT. The `Stream` instance already handles
+      // consumer-initiated return() / signal.aborted by flipping its
+      // own `_aborted` flag and firing `stream:aborted`, which the
+      // listener below picks up to clean up the queue entry.
+      const fnCode = taskFn.toString();
+      const request = { taskId, taskFn, fnCode, payload, options, stream };
+      this.#pendingStreams.push(request);
+      stream.on('stream:aborted', () => {
+        const idx = this.#pendingStreams.indexOf(request);
+        if (idx >= 0) this.#pendingStreams.splice(idx, 1);
+      });
+      // Kick the scheduler in case a worker freed between the
+      // idleWorkers check above and this point.
+      this.#scheduleNext();
+      return stream;
+    }
+
+    this.#assignStreamToWorker(taskFn, payload, options, taskId, stream, idleWorkers[0]);
+    return stream;
+  }
+
+  /**
+   * Wires a Stream to a worker, dispatches the streaming task, and
+   * registers the cancellation/backpressure listeners. Called either
+   * directly from `stream()` when a worker is free, or from
+   * `#dispatchPendingStreams()` after a worker becomes available.
+   */
+  #assignStreamToWorker(taskFn, payload, _options, taskId, stream, worker) {
     const onAbortToWorker = (reason) => worker.abortStream(taskId, reason);
-    // Both `stream:cancelled` (consumer break) and `stream:aborted`
-    // (external signal) must reach the worker so its iterator can drain
-    // and finally blocks can run.
-    stream.on('stream:cancelled', (data) => onAbortToWorker(data.reason));
+    // `stream:aborted` fires for both consumer-initiated cancellation
+    // (`break` / `return()`) and external-signal aborts (T5 unification).
+    // Both paths must reach the worker so its iterator can drain and
+    // `finally` blocks can run deterministically.
     stream.on('stream:aborted', (data) => onAbortToWorker(data.reason));
+    // Backpressure: the bounded buffer flips `stream:backpressure
+    // {state:'paused'}` on the upward crossing and `{state:'resumed'}`
+    // when it drains below HWM / 2. Forward both to the worker so its
+    // generator parks between yields instead of posting into a full
+    // IPC channel.
+    stream.on('stream:backpressure', (data) => {
+      if (data?.state === 'paused') {
+        worker.pauseStream(taskId);
+      } else if (data?.state === 'resumed') {
+        worker.resumeStream(taskId);
+      }
+    });
 
     this.#activeStreams.set(taskId, { stream, worker });
 
@@ -449,7 +497,8 @@ export class WorkerRuntime extends EventEmitter {
           stream.pushEnd({ returnValue: info.returnValue });
         }
         this.#activeStreams.delete(taskId);
-        // Free the worker so it can pick up the next queued task.
+        // Free the worker so it can pick up the next queued task or
+        // stream.
         this.#scheduleNext();
       },
       onError: (error) => {
@@ -458,8 +507,33 @@ export class WorkerRuntime extends EventEmitter {
         this.#scheduleNext();
       },
     });
+  }
 
-    return stream;
+  /**
+   * Dispatch any pending streams (FIFO) to idle workers, then return.
+   * Called from `#scheduleNext()` after a worker has freed up.
+   */
+  #dispatchPendingStreams() {
+    while (this.#pendingStreams.length > 0 && this.#supervisor.idleWorkers.length > 0) {
+      const request = this.#pendingStreams[0];
+      // The stream might have been aborted while queued (consumer
+      // break, external signal). Drop such requests without dispatch.
+      if (request.stream.aborted) {
+        this.#pendingStreams.shift();
+        continue;
+      }
+      const idle = this.#supervisor.idleWorkers;
+      if (idle.length === 0) break;
+      this.#pendingStreams.shift();
+      this.#assignStreamToWorker(
+        request.taskFn,
+        request.payload,
+        request.options,
+        request.taskId,
+        request.stream,
+        idle[0],
+      );
+    }
   }
 
   /**
@@ -475,10 +549,18 @@ export class WorkerRuntime extends EventEmitter {
   }
 
   /**
-   * Scheduler loop: matches idle workers with queued tasks.
+   * Scheduler loop: matches idle workers with queued streams first
+   * (FIFO with each other), then queued tasks. Called whenever a worker
+   * frees (worker_ready / task_completed / task_failed / stream end).
    */
   #scheduleNext() {
-    if (this.#isShuttingDown || this.#queue.size === 0) return;
+    if (this.#isShuttingDown) return;
+
+    // First, dispatch any pending streams. Streams hold a worker for
+    // their full lifetime so this frees up workers for tasks sooner.
+    this.#dispatchPendingStreams();
+
+    if (this.#queue.size === 0) return;
 
     const idleWorkers = this.#supervisor.idleWorkers;
     if (idleWorkers.length === 0) return;
@@ -500,13 +582,23 @@ export class WorkerRuntime extends EventEmitter {
     this.#isShuttingDown = true;
     this.#queue.destroy(new WorkerRuntimeError('Runtime is shutting down'));
     // Abort every active stream so the worker's generator can drain its
-    // finally blocks. The worker termination below tears the connection
-    // down anyway, but doing it explicitly produces a clean abort frame.
+    // finally blocks. pushAbortEnd fires `stream:aborted` which the
+    // listener set up in stream() forwards to worker.abortStream(); the
+    // explicit abortStream() call here is therefore redundant but kept
+    // for the case where a stream has been registered before the
+    // listener could be wired (defensive: belt + suspenders).
     for (const [taskId, { stream, worker }] of this.#activeStreams) {
       worker.abortStream(taskId, 'runtime-shutdown');
       stream.pushAbortEnd({ reason: 'runtime-shutdown' });
     }
     this.#activeStreams.clear();
+    // Same drain for streams that were queued but never picked up a
+    // worker — without this, their pending next() would hang forever
+    // and prevent the Event Loop from exiting.
+    for (const { stream } of this.#pendingStreams) {
+      stream.pushAbortEnd({ reason: 'runtime-shutdown' });
+    }
+    this.#pendingStreams.length = 0;
     // Close every main-thread BroadcastChannel so the native BC handles
     // do not keep the Event Loop alive after worker shutdown.
     this.#channelRegistry.closeAll();

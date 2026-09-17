@@ -174,16 +174,23 @@ export class WorkerHandle extends EventEmitter {
         if (message.type === 'MSG_STREAM_CHUNK') {
           streamTask.onChunk({ seq: message.seq, chunk: message.chunk });
         } else if (message.type === 'MSG_STREAM_END') {
+          // T5 ordering fix: tear the stream down BEFORE invoking onEnd.
+          // The runtime's onEnd handler calls #scheduleNext to dispatch
+          // any queued stream waiting for a free worker; if the worker
+          // is still flagged 'busy' at that point, dispatchPendingStreams
+          // sees an empty idleWorkers list and the queued stream hangs
+          // forever.
+          this.#teardownStream();
           streamTask.onEnd({
             returnValue: message.returnValue,
             aborted: message.aborted,
             reason: message.reason,
             memoryUsageBytes: message.memoryUsageBytes,
           });
-          this.#teardownStream();
         } else if (message.type === 'MSG_STREAM_ERROR') {
-          streamTask.onError(message.error);
+          // Same ordering fix as MSG_STREAM_END above.
           this.#teardownStream();
+          streamTask.onError(message.error);
         }
         return;
       }
@@ -302,6 +309,35 @@ export class WorkerHandle extends EventEmitter {
       type: 'MSG_STREAM_ABORT',
       taskId,
       reason,
+    });
+  }
+
+  /**
+   * Posts MSG_STREAM_PAUSE to the worker, asking it to suspend the
+   * stream's iterator before posting the next chunk. No-op if no
+   * stream is active on this worker or the taskId does not match.
+   *
+   * @param {string} taskId
+   */
+  pauseStream(taskId) {
+    if (!this.#streamTask || this.#streamTask.taskId !== taskId) return;
+    this.#worker.postMessage({
+      type: 'MSG_STREAM_PAUSE',
+      taskId,
+    });
+  }
+
+  /**
+   * Posts MSG_STREAM_RESUME to the worker, asking it to continue the
+   * suspended iterator. No-op if no stream is active on this worker.
+   *
+   * @param {string} taskId
+   */
+  resumeStream(taskId) {
+    if (!this.#streamTask || this.#streamTask.taskId !== taskId) return;
+    this.#worker.postMessage({
+      type: 'MSG_STREAM_RESUME',
+      taskId,
     });
   }
 

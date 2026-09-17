@@ -203,4 +203,165 @@ describe('ADR-0012 — runtime.stream() API (T4)', () => {
       assert.deepEqual(collected, ['x', 'y', 'z']);
     });
   });
+
+  describe('T5 cancellation refinement — queue, backpressure, shutdown drain', () => {
+    it('queues a second stream() when workers=1 is busy and runs it after the first ends', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      // Start a stream that holds the only worker for ~100 ms.
+      const first = runtime.stream(async function* () {
+        yield 'A1';
+        yield 'A2';
+        await new Promise((r) => setTimeout(r, 80));
+        yield 'A3';
+      });
+      // The second stream() must NOT throw — it should queue, and the
+      // consumer can iterate immediately (next() parks until the
+      // worker is free).
+      const second = runtime.stream(async function* () {
+        yield 'B1';
+        yield 'B2';
+      });
+
+      const firstChunks = [];
+      const secondChunks = [];
+      const drainFirst = (async () => {
+        for await (const c of first) firstChunks.push(c);
+      })();
+      const drainSecond = (async () => {
+        for await (const c of second) secondChunks.push(c);
+      })();
+      await Promise.all([drainFirst, drainSecond]);
+      assert.deepEqual(firstChunks, ['A1', 'A2', 'A3']);
+      assert.deepEqual(secondChunks, ['B1', 'B2']);
+    });
+
+    it('drops a queued stream if the consumer aborts before it is dispatched', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      // Hold the worker with the first stream.
+      const blocker = runtime.stream(async function* () {
+        yield 'block';
+        await new Promise((r) => setTimeout(r, 80));
+      });
+      const drainBlocker = (async () => {
+        // Touch the iterator so the runtime transitions the request to
+        // an active stream task.
+        for await (const _c of blocker) {
+          /* drain */
+        }
+      })();
+      // Queue a second stream and abort it immediately via the signal.
+      const ac = new AbortController();
+      const second = runtime.stream(
+        async function* ({ signal }) {
+          // Should never run.
+          if (signal?.aborted) return;
+          yield 'never';
+        },
+        { signal: ac.signal },
+        { signal: ac.signal },
+      );
+      ac.abort('cancelled-while-queued');
+      await drainBlocker;
+      // The second stream's iterator must resolve with done:true and
+      // never produce a chunk.
+      const collected = [];
+      for await (const c of second) collected.push(c);
+      assert.deepEqual(collected, []);
+      assert.equal(second.aborted, true);
+      assert.equal(second.abortedReason, 'cancelled-while-queued');
+    });
+
+    it('pauses the worker when the consumer’s bounded buffer fills, then resumes on drain', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      // Producer yields 50 small chunks very fast. Consumer drains with
+      // a delay so the buffer fills above HWM (4). The worker should
+      // park between yields until the consumer catches up.
+      let pauseSignalsSeen = 0;
+      let resumeSignalsSeen = 0;
+      const stream = runtime.stream(
+        async function* () {
+          for (let i = 0; i < 50; i++) {
+            yield i;
+          }
+        },
+        undefined,
+        { highWaterMark: 4 },
+      );
+      stream.on('stream:backpressure', (e) => {
+        if (e.state === 'paused') pauseSignalsSeen++;
+        else if (e.state === 'resumed') resumeSignalsSeen++;
+      });
+      const collected = [];
+      for await (const c of stream) {
+        collected.push(c);
+        // Simulate a slow consumer.
+        await new Promise((r) => setTimeout(r, 2));
+      }
+      assert.equal(collected.length, 50);
+      assert.equal(stream.stats.totalChunks, 50);
+      assert.ok(pauseSignalsSeen >= 1, 'consumer should have observed at least one paused signal');
+      assert.ok(
+        resumeSignalsSeen >= 1,
+        'consumer should have observed at least one resumed signal after draining',
+      );
+    });
+
+    it('drains a parked consumer promise when runtime.shutdown() is called', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const stream = runtime.stream(async function* () {
+        yield 'late';
+        await new Promise((r) => setTimeout(r, 5000));
+        yield 'never';
+      });
+      // Park a next() — the generator hasn't yielded the first chunk yet.
+      const parked = stream.next();
+      // Shutdown should abort the stream and resolve the parked promise
+      // with done:true within a reasonable timeout.
+      const t0 = Date.now();
+      const shutdownP = runtime.shutdown();
+      const result = await Promise.race([
+        parked,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('parked next() never settled')), 2000),
+        ),
+      ]);
+      await shutdownP;
+      assert.deepEqual(result, { value: undefined, done: true });
+      assert.ok(Date.now() - t0 < 1500, 'shutdown must settle the parked promise quickly');
+    });
+
+    it('fires stream:aborted (unified) on consumer return() and the worker receives MSG_STREAM_ABORT', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const stream = runtime.stream(async function* () {
+        // Generous yield so the consumer's break reliably happens
+        // mid-stream (between yields, not after a natural return).
+        yield 'a';
+        await new Promise((r) => setTimeout(r, 50));
+        yield 'b';
+      });
+      const events = [];
+      stream.on('stream:aborted', (e) => events.push(e));
+      const collected = [];
+      for await (const c of stream) {
+        collected.push(c);
+        if (c === 'a') break;
+      }
+      // For-await-of cleanly exited (consumer break, not error).
+      assert.deepEqual(collected, ['a']);
+      // T5 unification: stream:aborted fires for consumer-initiated
+      // cancellation with the canonical reason.
+      assert.ok(events.length >= 1, 'expected at least one stream:aborted event');
+      assert.equal(events[0].reason, 'consumer-return');
+      // Stream is settled; subsequent next() resolves with done:true.
+      assert.equal(stream.aborted, true);
+      assert.equal(stream.abortedReason, 'consumer-return');
+      assert.deepEqual(await stream.next(), { value: undefined, done: true });
+      // Worker-side abort pathway is exercised by T2 unit tests with a
+      // mock port; verifying finally-block execution through a closure
+      // is impossible here because the worker reconstructs the
+      // generator via `new Function(fnCode)` and the closure is not
+      // transported. We cover that scenario exhaustively in
+      // test/streaming.test.js (T2).
+    });
+  });
 });

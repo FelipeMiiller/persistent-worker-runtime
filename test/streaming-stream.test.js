@@ -96,10 +96,10 @@ describe('ADR-0012 — Stream class (T3)', () => {
   });
 
   describe('return() — consumer cancellation', () => {
-    it('emits stream:cancelled and resolves subsequent next() as done', async () => {
+    it('emits stream:aborted (unified T5) and resolves subsequent next() as done', async () => {
       const s = new Stream();
       const events = [];
-      s.on('stream:cancelled', (e) => events.push(e));
+      s.on('stream:aborted', (e) => events.push(e));
       const ret = await s.return();
       assert.deepEqual(ret, { value: undefined, done: true });
       assert.equal(events.length, 1);
@@ -143,18 +143,34 @@ describe('ADR-0012 — Stream class (T3)', () => {
   });
 
   describe('backpressure event', () => {
-    it('fires when buffered length crosses the highWaterMark upward', () => {
+    it('fires paused on upward crossing and resumed on drain below HWM / 2', async () => {
       const events = [];
-      const s = new Stream({ highWaterMark: 3 });
+      const s = new Stream({ highWaterMark: 4 });
       s.on('stream:backpressure', (e) => events.push(e));
-      s.pushChunk('a'); // 1 < 3
-      s.pushChunk('b'); // 2 < 3
+      s.pushChunk('a'); // 1 < 4
+      s.pushChunk('b'); // 2 < 4
+      s.pushChunk('c'); // 3 < 4
       assert.equal(events.length, 0, 'no backpressure below HWM');
-      s.pushChunk('c'); // 3 >= 3 — crossing
+      s.pushChunk('d'); // 4 >= 4 — upward crossing
       assert.equal(events.length, 1);
-      assert.equal(events[0].queueLength, 3);
-      s.pushChunk('d'); // 4 >= 3 — stays above, no fresh crossing
-      assert.equal(events.length, 1, 'no duplicate event while staying above HWM');
+      assert.equal(events[0].state, 'paused');
+      assert.equal(events[0].queueLength, 4);
+      s.pushChunk('e'); // 5 >= 4 — stays above, no fresh paused event
+      assert.equal(events.length, 1, 'no duplicate paused while staying above HWM');
+      // Drain to below HWM / 2 (low-water = 2; strictly less than 2 means 1).
+      // Starting from length 5, we shift four times: 5 → 4 → 3 → 2 → 1.
+      await s.next(); // 5 -> 4
+      await s.next(); // 4 -> 3
+      await s.next(); // 3 -> 2 (still >= low-water of 2 — no resume yet)
+      assert.equal(events.length, 1, 'no resume at exactly low-water mark');
+      await s.next(); // 2 -> 1 (strictly below low-water of 2)
+      assert.equal(events.length, 2);
+      assert.equal(events[1].state, 'resumed');
+      assert.equal(events[1].queueLength, 1);
+      // Resume is one-shot; further draining does not refire until the
+      // next upward crossing.
+      await s.next(); // 1 -> 0
+      assert.equal(events.length, 2, 'draining further past resume does not refire');
     });
   });
 
