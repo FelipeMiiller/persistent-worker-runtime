@@ -36,7 +36,11 @@
     "benchmark:cancel": "node benchmarks/abort-cancellation.benchmark.js",
     "benchmark:scaling": "node benchmarks/throughput-scaling.benchmark.js",
     "benchmark:broadcast": "node benchmarks/broadcast-fanout.benchmark.js",
-    "benchmark:all": "node benchmarks/event-loop-lag.benchmark.js && node benchmarks/stateful-vs-stateless.benchmark.js && node benchmarks/batch-concurrency.benchmark.js && node benchmarks/outbox-throughput.benchmark.js && node benchmarks/zero-copy-transfer.benchmark.js && node benchmarks/priority-routing.benchmark.js && node benchmarks/abort-cancellation.benchmark.js && node benchmarks/throughput-scaling.benchmark.js && node benchmarks/preemption-recovery.benchmark.js && node benchmarks/worker-recycling.benchmark.js && node benchmarks/broadcast-fanout.benchmark.js",
+    "benchmark:streaming-throughput": "node benchmarks/streaming-throughput.benchmark.js",
+    "benchmark:streaming-memory": "node benchmarks/streaming-memory.benchmark.js",
+    "benchmark:streaming-stress": "node benchmarks/streaming-stress.benchmark.js",
+    "benchmark:default-sizing-memory": "node benchmarks/default-sizing-memory.benchmark.js",
+    "benchmark:all": "node benchmarks/event-loop-lag.benchmark.js && node benchmarks/stateful-vs-stateless.benchmark.js && node benchmarks/batch-concurrency.benchmark.js && node benchmarks/outbox-throughput.benchmark.js && node benchmarks/zero-copy-transfer.benchmark.js && node benchmarks/priority-routing.benchmark.js && node benchmarks/abort-cancellation.benchmark.js && node benchmarks/throughput-scaling.benchmark.js && node benchmarks/preemption-recovery.benchmark.js && node benchmarks/worker-recycling.benchmark.js && node benchmarks/broadcast-fanout.benchmark.js && node benchmarks/streaming-throughput.benchmark.js && node benchmarks/streaming-memory.benchmark.js && node benchmarks/streaming-stress.benchmark.js && node benchmarks/default-sizing-memory.benchmark.js",
     "prepare": "husky || true",
     "prepublishOnly": "npm run validate"
   },
