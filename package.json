@@ -30,7 +30,8 @@
     "benchmark:priority": "node benchmarks/priority-routing.benchmark.js",
     "benchmark:cancel": "node benchmarks/abort-cancellation.benchmark.js",
     "benchmark:scaling": "node benchmarks/throughput-scaling.benchmark.js",
-    "benchmark:all": "node benchmarks/event-loop-lag.benchmark.js && node benchmarks/stateful-vs-stateless.benchmark.js && node benchmarks/batch-concurrency.benchmark.js && node benchmarks/outbox-throughput.benchmark.js && node benchmarks/zero-copy-transfer.benchmark.js && node benchmarks/priority-routing.benchmark.js && node benchmarks/abort-cancellation.benchmark.js && node benchmarks/throughput-scaling.benchmark.js && node benchmarks/preemption-recovery.benchmark.js && node benchmarks/worker-recycling.benchmark.js",
+    "benchmark:broadcast": "node benchmarks/broadcast-fanout.benchmark.js",
+    "benchmark:all": "node benchmarks/event-loop-lag.benchmark.js && node benchmarks/stateful-vs-stateless.benchmark.js && node benchmarks/batch-concurrency.benchmark.js && node benchmarks/outbox-throughput.benchmark.js && node benchmarks/zero-copy-transfer.benchmark.js && node benchmarks/priority-routing.benchmark.js && node benchmarks/abort-cancellation.benchmark.js && node benchmarks/throughput-scaling.benchmark.js && node benchmarks/preemption-recovery.benchmark.js && node benchmarks/worker-recycling.benchmark.js && node benchmarks/broadcast-fanout.benchmark.js",
     "prepublishOnly": "npm test"
   },
   "repository": {

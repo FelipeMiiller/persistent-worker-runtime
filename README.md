@@ -28,6 +28,7 @@ A production-grade, concurrent execution layer built atop `node:worker_threads`.
   - [6. Resilient Retries with Exponential Backoff](#6-resilient-retries-with-exponential-backoff)
   - [7. Priority Routing](#7-priority-routing)
   - [8. Cancellation via AbortSignal](#8-cancellation-via-abortsignal)
+  - [9. Inter-Worker BroadcastChannel (L1 Cache Invalidation)](#9-inter-worker-broadcastchannel-l1-cache-invalidation)
 - [Architecture & Memory Hierarchy](#-architecture--memory-hierarchy)
 - [Comparison with Existing Solutions](#-comparison-with-existing-solutions)
 - [Architecture Decision Records (ADRs)](#-architecture-decision-records-adrs)
@@ -106,6 +107,7 @@ We do not fight the Event Loop; we protect it:
 | **Non-Blocking Backpressure** | Asynchronous queue wait with `queueTimeoutMs` so the process never runs out of memory or busy-waits. |
 | **Resilient Supervisor** | Detects worker thread crashes and automatically spins up replacements to preserve capacity. |
 | **Zero External Dependencies** | Written strictly using Node.js built-in modules (`node:worker_threads`, `node:async_hooks`, `node:events`, `node:perf_hooks`, `node:os`). |
+| **Inter-Worker BroadcastChannel** | Named-channel pub/sub between main thread and workers via Node's native `BroadcastChannel` — bus-style O(1) fan-out with no main-thread Event Loop routing. Canonical use case: L1 cache invalidation across workers. |
 
 ---
 
@@ -159,6 +161,12 @@ All benchmarks are reproducible via `npm run benchmark:all`:
 * **4 workers:** ~10,000 tasks/sec (linear scaling)
 * **`availableParallelism()` workers:** ~20,000 tasks/sec
 * **Verdict:** Throughput scales linearly up to the CPU core count; oversubscription beyond that yields diminishing returns.
+
+### 9. BroadcastChannel Fan-out vs. Per-Worker Dispatch
+*5,000 publishes to 4 subscribed workers:*
+* **`runtime.broadcast()`:** 5,000 publishes in **~11ms** — **438k msg/s** (~2.3μs per publish).
+* **`runtime.dispatch()` × 4 workers:** 500 fan-out cycles in **~20ms** (~40μs per fan-out cycle).
+* **Verdict:** Native `BroadcastChannel` fan-out is **~18× faster** than routing each invalidation through the per-worker dispatch path, and stays O(1) regardless of subscriber count.
 
 ---
 
@@ -369,6 +377,74 @@ await runtime.execute({
 
 ---
 
+### 9. Inter-Worker BroadcastChannel (L1 Cache Invalidation)
+
+Workers can publish / subscribe to **named channels** without involving the main-thread Event Loop as a router. Backed by Node's native `BroadcastChannel` (web-standard API, zero dependencies).
+
+The canonical use case: when one worker mutates a record, every other worker's hot L1 cache needs to evict its stale copy. The runtime gives you a bus-style API for that:
+
+```javascript
+// Inside a worker fn — fnCode is a string in the worker thread, so
+// closures from the main module are NOT available. Inline the channel
+// name as a literal.
+async function fetchUser(payload, state, context) {
+  const cache = (state.cache ||= new Map());
+
+  // Subscribe ONCE per worker; subsequent calls reuse the same handler.
+  // The wrapper is idempotent; the bus does not deliver to the sender.
+  context.channel('cache:user').subscribe((msg) => {
+    if (msg.userId === payload.userId) cache.delete(payload.userId);
+  });
+
+  if (cache.has(payload.userId)) return { from: 'cache', user: cache.get(payload.userId) };
+
+  const user = await db.fetchUser(payload.userId);
+  cache.set(payload.userId, user);
+  return { from: 'source', user };
+}
+
+async function updateUser(payload, _state, context) {
+  await db.updateUser(payload);
+
+  // Broadcast invalidation. Returns IMMEDIATELY — does not wait for peers.
+  context.channel('cache:user').publish({
+    userId: payload.userId,
+    reason: 'update',
+  });
+}
+```
+
+The main thread can also publish and subscribe — useful for observability, coordinated shutdown, or broadcasting control signals to all workers:
+
+```javascript
+// Main-thread observer
+runtime.subscribe('cache:user', (msg) => {
+  metrics.incr('cache.invalidate', { reason: msg.reason });
+});
+
+// Main-thread broadcast (main → all workers)
+runtime.broadcast('system:reload', { at: Date.now() });
+
+// Idempotent unsubscribe
+runtime.unsubscribe('cache:user', observerHandler);
+```
+
+**Key semantics:**
+
+| Property | Value |
+| --- | --- |
+| Backed by | `node:worker_threads` `BroadcastChannel` (built-in, zero deps) |
+| Topology | O(1) per publish — native BC delivers to all listeners across threads |
+| Loop-back | **No** — a thread does NOT receive its own publishes |
+| Per-name caching | Yes — multiple `context.channel('ch')` calls share one underlying BC |
+| Message serialization | Structured clone (Dates, Maps, Sets, ArrayBuffers, TypedArrays, RegExps supported) |
+| Cleanup on `shutdown()` | All main-thread-owned BCs are closed; `FinalizationRegistry` is a GC safety net for worker-side wrappers |
+| After shutdown | `runtime.broadcast()` throws `WorkerRuntimeError('Runtime is shutting down')` |
+
+See `examples/broadcast-cache-invalidation.js` for a complete runnable demo and `skills/persistent-worker-runtime/SKILL.md` for the full embedded skill.
+
+---
+
 ## 🏛 Architecture & Memory Hierarchy
 
 The runtime organizes memory into three distinct tiers:
@@ -458,6 +534,7 @@ npm run benchmark:cancel       # AbortController cancellation latency
 npm run benchmark:scaling      # Throughput scaling vs worker count
 npm run benchmark:preemption   # Hard preemption watchdog + pool healing
 npm run benchmark:recycling    # Automatic worker recycling
+npm run benchmark:broadcast    # BroadcastChannel fan-out vs. per-worker dispatch
 ```
 
 ## 📚 Examples
@@ -472,6 +549,7 @@ Run any example directly with `node examples/<name>.js`:
 | `priority-routing.js` | Submit low-priority work first, then critical work — verify critical work runs first. |
 | `zero-copy-image.js` | Transfer a 30MB raw image buffer to a worker via `transferList` (no copy). |
 | `cancel-on-disconnect.js` | Manual cancellation, `AbortSignal.timeout()`, and pre-aborted signals. |
+| `broadcast-cache-invalidation.js` | L1 cache invalidation across workers via `context.channel()` + `runtime.broadcast()`. |
 
 ## 🤖 Agent Skill (Embedded)
 
