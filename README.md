@@ -448,6 +448,65 @@ See `examples/broadcast-cache-invalidation.js` for a complete runnable demo and 
 
 ---
 
+### 10. Streaming Task Results (Async Generators + Backpressure)
+
+When the result of a task is too large, too slow, or too streaming-shaped to materialize as a single Promise, use `runtime.stream()` to feed the worker generator's yields to the consumer one chunk at a time. The same pattern works for LLM-style token streaming, large CSV exports, paginated DB queries, and SSE feeds.
+
+```javascript
+import { createWorkerRuntime } from '@persistent-worker-runtime/node';
+
+const runtime = await createWorkerRuntime({ workers: 1 });
+
+const ac = new AbortController();
+setTimeout(() => ac.abort('user-cancel'), 5_000);
+
+const stream = runtime.stream(
+  // Worker-side generator. The function receives
+  // (payload, state, context). The runtime reconstructs the
+  // generator from source via `new Function(fnCode)`, so
+  // closure variables from the main module are NOT available —
+  // pass everything you need through `payload`.
+  async function* chat({ tokens }, { signal }) {
+    for (const token of tokens) {
+      if (signal?.aborted) return;  // graceful exit
+      await new Promise((r) => setTimeout(r, 20));
+      yield { delta: token };
+    }
+  },
+  { tokens: ['Once', ' upon', ' a', ' time', '.'] },         // payload
+  {
+    signal: ac.signal,                                       // external abort
+    highWaterMark: 1024,                                     // buffer cap
+  },
+);
+
+// Consumer-side — standard async iteration. Breaks / aborts
+// propagate to the worker so its `finally` block still runs.
+for await (const chunk of stream) {
+  process.stdout.write(chunk.delta);
+}
+```
+
+**Key semantics:**
+
+| Property | Value |
+| --- | --- |
+| Worker function shape | `(Async)GeneratorFunction` — detected via regex on source (`new Function(fnCode)` strips constructor identity) |
+| Backpressure | One-shot `stream:backpressure { state: 'paused' \| 'resumed', queueLength }` events; worker parks between yields when buffer ≥ `highWaterMark`, resumes when `< HWM / 2` |
+| Cancellation | Consumer `break` → `MSG_STREAM_ABORT` with `reason: 'consumer-return'`. External `AbortSignal` → same with the signal reason. Both call `gen.return()` so generator `finally` runs |
+| Runtime events | `stream:created { taskId }`, `stream:chunk { taskId, seq }`, `stream:end { taskId, totalChunks, returnValue }`, `stream:aborted { taskId, reason }`, `stream:backpressure { taskId, state, queueLength }` |
+| Pool scheduling | One worker per active stream (1:1, full lifetime). When the pool is saturated, `stream()` queues the request and returns immediately — the consumer can iterate while waiting |
+| `runtime.stats()` | `activeStreams` (dispatched) and `pendingStreams` (queued) are surfaced alongside the existing task counters |
+
+Two runnable examples ship in `examples/`:
+
+- `node examples/streaming-llm.js` — token-streaming LLM-style consumer, demonstrates TTFT, signal-abort path, and runtime event counts
+- `node examples/streaming-csv-export.js` — fast producer + slow consumer with `highWaterMark: 8`, prints the backpressure timeline
+
+See **[ADR-0012](docs/adr/0012-streaming-task-results-via-async-generators.md)** for the architectural rationale, IPC frame schemas, and the ordering traps that the implementation handles.
+
+---
+
 ## 🏛 Architecture & Memory Hierarchy
 
 The runtime organizes memory into three distinct tiers:
@@ -569,6 +628,8 @@ Run any example directly with `node examples/<name>.js`:
 | `zero-copy-image.js` | Transfer a 30MB raw image buffer to a worker via `transferList` (no copy). |
 | `cancel-on-disconnect.js` | Manual cancellation, `AbortSignal.timeout()`, and pre-aborted signals. |
 | `broadcast-cache-invalidation.js` | L1 cache invalidation across workers via `context.channel()` + `runtime.broadcast()`. |
+| `streaming-llm.js` | Token-streaming LLM-style consumer — TTFT measurement, `AbortSignal` mid-stream, runtime event counts. |
+| `streaming-csv-export.js` | Fast producer + slow consumer with `highWaterMark: 8` — prints the backpressure timeline (paused / resumed crossings). |
 
 ## 🤖 Agent Skill (Embedded)
 
