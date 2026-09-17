@@ -1,5 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { ChannelRegistry } from './broadcast-channel.js';
+import { isGeneratorFunction, runStream } from './stream-runner.js';
 
 if (!parentPort) {
   throw new Error('worker-thread-entry must be run as a Worker thread.');
@@ -12,6 +13,11 @@ const localState = new Map();
 // channels created here are automatically cleaned up when the worker
 // terminates (FinalizationRegistry safety net + explicit closeAll on exit).
 const channelRegistry = new ChannelRegistry();
+
+// Active streaming tasks on this worker. Each entry holds the per-task
+// AbortController so an incoming MSG_STREAM_ABORT can run `gen.return()`
+// on the right iterator and let its `finally` blocks execute cleanly.
+const activeStreams = new Map();
 
 // Optional user-provided custom task handler module
 let customHandler = null;
@@ -79,6 +85,31 @@ async function processTask(message) {
         'context',
         `return (${fnCode})(payload, state, context);`,
       );
+
+      // 2a. Streaming path — generator function (async or sync).
+      // Detected via Function constructor name per ADR-0012.
+      if (isGeneratorFunction(fn)) {
+        const ac = new AbortController();
+        activeStreams.set(taskId, ac);
+        try {
+          await runStream({
+            parentPort,
+            taskId,
+            fn,
+            payload,
+            localStorage: localState,
+            context,
+            signal: ac.signal,
+          });
+        } finally {
+          activeStreams.delete(taskId);
+        }
+        // runStream handles all IPC frames for streaming tasks; do not
+        // emit a final success/failure here.
+        return;
+      }
+
+      // 2b. Regular (async) function path — single result back to main.
       result = await fn(payload, localState, context);
     } else if (typeof customHandler === 'function') {
       // 3. User-defined module handler (object signature includes context)
@@ -117,6 +148,11 @@ async function processTask(message) {
 
 // Listen for tasks from the main thread
 parentPort.on('message', (message) => {
+  if (message?.type === 'MSG_STREAM_ABORT' && message.taskId) {
+    const ac = activeStreams.get(message.taskId);
+    if (ac) ac.abort(message.reason);
+    return;
+  }
   if (!message?.taskId) return;
   processTask(message);
 });
