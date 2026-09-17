@@ -20,6 +20,11 @@
   "scripts": {
     "test": "node --test test/**/*.test.js",
     "test:coverage": "node --test --experimental-test-coverage test/**/*.test.js",
+    "lint": "biome check src/ test/ examples/ benchmarks/",
+    "lint:fix": "biome check --write --unsafe src/ test/ examples/ benchmarks/",
+    "format": "biome format --write src/ test/ examples/ benchmarks/",
+    "format:check": "biome format src/ test/ examples/ benchmarks/",
+    "validate": "npm run lint && npm test",
     "benchmark": "node benchmarks/event-loop-lag.benchmark.js",
     "benchmark:stateful": "node benchmarks/stateful-vs-stateless.benchmark.js",
     "benchmark:concurrency": "node benchmarks/batch-concurrency.benchmark.js",
@@ -32,7 +37,8 @@
     "benchmark:scaling": "node benchmarks/throughput-scaling.benchmark.js",
     "benchmark:broadcast": "node benchmarks/broadcast-fanout.benchmark.js",
     "benchmark:all": "node benchmarks/event-loop-lag.benchmark.js && node benchmarks/stateful-vs-stateless.benchmark.js && node benchmarks/batch-concurrency.benchmark.js && node benchmarks/outbox-throughput.benchmark.js && node benchmarks/zero-copy-transfer.benchmark.js && node benchmarks/priority-routing.benchmark.js && node benchmarks/abort-cancellation.benchmark.js && node benchmarks/throughput-scaling.benchmark.js && node benchmarks/preemption-recovery.benchmark.js && node benchmarks/worker-recycling.benchmark.js && node benchmarks/broadcast-fanout.benchmark.js",
-    "prepublishOnly": "npm test"
+    "prepare": "husky || true",
+    "prepublishOnly": "npm run validate"
   },
   "repository": {
     "type": "git",
@@ -54,5 +60,15 @@
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.5.1"
+  },
+  "lint-staged": {
+    "*.{js,mjs,cjs,json}": [
+      "biome check --write"
+    ]
   }
 }
