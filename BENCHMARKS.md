@@ -231,6 +231,77 @@ File: `benchmarks/streaming-abort-latency.benchmark.js`
 
 ---
 
+## 1️⃣4️⃣ Streaming Throughput — chunks/sec by stream length + highWaterMark
+
+**What it proves**: The streaming throughput (`chunks/sec`) and first-chunk latency scale predictably across stream lengths (`100`, `1k`, `10k`) and highWaterMark choices (`16`, `64`, `256`, `1024`), and are not regressed by IPC pause/resume round-trips when the queue saturates.
+
+The benchmark sweeps a 6-cell matrix (`length × HWM`) on a single worker, measuring both the time-to-first-chunk and aggregate throughput. Two ratio observations are highlighted:
+
+* **`10k / 100` chunks/sec ratio** — how throughput holds as the stream grows (no quadratic IPC cost).
+* **`HWM 256 / HWM 16` at length `1k`** — how much the high-water-mark choice costs/buys you per stream. Higher HWM means fewer pause/resume round-trips, fewer IPC messages, and lower per-chunk overhead at the cost of slightly more resident memory.
+
+This is the small-scale complement to `streaming-stress` (section 1️⃣6️⃣), which probes concurrency and abort latency rather than per-stream throughput.
+
+Run: `npm run benchmark:streaming-throughput`
+File: `benchmarks/streaming-throughput.benchmark.js`
+
+---
+
+## 1️⃣5️⃣ Streaming Memory — RSS + queue footprint steady-state
+
+**What it proves**: Streaming 5,000 chunks through a single stream does **not** cause monotonic RSS growth, and the per-stream queue stays bounded by the configured `highWaterMark` (sampled peak ≤ `HWM × 2`).
+
+Methodology:
+1. Capture baseline RSS after V8 warm-up.
+2. Stream 5,000 chunks (each carrying a 256-byte payload) through one stream with `highWaterMark: 64`.
+3. Sample RSS + `queueLength` + `totalChunks` at each chunk batch.
+4. Drain, settle, capture peak RSS and final delta.
+
+A `process.exit(1)` fires on runaway growth (monotonic RSS climb across consecutive samples), so a CI run fails loud on a memory regression — this is the safety net for the `$O(\text{HWM})$ chunks in flight` guarantee from `streaming-results/spec.md`.
+
+Run: `npm run benchmark:streaming-memory`
+File: `benchmarks/streaming-memory.benchmark.js`
+
+---
+
+## 1️⃣6️⃣ Streaming Stress — concurrency + size + abort latency
+
+**What it proves**: Three workloads all hold simultaneously under load:
+
+| Phase | Workload | Pass criterion |
+| --- | --- | --- |
+| 1 | 8 concurrent streams × 1,000 chunks each on 8 workers | Every chunk delivered exactly once (no drops, no duplicates) |
+| 2 | 1 stream × 50,000 chunks on 1 worker | Full payload delivered; throughput ≥ k-chunks/sec |
+| 3 | Mid-stream abort (consumer `break` after first chunk) | Worker drain settles in ≤ 1,000 ms; `stream.aborted === true` |
+
+Phase 1 stresses per-stream isolation under fan-out. Phase 2 is the upper-end throughput probe. Phase 3 is the consumer-driven cancellation path — it complements `benchmarks/abort-cancellation.benchmark.js` (regular task abort) and `benchmarks/streaming-abort-latency.benchmark.js` (single-stream finally-block latency) by adding the **concurrent-stream + large-stream** axes.
+
+If any phase fails, the benchmark exits `1` with a `FAIL:` line so CI catches regressions immediately.
+
+Run: `npm run benchmark:streaming-stress`
+File: `benchmarks/streaming-stress.benchmark.js`
+
+---
+
+## 1️⃣7️⃣ ADR-0019 Default Sizing — RSS comparison vs. legacy default
+
+**What it proves**: The `workers: 1` default introduced in ADR-0019 saves substantial RSS on multi-core hosts versus the legacy `workers: availableParallelism() - 1` default — typically **5× to 20×** on a 28-core machine.
+
+Methodology:
+1. Capture process RSS at startup.
+2. Boot a runtime with `workers: 1` (ADR-0019); capture RSS at startup / warm-up / peak / post-shutdown.
+3. Tear down and reboot with `workers: cores - 1` (legacy); capture the same four samples.
+4. Compare peak RSS, assert the new default is at least 2× cheaper.
+
+Hosts with `≤ 4` cores report `DEGENERATE` and exit `0` — the legacy default falls back to 1 worker on small hosts, so there is nothing to demonstrate. The benchmark is meaningful on real servers and CI runners.
+
+This benchmark **is the empirical justification** for ADR-0019; if it ever flips (the new default becomes more expensive than the legacy one), that is a strong signal the ADR needs revisiting.
+
+Run: `npm run benchmark:default-sizing-memory`
+File: `benchmarks/default-sizing-memory.benchmark.js`
+
+---
+
 ## How to Reproduce All Results
 
 ```bash
@@ -251,6 +322,10 @@ npm run benchmark:recycling        # Heap reclamation
 npm run benchmark:broadcast        # BroadcastChannel fan-out
 npm run benchmark:streaming-queue-dispatch   # T5 queued stream dispatch latency
 npm run benchmark:streaming-abort-latency    # Consumer break → worker finally
+npm run benchmark:streaming-throughput       # Chunks/sec by stream length × HWM
+npm run benchmark:streaming-memory           # RSS + queue footprint steady-state
+npm run benchmark:streaming-stress           # Concurrency + size + abort latency
+npm run benchmark:default-sizing-memory      # ADR-0019 default pool RSS comparison
 ```
 
 Each benchmark prints a header, the measured numbers, a percent-vs-baseline summary, and a short verdict. Run them individually to isolate platform variance; the `npm run benchmark:all` aggregate gives the integrated picture.
