@@ -35,7 +35,8 @@
  * Phase 1 status:
  *   - T1 — public surface + factory: complete.
  *   - T2 — `Ewma` + `SignalMonitor` wired into `tick()`: complete.
- *   - T3 — debounce state machine: pending.
+ *   - T3 — `DebounceCounter` primitive: complete (not yet fed by the
+ *     resize decision logic — that wiring lands in T5).
  *   - T4-T5 — resize actions + decision logic: pending.
  *
  * @see ADR-0014 — Adaptive Concurrency via Event Loop Utilization
@@ -233,6 +234,153 @@ export class SignalMonitor {
 }
 
 /**
+ * @typedef {object} DebounceFireEvent
+ * @property {'grow' | 'shrink' | 'noop'} reason Direction whose consecutive-tick counter reached the threshold.
+ * @property {number} at `performance.now()` timestamp of the fire (ms).
+ */
+
+/**
+ * @callback DebounceFireListener
+ * @param {DebounceFireEvent} event
+ */
+
+/**
+ * Consecutive-tick debounce state machine.
+ *
+ * Counts how many ticks in a row have produced the same `direction`.
+ * Resets to `1` on direction flip; fires the registered listener
+ * (`onFire()`) when the count reaches the configured `threshold` (5 by
+ * default), then resets the count to `0` while preserving the direction
+ * so the very next same-direction tick starts a fresh window at `1`.
+ *
+ * The post-fire reset prevents a sustained signal (e.g. ELU stuck below
+ * the grow threshold for several seconds) from firing the resize on
+ * every subsequent threshold boundary — the controller sees a single
+ * fire per "sustained signal episode" instead of one per debounce
+ * window. The size cap (`maxWorkers`) is what bounds the actual pool
+ * growth; this class only owns the fire cadence.
+ *
+ * `direction` is one of `'grow' | 'shrink' | 'noop'`. `'noop'` is
+ * semantically a direction flip from anything else (and vice-versa),
+ * so a noop tick interrupts a grow/shrink streak just like a real flip
+ * would — without an explicit noop-breaker, transient noise inside the
+ * dead zone could keep the grow/shrink counter alive indefinitely.
+ *
+ * Validation: `threshold` must be a finite integer `>= 1`. `note()`
+ * rejects unknown directions. `onFire()` rejects non-function
+ * listeners.
+ *
+ * @see ADR-0014 §Architectural Mechanics — debounce window, 5 consecutive ticks
+ */
+export class DebounceCounter {
+  /** @type {number} */
+  #threshold;
+  /** @type {number} */
+  #count;
+  /** @type {'grow' | 'shrink' | 'noop' | null} */
+  #direction;
+  /** @type {Set<DebounceFireListener>} */
+  #fireListeners;
+
+  /**
+   * @param {number} [threshold=5] Consecutive same-direction ticks required to fire.
+   * @throws {TypeError} If `threshold` is not a finite number.
+   * @throws {RangeError} If `threshold` is not an integer `>= 1`.
+   */
+  constructor(threshold = 5) {
+    if (typeof threshold !== 'number' || !Number.isFinite(threshold)) {
+      throw new TypeError(`DebounceCounter threshold must be a finite number, got ${threshold}`);
+    }
+    if (!Number.isInteger(threshold) || threshold < 1) {
+      throw new RangeError(`DebounceCounter threshold must be an integer >= 1, got ${threshold}`);
+    }
+    this.#threshold = threshold;
+    this.#count = 0;
+    this.#direction = null;
+    this.#fireListeners = new Set();
+  }
+
+  /**
+   * Feeds one tick's direction into the counter.
+   *
+   * - If `direction` matches the current direction: increment count.
+   * - Otherwise: direction becomes the new direction and count resets to `1`.
+   * - If the post-update count reaches `threshold`: fire every registered
+   *   listener with `{ reason: direction, at: performance.now() }`, then
+   *   reset count to `0` (direction is preserved).
+   *
+   * @param {'grow' | 'shrink' | 'noop'} direction
+   * @throws {TypeError} If `direction` is not one of the three valid values.
+   */
+  note(direction) {
+    if (direction !== 'grow' && direction !== 'shrink' && direction !== 'noop') {
+      throw new TypeError(
+        `DebounceCounter direction must be 'grow' | 'shrink' | 'noop', got ${direction}`,
+      );
+    }
+
+    if (this.#direction !== direction) {
+      this.#direction = direction;
+      this.#count = 1;
+    } else {
+      this.#count++;
+    }
+
+    if (this.#count >= this.#threshold) {
+      // Snapshot listeners before iterating so a listener that calls
+      // `reset()` (or even `note()` recursively) cannot mutate the set
+      // mid-fire and produce a non-deterministic iteration order.
+      const listeners = [...this.#fireListeners];
+      const reason = /** @type {'grow' | 'shrink' | 'noop'} */ (direction);
+      const at = performance.now();
+      // Reset BEFORE firing so a listener that reads `value()` from
+      // inside its callback sees the post-fire state (0), not the
+      // threshold value that triggered the fire.
+      this.#count = 0;
+      for (const listener of listeners) {
+        listener({ reason, at });
+      }
+    }
+  }
+
+  /**
+   * Returns the current consecutive-tick count. `0` after `reset()` or
+   * immediately after a fire (until the next `note()` arrives).
+   *
+   * @returns {number}
+   */
+  value() {
+    return this.#count;
+  }
+
+  /**
+   * Resets the counter and clears the current direction. The next
+   * `note()` always starts a fresh streak at `1`.
+   */
+  reset() {
+    this.#count = 0;
+    this.#direction = null;
+  }
+
+  /**
+   * Registers a fire listener. Returns an idempotent unsubscribe so
+   * callers can detach without holding a reference to the counter.
+   *
+   * @param {DebounceFireListener} listener
+   * @returns {() => boolean} Unsubscribe function. Returns true if the
+   *   listener was registered at the time of the call.
+   * @throws {TypeError} If `listener` is not a function.
+   */
+  onFire(listener) {
+    if (typeof listener !== 'function') {
+      throw new TypeError('DebounceCounter onFire() requires a function listener');
+    }
+    this.#fireListeners.add(listener);
+    return () => this.#fireListeners.delete(listener);
+  }
+}
+
+/**
  * Creates an adaptive concurrency controller. The returned object exposes
  * the lifecycle methods documented at the top of this module.
  *
@@ -268,6 +416,10 @@ export function createAdaptiveController(options) {
   const eluEwma = new Ewma(config.ewmaAlpha);
   const latencyEwma = new Ewma(config.ewmaAlpha);
   const signals = new SignalMonitor();
+  // The `DebounceCounter` primitive ships with T3 but is intentionally
+  // not instantiated here yet — wiring it into tick() lands in T5
+  // alongside the resize decision logic. See module header for the
+  // full T1-T5 sequencing.
 
   /**
    * Latest telemetry snapshot. Live `elu` / `latencyP99Ms` updates
@@ -322,10 +474,12 @@ export function createAdaptiveController(options) {
      * this on `samplingCadenceMs` once `start()` has been called.
      *
      * T2 wires the SignalMonitor + Ewma chain: sample raw signals,
-     * feed both EWMAs, refresh the telemetry block. Debounce (T3),
-     * decision logic (T5), and resize actions (T4) all land in
-     * subsequent tasks; this method does NOT currently fire any
-     * resize event.
+     * feed both EWMAs, refresh the telemetry block. T3 lands the
+     * `DebounceCounter` primitive (exported below); the actual call
+     * `debounce.note(direction)` is intentionally NOT wired here yet
+     * — that lands in T5 once the resize decision matrix exists.
+     * T4 (spawn / retire actions) also lands later. This method does
+     * NOT currently fire any resize event.
      */
     tick() {
       const { elu, latencyP99 } = signals.sample();

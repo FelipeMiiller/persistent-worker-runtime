@@ -8,13 +8,27 @@
  *   - Controller `tick()` integration (stats.elu, stats.latencyP99Ms,
  *     ticksSinceResize) and start / stop timer wiring.
  *
- * T3+ coverage (debounce, decision matrix, resize actions, runtime
- * integration) lands in subsequent suites.
+ * T3 coverage:
+ *   - `DebounceCounter` consecutive-tick accumulation
+ *   - Direction-flip reset to 1
+ *   - Threshold fire (default 5 and custom)
+ *   - No double-fire after threshold (post-fire reset)
+ *   - `'noop'` breaks an active streak
+ *   - `reset()` / `value()` / `onFire()` lifecycle
+ *   - Validation (threshold bounds, direction enum, listener type)
+ *
+ * T4+ coverage (decision matrix, resize actions, runtime integration)
+ * lands in subsequent suites.
  */
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { createAdaptiveController, Ewma, SignalMonitor } from '../src/adaptive-controller.js';
+import {
+  createAdaptiveController,
+  DebounceCounter,
+  Ewma,
+  SignalMonitor,
+} from '../src/adaptive-controller.js';
 
 /**
  * Asserts `actual ≈ expected` within a small tolerance for IEEE 754
@@ -161,6 +175,200 @@ describe('SignalMonitor', () => {
     for (let i = 0; i < 10; i++) monitor.sample();
     monitor.stop();
     assert.ok(true);
+  });
+});
+
+describe('DebounceCounter', () => {
+  test('default threshold is 5; value() is 0 before any note()', () => {
+    const debounce = new DebounceCounter();
+    assert.equal(debounce.value(), 0);
+  });
+
+  test('first note() sets the counter to 1 regardless of direction', () => {
+    const debounce = new DebounceCounter();
+    debounce.note('grow');
+    assert.equal(debounce.value(), 1);
+  });
+
+  test('consecutive notes in the same direction increment the counter', () => {
+    const debounce = new DebounceCounter();
+    debounce.note('grow');
+    assert.equal(debounce.value(), 1);
+    debounce.note('grow');
+    assert.equal(debounce.value(), 2);
+    debounce.note('grow');
+    assert.equal(debounce.value(), 3);
+    debounce.note('grow');
+    assert.equal(debounce.value(), 4);
+  });
+
+  test('does not fire before the threshold is reached', () => {
+    const debounce = new DebounceCounter();
+    let fires = 0;
+    debounce.onFire(() => fires++);
+    for (let i = 0; i < 4; i++) debounce.note('grow');
+    assert.equal(fires, 0);
+    assert.equal(debounce.value(), 4);
+  });
+
+  test('fires exactly once on the 5th consecutive note() in the same direction', () => {
+    const debounce = new DebounceCounter();
+    /** @type {{ reason: string, at: number }[]} */
+    const events = [];
+    debounce.onFire((e) => events.push(e));
+    for (let i = 0; i < 5; i++) debounce.note('shrink');
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reason, 'shrink');
+    assert.equal(typeof events[0].at, 'number');
+    assert.ok(events[0].at > 0);
+  });
+
+  test('no double-fire: count resets to 0 after fire; next same-direction note() starts at 1', () => {
+    const debounce = new DebounceCounter();
+    let fires = 0;
+    debounce.onFire(() => fires++);
+    for (let i = 0; i < 5; i++) debounce.note('grow'); // fire #1
+    assert.equal(fires, 1);
+    assert.equal(debounce.value(), 0);
+    // Continuing in the same direction must NOT fire on the next 5 ticks —
+    // it starts a fresh window at 1.
+    for (let i = 0; i < 4; i++) debounce.note('grow');
+    assert.equal(fires, 1);
+    assert.equal(debounce.value(), 4);
+    debounce.note('grow'); // 5th of the new window
+    assert.equal(fires, 2);
+    assert.equal(debounce.value(), 0);
+  });
+
+  test('direction flip resets the counter to 1 (not 0)', () => {
+    const debounce = new DebounceCounter();
+    debounce.note('grow');
+    debounce.note('grow');
+    debounce.note('grow');
+    assert.equal(debounce.value(), 3);
+    debounce.note('shrink');
+    assert.equal(debounce.value(), 1);
+  });
+
+  test('a single noop tick breaks an active streak', () => {
+    const debounce = new DebounceCounter();
+    let fires = 0;
+    debounce.onFire(() => fires++);
+    debounce.note('grow');
+    debounce.note('grow');
+    debounce.note('grow');
+    debounce.note('grow'); // 4 grow ticks — would fire on the 5th
+    debounce.note('noop'); // breaks streak — counts as flip, count resets to 1
+    assert.equal(debounce.value(), 1);
+    // Resuming grow starts fresh: the very first grow after noop is
+    // itself a flip (noop → grow), so it resets to 1, not 5. Four more
+    // grow ticks bring the counter back up to 4 — NOT 5, which proves
+    // the noop actually broke the streak.
+    debounce.note('grow'); // flip noop → grow, count = 1
+    debounce.note('grow'); // 2
+    debounce.note('grow'); // 3
+    debounce.note('grow'); // 4
+    assert.equal(debounce.value(), 4);
+    assert.equal(fires, 0, 'noop must reset the streak — no premature fire');
+    debounce.note('grow'); // 5th of the new window
+    assert.equal(fires, 1);
+  });
+
+  test('noop can build its own streak (noop → noop → noop fires on the 5th)', () => {
+    const debounce = new DebounceCounter();
+    let fires = 0;
+    debounce.onFire(() => fires++);
+    for (let i = 0; i < 5; i++) debounce.note('noop');
+    assert.equal(fires, 1);
+  });
+
+  test('reset() clears both the counter and the current direction', () => {
+    const debounce = new DebounceCounter();
+    debounce.note('grow');
+    debounce.note('grow');
+    debounce.note('grow');
+    assert.equal(debounce.value(), 3);
+    debounce.reset();
+    assert.equal(debounce.value(), 0);
+    // After reset, the next note() (any direction) starts a fresh streak
+    // at 1 — not picking up where the old streak left off.
+    debounce.note('grow');
+    assert.equal(debounce.value(), 1);
+  });
+
+  test('onFire() returns an idempotent unsubscribe function', () => {
+    const debounce = new DebounceCounter();
+    let fires = 0;
+    const unsubscribe = debounce.onFire(() => fires++);
+    for (let i = 0; i < 5; i++) debounce.note('grow');
+    assert.equal(fires, 1);
+    const removed = unsubscribe();
+    assert.equal(removed, true);
+    const removedAgain = unsubscribe();
+    assert.equal(removedAgain, false);
+    for (let i = 0; i < 5; i++) debounce.note('grow');
+    assert.equal(fires, 1, 'listener must not fire after unsubscribe');
+  });
+
+  test('multiple listeners all fire in registration order', () => {
+    const debounce = new DebounceCounter();
+    /** @type {string[]} */
+    const order = [];
+    debounce.onFire(() => order.push('first'));
+    debounce.onFire(() => order.push('second'));
+    debounce.onFire(() => order.push('third'));
+    for (let i = 0; i < 5; i++) debounce.note('grow');
+    assert.deepEqual(order, ['first', 'second', 'third']);
+  });
+
+  test('custom threshold fires at the configured tick count', () => {
+    const debounce = new DebounceCounter(2);
+    let fires = 0;
+    debounce.onFire(() => fires++);
+    debounce.note('grow');
+    assert.equal(fires, 0);
+    debounce.note('grow');
+    assert.equal(fires, 1);
+    assert.equal(debounce.value(), 0);
+  });
+
+  test('threshold = 1 fires immediately on the first note()', () => {
+    const debounce = new DebounceCounter(1);
+    let fires = 0;
+    debounce.onFire(() => fires++);
+    debounce.note('grow');
+    assert.equal(fires, 1);
+    assert.equal(debounce.value(), 0);
+  });
+
+  test('rejects non-finite threshold', () => {
+    assert.throws(() => new DebounceCounter(Number.NaN), TypeError);
+    assert.throws(() => new DebounceCounter(Number.POSITIVE_INFINITY), TypeError);
+    assert.throws(() => new DebounceCounter('5'), TypeError);
+    assert.throws(() => new DebounceCounter(null), TypeError);
+  });
+
+  test('rejects threshold outside [1, Infinity)', () => {
+    assert.throws(() => new DebounceCounter(0), RangeError);
+    assert.throws(() => new DebounceCounter(-1), RangeError);
+    assert.throws(() => new DebounceCounter(0.5), RangeError, /integer/);
+  });
+
+  test('rejects unknown direction in note()', () => {
+    const debounce = new DebounceCounter();
+    assert.throws(() => debounce.note('unknown'), TypeError);
+    assert.throws(() => debounce.note(''), TypeError);
+    assert.throws(() => debounce.note(null), TypeError);
+    assert.throws(() => debounce.note(undefined), TypeError);
+    assert.throws(() => debounce.note(42), TypeError);
+  });
+
+  test('rejects non-function listener in onFire()', () => {
+    const debounce = new DebounceCounter();
+    assert.throws(() => debounce.onFire(null), TypeError);
+    assert.throws(() => debounce.onFire('not-a-fn'), TypeError);
+    assert.throws(() => debounce.onFire(42), TypeError);
+    assert.throws(() => debounce.onFire({}), TypeError);
   });
 });
 
