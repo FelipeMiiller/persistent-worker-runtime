@@ -410,11 +410,16 @@ describe('createAdaptiveController — T2 tick integration', () => {
       samplingCadenceMs: 20,
     });
     controller.start();
-    await new Promise((resolve) => setTimeout(resolve, 75));
+    // 150ms / 20ms cadence ≈ 7 expected ticks. We assert `>= 2` (not a
+    // tight upper bound) because the real assertion under test is
+    // "the timer is firing" — the upper bound is not informative and
+    // becomes flaky under CPU contention from sibling tests in the
+    // full validate run. The dedicated timing assertion lives in
+    // `benchmarks/adaptive-concurrency.benchmark.js` Phase D (T10).
+    await new Promise((resolve) => setTimeout(resolve, 150));
     controller.stop();
-    // 75ms / 20ms cadence ≈ 3-4 ticks fired (allow for jitter)
     const ticks = controller.getStats().ticksSinceResize;
-    assert.ok(ticks >= 2 && ticks <= 5, `expected 2-5 ticks, got ${ticks}`);
+    assert.ok(ticks >= 2, `expected at least 2 ticks, got ${ticks}`);
   });
 
   test('stop() cancels the timer (no further ticks after stop)', async () => {
