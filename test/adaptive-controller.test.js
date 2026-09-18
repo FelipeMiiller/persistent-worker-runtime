@@ -708,6 +708,187 @@ describe('createAdaptiveController — T4 resize actions', () => {
   });
 });
 
+describe('createAdaptiveController — T1-T4 hardening (failure modes + contract guarantees)', () => {
+  test('Ewma.value() returns null before any update()', () => {
+    const e = new Ewma(0.3);
+    assert.equal(e.value(), null);
+  });
+
+  test('start() is idempotent — calling it twice does not arm two timers', async () => {
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      samplingCadenceMs: 20,
+    });
+    controller.start();
+    controller.start(); // second call must be a no-op, not double-armed
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    controller.stop();
+    // 100ms / 20ms cadence ≈ 5 ticks; if start() had armed two
+    // timers we'd see 10. Allow generous upper bound for jitter.
+    const ticks = controller.getStats().ticksSinceResize;
+    assert.ok(ticks >= 2 && ticks <= 8, `expected 2-8 ticks, got ${ticks}`);
+  });
+
+  test('stop() before start() is a safe no-op (no crash, no leftover state)', () => {
+    const controller = createAdaptiveController({ minWorkers: 1, maxWorkers: 4 });
+    assert.doesNotThrow(() => controller.stop());
+    // After stop()-without-start, start() still works.
+    controller.start();
+    assert.doesNotThrow(() => controller.stop());
+  });
+
+  test('a throwing onResize listener prevents subsequent listeners from firing (documents current contract)', async () => {
+    /** @type {string[]} */
+    const order = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+    });
+    controller.onResize(() => {
+      order.push('first');
+      throw new Error('boom');
+    });
+    controller.onResize(() => order.push('second'));
+    controller.onResize(() => order.push('third'));
+
+    // spawnWorker is async — the listener throw becomes a Promise
+    // rejection. There is no try/catch in fireResize today, so the
+    // rejection propagates out and subsequent listeners do not fire.
+    // This is the documented contract — T5 may add isolation if it
+    // becomes a real issue (see `completion-checklist.md` notes).
+    await assert.rejects(controller.spawnWorker(), /boom/);
+    assert.deepEqual(order, ['first']);
+  });
+
+  test('enabled: false + spawnWorker() STILL fires the resize event (T4 does not gate on enabled)', async () => {
+    /** @type {Array<unknown>} */
+    const events = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      enabled: false,
+      spawnIdleWorker: async () => 'w-1',
+    });
+    controller.onResize((e) => events.push(e));
+    const ok = await controller.spawnWorker();
+    assert.equal(ok, true);
+    assert.equal(events.length, 1, 'T4 does not gate spawnWorker on enabled — T6 will fix');
+  });
+
+  test('enabled: false + retireLowestLoadWorker() STILL fires worker:retiring + shrink (T4 contract)', async () => {
+    /** @type {Array<{ event: string, payload: any }>} */
+    const emitted = [];
+    /** @type {Array<import('../src/adaptive-controller.js').ResizeEvent>} */
+    const events = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      enabled: false,
+      spawnIdleWorker: async () => 'w-1',
+      retireLowestLoadWorker: async () => 'w-1',
+      events: { emit: (event, payload) => emitted.push({ event, payload }) },
+    });
+    controller.onResize((e) => events.push(e));
+    await controller.spawnWorker(); // fires grow resize
+    const ok = await controller.retireLowestLoadWorker();
+    assert.equal(ok, true);
+    assert.equal(emitted.length, 1, 'exactly one worker:retiring event from the retire');
+    assert.deepEqual(emitted[0].payload, { workerId: 'w-1', reason: 'drain' });
+    assert.equal(events.length, 2, 'one grow + one shrink resize event');
+    assert.equal(events[0].reason, 'grow');
+    assert.equal(events[1].reason, 'shrink');
+  });
+
+  test('spawnWorker() DOES NOT enforce maxWorkers (caller/T5 must gate)', async () => {
+    let spawnCalls = 0;
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 2,
+      spawnIdleWorker: async () => {
+        spawnCalls++;
+        return `w-${spawnCalls}`;
+      },
+    });
+    await controller.spawnWorker(); // 1 → 2 (at max)
+    await controller.spawnWorker(); // 2 → 3 (OVER max — controller allows it)
+    await controller.spawnWorker(); // 3 → 4
+    assert.equal(controller.getStats().effectiveWorkers, 4);
+    assert.equal(spawnCalls, 3);
+  });
+
+  test('retireLowestLoadWorker() DOES NOT enforce minWorkers (caller/T5 must gate)', async () => {
+    const controller = createAdaptiveController({
+      minWorkers: 2,
+      maxWorkers: 4,
+      retireLowestLoadWorker: async () => 'w-1',
+    });
+    // 2 → 1 (at min)
+    await controller.retireLowestLoadWorker();
+    // 1 → 0 (UNDER min — controller allows it)
+    await controller.retireLowestLoadWorker();
+    await controller.retireLowestLoadWorker();
+    assert.equal(controller.getStats().effectiveWorkers, -1);
+  });
+
+  test('concurrent spawnWorker() calls all complete and effectiveWorkers reflects the final state', async () => {
+    let spawnCalls = 0;
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => {
+        spawnCalls++;
+        // Simulate I/O latency so concurrent calls actually race.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return `w-${spawnCalls}`;
+      },
+    });
+    const results = await Promise.all([
+      controller.spawnWorker(),
+      controller.spawnWorker(),
+      controller.spawnWorker(),
+    ]);
+    assert.deepEqual(results, [true, true, true]);
+    assert.equal(spawnCalls, 3);
+    assert.equal(controller.getStats().effectiveWorkers, 4);
+  });
+
+  test('onResize listener reading stats during fire sees the POST-resize snapshot', async () => {
+    /** @type {AdaptiveStats | undefined} */
+    let snapshot;
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+    });
+    controller.onResize(() => {
+      snapshot = controller.getStats();
+    });
+    controller.tick();
+    await controller.spawnWorker();
+    // Inside fireResize, ticksSinceResize is reset to 0 BEFORE firing.
+    assert.ok(snapshot);
+    assert.equal(/** @type {AdaptiveStats} */ (snapshot).effectiveWorkers, 2);
+    assert.equal(/** @type {AdaptiveStats} */ (snapshot).ticksSinceResize, 0);
+    assert.equal(/** @type {AdaptiveStats} */ (snapshot).lastResizeReason, 'grow');
+  });
+
+  test('ticksSinceResume after a grow stays at 0 across multiple subsequent ticks', async () => {
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+    });
+    await controller.spawnWorker();
+    assert.equal(controller.getStats().ticksSinceResize, 0);
+    controller.tick();
+    controller.tick();
+    controller.tick();
+    assert.equal(controller.getStats().ticksSinceResize, 3);
+  });
+});
+
 describe('createAdaptiveController — T2 tick integration', () => {
   test('getStats() returns the documented shape with null signals initially', () => {
     const controller = createAdaptiveController({ minWorkers: 1, maxWorkers: 4 });
