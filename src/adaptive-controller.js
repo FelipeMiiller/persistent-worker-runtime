@@ -45,9 +45,15 @@
  *     wire the real `WorkerRuntime.spawnIdleWorker()` /
  *     `WorkerRuntime.retireLowestLoadWorker()` and pass
  *     `runtime.events` here.
- *   - T5 — resize decision logic wiring (`tick()` calls
- *     `debounce.note(direction)` after the EWMAs and before the
- *     resize actions): pending.
+ *   - T5 — resize decision logic wiring: complete. `tick()` calls
+ *     `classifyTickDirection` (pure helper) on the smoothed signals,
+ *     feeds the result into `DebounceCounter.note(direction)`, and
+ *     the debounced fire listener enforces the
+ *     `[minWorkers, maxWorkers]` band + the `enabled` opt-out before
+ *     invoking `spawnWorker()` / `retireLowestLoadWorker()` from T4.
+ *     Sustained grow signals re-fire every `debounceTicks` ticks (the
+ *     controller's fire cadence, not a burst loop) — pool growth is
+ *     bounded by `maxWorkers`, not the fire rate.
  *
  * @see ADR-0014 — Adaptive Concurrency via Event Loop Utilization
  * @see .specs/features/adaptive-concurrency/{spec.md,tasks.md}
@@ -407,6 +413,58 @@ export class DebounceCounter {
 }
 
 /**
+ * Classifies a tick's smoothed signals into a resize direction. Pure
+ * function — exported so the decision matrix can be unit-tested
+ * independently of the controller lifecycle.
+ *
+ * Rules (per ADR-0014 §Architectural Mechanics):
+ *   - `'shrink'`: `elu > shrinkEluThreshold` OR
+ *     `latencyP99Ms > shrinkLatencyP99Ms` (either signal alone
+ *     triggers shrink — both load and tail latency matter).
+ *   - `'grow'`: `elu < growEluThreshold` AND
+ *     `latencyP99Ms < growLatencyP99Ms` (both signals must agree —
+ *     never grow on disagreement; a low-ELU high-p99 pool is
+ *     blocked on I/O, more workers won't help).
+ *   - `'noop'`: dead zone, or the two signals disagree in any other
+ *     way. Transient noise inside the dead zone keeps the debounce
+ *     counter from advancing.
+ *
+ * Null signals (before the first EWMA sample lands) always classify
+ * as `'noop'` — the controller has no information to act on.
+ *
+ * Thresholds are strict: `> shrinkEluThreshold` (not `>=`) and
+ * `< growEluThreshold` (not `<=`). A tick sitting exactly on a
+ * threshold edge falls into the dead zone — keeps the decision
+ * well-defined at the boundary and avoids oscillation between
+ * shrink/noop or grow/noop at the exact threshold.
+ *
+ * @param {number | null} elu Smoothed Event Loop Utilization.
+ * @param {number | null} latencyP99Ms Smoothed Event Loop delay p99 (ms).
+ * @param {number} shrinkEluThreshold
+ * @param {number} shrinkLatencyP99Ms
+ * @param {number} growEluThreshold
+ * @param {number} growLatencyP99Ms
+ * @returns {'grow' | 'shrink' | 'noop'}
+ */
+export function classifyTickDirection(
+  elu,
+  latencyP99Ms,
+  shrinkEluThreshold,
+  shrinkLatencyP99Ms,
+  growEluThreshold,
+  growLatencyP99Ms,
+) {
+  if (elu === null || latencyP99Ms === null) return 'noop';
+  if (elu > shrinkEluThreshold || latencyP99Ms > shrinkLatencyP99Ms) {
+    return 'shrink';
+  }
+  if (elu < growEluThreshold && latencyP99Ms < growLatencyP99Ms) {
+    return 'grow';
+  }
+  return 'noop';
+}
+
+/**
  * Creates an adaptive concurrency controller. The returned object exposes
  * the lifecycle methods documented at the top of this module.
  *
@@ -447,10 +505,7 @@ export function createAdaptiveController(options) {
   const eluEwma = new Ewma(config.ewmaAlpha);
   const latencyEwma = new Ewma(config.ewmaAlpha);
   const signals = new SignalMonitor();
-  // The `DebounceCounter` primitive ships with T3 but is intentionally
-  // not instantiated here yet — wiring it into tick() lands in T5
-  // alongside the resize decision logic. See module header for the
-  // full T1-T5 sequencing.
+  const debounce = new DebounceCounter(config.debounceTicks);
 
   /**
    * Latest telemetry snapshot. Live `elu` / `latencyP99Ms` updates
@@ -469,6 +524,30 @@ export function createAdaptiveController(options) {
     lastResizeReason: null,
     lastResizeAt: null,
   };
+
+  /**
+   * Resize action wiring (T5): the debounced fire callback is the
+   * ONLY place where `tick()` translates into a spawn/retire. It
+   * enforces the opt-out flag (`enabled: false`) and the
+   * `[minWorkers, maxWorkers]` band, then fire-and-forgets the
+   * underlying callbacks that T4 documented as boundary-naïve.
+   * Failures (callback throws, returns null/empty) are absorbed
+   * inside `spawnWorker` / `retireLowestLoadWorker` — no state
+   * mutation, no event fired.
+   *
+   * Sustained grow signals re-fire every `debounceTicks` ticks (the
+   * debounce's post-fire reset starts the counter at 1, so the next
+   * same-direction tick accumulates toward another fire). Pool
+   * growth is bounded by `maxWorkers`, not the fire rate.
+   */
+  debounce.onFire(({ reason }) => {
+    if (!config.enabled) return;
+    if (reason === 'grow' && stats.effectiveWorkers < config.maxWorkers) {
+      api.spawnWorker();
+    } else if (reason === 'shrink' && stats.effectiveWorkers > config.minWorkers) {
+      api.retireLowestLoadWorker();
+    }
+  });
 
   /** @type {ReturnType<typeof setInterval> | null} */
   let timer = null;
@@ -552,15 +631,17 @@ export function createAdaptiveController(options) {
      * for tests and benchmarks; the supervisor heartbeat will invoke
      * this on `samplingCadenceMs` once `start()` has been called.
      *
-     * T2 wires the SignalMonitor + Ewma chain: sample raw signals,
-     * feed both EWMAs, refresh the telemetry block. T3 lands the
-     * `DebounceCounter` primitive (exported below); the actual call
-     * `debounce.note(direction)` is intentionally NOT wired here yet
-     * — that lands in T5 once the resize decision matrix exists.
-     * T4 lands the `spawnWorker()` + `retireLowestLoadWorker()` API
-     * surface; T5 will invoke them from `tick()` based on the
-     * debounced decision. This method does NOT currently fire any
-     * resize event.
+     * Pipeline:
+     *   1. `SignalMonitor.sample()` → raw `elu` + `latencyP99`.
+     *   2. Feed both EWMAs; refresh `stats.elu` / `stats.latencyP99Ms`.
+     *   3. `classifyTickDirection` maps the smoothed signals to
+     *      `'grow' | 'shrink' | 'noop'` using the configured band
+     *      thresholds.
+     *   4. `debounce.note(direction)` accumulates the direction; the
+     *      fire listener registered at factory time invokes
+     *      `spawnWorker()` / `retireLowestLoadWorker()` after
+     *      `debounceTicks` consecutive same-direction ticks (with the
+     *      band + `enabled` gate enforced there).
      */
     tick() {
       const { elu, latencyP99 } = signals.sample();
@@ -569,6 +650,16 @@ export function createAdaptiveController(options) {
       stats.elu = eluEwma.value();
       stats.latencyP99Ms = latencyEwma.value();
       stats.ticksSinceResize++;
+
+      const direction = classifyTickDirection(
+        stats.elu,
+        stats.latencyP99Ms,
+        config.shrinkEluThreshold,
+        config.shrinkLatencyP99Ms,
+        config.growEluThreshold,
+        config.growLatencyP99Ms,
+      );
+      debounce.note(direction);
     },
 
     /**

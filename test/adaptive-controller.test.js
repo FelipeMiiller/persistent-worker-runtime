@@ -32,14 +32,28 @@
  *   - `ResizeEvent` shape includes `signals` (current EWMA snapshot
  *     or `null` before any tick)
  *
- * T5+ coverage (decision matrix, WorkerRuntime integration, telemetry
- * block on `runtime.stats`, integration tests) lands in subsequent
- * suites.
+ * T5 coverage:
+ *   - `classifyTickDirection` pure function — exhaustive decision
+ *     matrix (shrink by ELU, shrink by p99, grow, dead-zone noop,
+ *     disagreement noop, null-signal noop, strict-threshold boundary)
+ *   - `tick()` × 5 in idle env fires `spawnWorker` exactly once
+ *     (grow direction + debounce).
+ *   - `enabled: false` blocks the debounced fire even after 5 grow
+ *     ticks.
+ *   - At `maxWorkers` (pre-populated via direct API), 5 grow ticks do
+ *     NOT spawn past the band (T5 closes the boundary gap from T4).
+ *   - `debounceTicks` option is respected: `debounceTicks: 2` fires
+ *     at tick 2.
+ *   - `ticksSinceResize` resets to 0 after a T5-driven grow fire.
+ *
+ * T6+ coverage (band validation, WorkerRuntime integration, telemetry
+ * block on `runtime.stats`) lands in subsequent suites.
  */
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
+  classifyTickDirection,
   createAdaptiveController,
   DebounceCounter,
   Ewma,
@@ -628,6 +642,12 @@ describe('createAdaptiveController — T4 resize actions', () => {
     const controller = createAdaptiveController({
       minWorkers: 1,
       maxWorkers: 4,
+      // T5 wires tick() into the debounce → fire pipeline. This test
+      // focuses on the manual spawnWorker/retireLowestLoadWorker API,
+      // so opt out of tick-driven fires to keep the resize stats
+      // assertion deterministic. The T5 wiring itself is covered in
+      // `createAdaptiveController — T5 decision matrix wiring`.
+      enabled: false,
       spawnIdleWorker: async () => 'w-1',
       retireLowestLoadWorker: async () => 'w-1',
     });
@@ -963,5 +983,300 @@ describe('createAdaptiveController — T2 tick integration', () => {
     assert.equal(controller.getStats().enabled, false);
     controller.tick();
     assert.equal(controller.getStats().ticksSinceResize, 1);
+  });
+});
+
+/**
+ * Default thresholds used throughout the `classifyTickDirection`
+ * suite — kept here so the test reads as a contract about the
+ * production defaults documented in the controller JSDoc.
+ */
+const DEFAULT_SHRINK_ELU = 0.85;
+const DEFAULT_SHRINK_P99 = 50;
+const DEFAULT_GROW_ELU = 0.5;
+const DEFAULT_GROW_P99 = 10;
+
+describe('classifyTickDirection', () => {
+  test("'shrink' when ELU is above the shrink threshold (latency low)", () => {
+    assert.equal(
+      classifyTickDirection(
+        0.9,
+        5,
+        DEFAULT_SHRINK_ELU,
+        DEFAULT_SHRINK_P99,
+        DEFAULT_GROW_ELU,
+        DEFAULT_GROW_P99,
+      ),
+      'shrink',
+    );
+  });
+
+  test("'shrink' when p99 is above the shrink latency threshold (ELU low)", () => {
+    assert.equal(
+      classifyTickDirection(
+        0.2,
+        60,
+        DEFAULT_SHRINK_ELU,
+        DEFAULT_SHRINK_P99,
+        DEFAULT_GROW_ELU,
+        DEFAULT_GROW_P99,
+      ),
+      'shrink',
+    );
+  });
+
+  test("'grow' when both ELU and p99 are below the grow band", () => {
+    assert.equal(
+      classifyTickDirection(
+        0.1,
+        2,
+        DEFAULT_SHRINK_ELU,
+        DEFAULT_SHRINK_P99,
+        DEFAULT_GROW_ELU,
+        DEFAULT_GROW_P99,
+      ),
+      'grow',
+    );
+  });
+
+  test("'noop' in the dead zone (ELU between grow and shrink thresholds, latency low)", () => {
+    // ELU = 0.7 sits between the grow (0.5) and shrink (0.85) thresholds.
+    // p99 = 5 sits below the grow (10) threshold. The conditions for
+    // shrink are not met, but ELU is NOT below the grow threshold
+    // either, so this is a noop — the debounce counter does not
+    // advance toward a grow fire.
+    assert.equal(
+      classifyTickDirection(
+        0.7,
+        5,
+        DEFAULT_SHRINK_ELU,
+        DEFAULT_SHRINK_P99,
+        DEFAULT_GROW_ELU,
+        DEFAULT_GROW_P99,
+      ),
+      'noop',
+    );
+  });
+
+  test("'noop' when signals disagree (low ELU but mid-band latency — pool blocked on I/O)", () => {
+    // ELU = 0.2 (low, would grow) but p99 = 30 (in the dead zone
+    // between grow and shrink latency thresholds). The grow branch
+    // requires BOTH signals below the grow band; p99 = 30 fails the
+    // `p99 < 10` check. The shrink branch only fires when p99 > 50.
+    // Net: noop — adding workers to an I/O-bound pool would not
+    // reduce tail latency.
+    assert.equal(
+      classifyTickDirection(
+        0.2,
+        30,
+        DEFAULT_SHRINK_ELU,
+        DEFAULT_SHRINK_P99,
+        DEFAULT_GROW_ELU,
+        DEFAULT_GROW_P99,
+      ),
+      'noop',
+    );
+  });
+
+  test("null signals classify as 'noop' (no information to act on)", () => {
+    assert.equal(
+      classifyTickDirection(
+        null,
+        null,
+        DEFAULT_SHRINK_ELU,
+        DEFAULT_SHRINK_P99,
+        DEFAULT_GROW_ELU,
+        DEFAULT_GROW_P99,
+      ),
+      'noop',
+    );
+    assert.equal(
+      classifyTickDirection(
+        null,
+        5,
+        DEFAULT_SHRINK_ELU,
+        DEFAULT_SHRINK_P99,
+        DEFAULT_GROW_ELU,
+        DEFAULT_GROW_P99,
+      ),
+      'noop',
+    );
+    assert.equal(
+      classifyTickDirection(
+        0.1,
+        null,
+        DEFAULT_SHRINK_ELU,
+        DEFAULT_SHRINK_P99,
+        DEFAULT_GROW_ELU,
+        DEFAULT_GROW_P99,
+      ),
+      'noop',
+    );
+  });
+
+  test('boundary: ELU exactly at shrinkThreshold is a noop (strict > comparison)', () => {
+    // Without strict inequality, a controller sitting exactly on the
+    // threshold would oscillate between shrink / noop on every tick.
+    // Strict `>` keeps the decision stable at the boundary.
+    assert.equal(
+      classifyTickDirection(
+        DEFAULT_SHRINK_ELU,
+        5,
+        DEFAULT_SHRINK_ELU,
+        DEFAULT_SHRINK_P99,
+        DEFAULT_GROW_ELU,
+        DEFAULT_GROW_P99,
+      ),
+      'noop',
+    );
+  });
+});
+
+describe('createAdaptiveController — T5 decision matrix wiring', () => {
+  /**
+   * Drives `n` synchronous ticks and drains the microtask queue so
+   * any pending `spawnWorker()` / `retireLowestLoadWorker()` Promise
+   * chain (kicked off by the debounced fire listener) resolves
+   * before assertions run.
+   *
+   * @param {ReturnType<typeof createAdaptiveController>} controller
+   * @param {number} n
+   */
+  async function driveTicks(controller, n) {
+    for (let i = 0; i < n; i++) controller.tick();
+    // Drain microtasks so any in-flight spawn/retire completes.
+    // One `setTimeout(0)` is sufficient because the test callbacks
+    // are async functions with no further awaits (microtask flush
+    // already drained their bodies by this point).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  /**
+   * Build a controller config that pins the classifier to `'grow'`
+   * regardless of the test runner's actual Event Loop utilization.
+   *
+   * Without `controller.start()`, the underlying
+   * `monitorEventLoopDelay` histogram is disabled and Node returns a
+   * sentinel p99 of ~511ms — that triggers the shrink branch under
+   * default thresholds and breaks "grow fires after 5 ticks" tests.
+   * Pinning the band makes the wiring tests independent of the host
+   * environment. Default-threshold correctness lives in the
+   * `classifyTickDirection` suite above.
+   */
+  function pinGrowConfig(extra = {}) {
+    return {
+      shrinkEluThreshold: 1.1, // unreachable (ELU ∈ [0, 1])
+      shrinkLatencyP99Ms: 10_000, // unreachable in any test env
+      growEluThreshold: 1.1, // always passes (ELU < 1.1)
+      growLatencyP99Ms: 1_000, // always passes (p99 ≤ ~511 in disabled-histogram mode)
+      ...extra,
+    };
+  }
+
+  test('tick() × 5 fires spawnWorker exactly once (grow direction → debounce fire at threshold)', async () => {
+    let spawnIdleCalls = 0;
+    const controller = createAdaptiveController({
+      ...pinGrowConfig(),
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => {
+        spawnIdleCalls++;
+        return `w-${spawnIdleCalls}`;
+      },
+    });
+
+    await driveTicks(controller, 5);
+
+    assert.equal(spawnIdleCalls, 1, 'one fire at tick 5');
+    assert.equal(controller.getStats().effectiveWorkers, 2);
+    assert.equal(controller.getStats().lastResizeReason, 'grow');
+  });
+
+  test('enabled:false blocks the debounced fire even after 5 grow ticks', async () => {
+    let spawnIdleCalls = 0;
+    const controller = createAdaptiveController({
+      ...pinGrowConfig(),
+      minWorkers: 1,
+      maxWorkers: 4,
+      enabled: false,
+      spawnIdleWorker: async () => {
+        spawnIdleCalls++;
+        return `w-${spawnIdleCalls}`;
+      },
+    });
+
+    await driveTicks(controller, 5);
+
+    assert.equal(spawnIdleCalls, 0, 'enabled:false short-circuits the fire listener');
+    assert.equal(controller.getStats().effectiveWorkers, 1, 'no spawn');
+    // ticks must still run for telemetry (per spec)
+    assert.equal(controller.getStats().ticksSinceResize, 5);
+  });
+
+  test('pre-populated to maxWorkers: 5 grow ticks do NOT spawn past the band (T5 closes T4 boundary gap)', async () => {
+    let spawnIdleCalls = 0;
+    const controller = createAdaptiveController({
+      ...pinGrowConfig(),
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => {
+        spawnIdleCalls++;
+        return `w-${spawnIdleCalls}`;
+      },
+    });
+    // Pre-populate via the public T4 API (which DOES NOT enforce the
+    // band — see T1-T4 hardening suite). This is exactly the path
+    // T4 documented: caller/T5 must gate the band.
+    await controller.spawnWorker();
+    await controller.spawnWorker();
+    await controller.spawnWorker();
+    assert.equal(controller.getStats().effectiveWorkers, 4);
+    const directCalls = spawnIdleCalls; // 3
+
+    await driveTicks(controller, 5);
+
+    // Fire listener reached the band check (`stats.effectiveWorkers <
+    // config.maxWorkers`) and bailed — no new spawn.
+    assert.equal(spawnIdleCalls, directCalls, 'no new spawn past max');
+    assert.equal(controller.getStats().effectiveWorkers, 4);
+  });
+
+  test('ticksSinceResize resets to 0 after a T5-driven grow fire', async () => {
+    const controller = createAdaptiveController({
+      ...pinGrowConfig(),
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+    });
+
+    await driveTicks(controller, 5);
+
+    // The fire listener calls fireResize('grow') which resets
+    // ticksSinceResize to 0 AFTER tick()'s own increment, so the
+    // final value is 0 — not 5.
+    assert.equal(controller.getStats().ticksSinceResize, 0, 'reset by T5 fire');
+    assert.equal(controller.getStats().lastResizeReason, 'grow');
+  });
+
+  test('debounceTicks option is respected: debounceTicks=2 fires at tick 2 (not 5)', async () => {
+    let spawnIdleCalls = 0;
+    const controller = createAdaptiveController({
+      ...pinGrowConfig(),
+      minWorkers: 1,
+      maxWorkers: 4,
+      debounceTicks: 2,
+      spawnIdleWorker: async () => {
+        spawnIdleCalls++;
+        return `w-${spawnIdleCalls}`;
+      },
+    });
+
+    controller.tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(spawnIdleCalls, 0, 'no fire at tick 1');
+
+    controller.tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(spawnIdleCalls, 1, 'fire at tick 2');
   });
 });
