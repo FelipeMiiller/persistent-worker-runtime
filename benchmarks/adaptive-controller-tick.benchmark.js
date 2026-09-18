@@ -9,25 +9,36 @@
  * logging), this benchmark detects the regression before it ships.
  *
  * Phase D-1: Median tick() cost (10,000 iterations, single listener).
- *             Hard assertion: p50 < 1ms, p99 < 5ms.
+ *             Hard assertion: p50 < 1ms, p99 < 5ms. Includes the T5
+ *             wiring (classifyTickDirection + debounce.note) on every
+ *             tick.
  * Phase D-2: Listener scaling — 0 / 1 / 10 listeners. Documents how
  *             the listener-set snapshot cost grows with subscriber
  *             count. The current implementation is O(N) per tick (we
  *             copy `resizeListeners` into an array before iterating).
  *             If this ever flips to O(N²) or worse, the benchmark
  *             catches it.
- * Phase D-3: Memory footprint of one controller (RSS before/after).
- *             Sanity check that the controller itself isn't a leak
- *             vector. T7 will re-measure with the actual V8 isolates
- *             attached.
+ * Phase D-3: Memory footprint of one controller (heap delta before/
+ *             after 100 instances). Sanity check that the controller
+ *             itself isn't a leak vector. T7 will re-measure with the
+ *             actual V8 isolates attached.
+ * Phase D-4: classifyTickDirection throughput (T5 pure helper).
+ *             The classifier is O(1) — 4 threshold checks + a
+ *             direction-flip. It's called once per tick on the hot
+ *             path, so it MUST stay cheap (budget: >5M ops/sec).
+ *             A regression here (e.g. accidentally logging inside
+ *             the function, or adding allocations) compounds with
+ *             D-1's per-tick budget.
  *
- * Full Phase D (grow / shrink / opt-out / telemetry) lands in T10
- * alongside T5+T7 wiring. This partial benchmark ships the per-tick
- * overhead assertion early so a regression in the EWMA or signal
- * sampling path fails the build before T5 lands.
+ * What's NOT covered here (still T7/T10):
+ *   - End-to-end grow/shrink fire latency (5 ticks → spawn/retire
+ *     resolved). Requires T7 runtime wiring + WorkerRuntime isolates.
+ *   - Opt-out / band-validation gates under load. Lands in T6
+ *     followed by T7 telemetry.
+ *   - runtime.stats.adaptive consumer overhead. T8.
  */
 
-import { createAdaptiveController } from '../src/adaptive-controller.js';
+import { classifyTickDirection, createAdaptiveController } from '../src/adaptive-controller.js';
 
 function formatMs(ms) {
   return `${ms.toFixed(3).padStart(10)} ms`;
@@ -222,6 +233,75 @@ async function phase3MemoryFootprint() {
   return true;
 }
 
+async function phase4ClassifierThroughput() {
+  console.log('\n── Phase D-4: classifyTickDirection throughput (T5 pure helper) ──');
+  // Mix of inputs that exercise every branch: shrink-by-ELU,
+  // shrink-by-p99, grow (both signals low), and noop (dead zone /
+  // signal disagreement). Cycling through them ensures the benchmark
+  // doesn't accidentally only hit one fast path.
+  const SAMPLES = [
+    { elu: 0.9, latencyP99: 5 }, // shrink (by ELU)
+    { elu: 0.2, latencyP99: 60 }, // shrink (by p99)
+    { elu: 0.1, latencyP99: 2 }, // grow
+    { elu: 0.7, latencyP99: 30 }, // noop (signals disagree)
+  ];
+  // Default thresholds from the controller factory — must match
+  // adaptive-controller.js so a future change there triggers the
+  // assertion failure here too.
+  const SHRINK_ELU = 0.85;
+  const SHRINK_P99 = 50;
+  const GROW_ELU = 0.5;
+  const GROW_P99 = 10;
+
+  const N = 1_000_000;
+  const start = performance.now();
+  // Bitmask verification: bit 0 = 'grow' seen, bit 1 = 'shrink'
+  // seen, bit 2 = 'noop' seen. Cycling through 4 inputs that each
+  // hit one of those branches MUST produce mask === 7 (all bits).
+  // This catches both V8 elision AND accidental branch removal.
+  let resultMask = 0;
+  for (let i = 0; i < N; i++) {
+    const s = SAMPLES[i & 3];
+    const r = classifyTickDirection(
+      s.elu,
+      s.latencyP99,
+      SHRINK_ELU,
+      SHRINK_P99,
+      GROW_ELU,
+      GROW_P99,
+    );
+    if (r === 'grow') resultMask |= 1;
+    else if (r === 'shrink') resultMask |= 2;
+    else if (r === 'noop') resultMask |= 4;
+  }
+  const elapsed = performance.now() - start;
+  const nsPerOp = (elapsed / N) * 1_000_000;
+  const opsPerSec = N / (elapsed / 1000);
+
+  console.log(`  iterations:         ${N.toLocaleString()}`);
+  console.log(`  total wall-clock:   ${formatMs(elapsed)}`);
+  console.log(`  latency / call:     ${nsPerOp.toFixed(1).padStart(8)} ns`);
+  console.log(`  throughput:         ${(opsPerSec / 1_000_000).toFixed(2).padStart(6)} M ops/sec`);
+  console.log(`  branches covered:   ${resultMask.toString(2).padStart(3, '0')} (expect 111)`);
+  if (resultMask !== 7) {
+    console.error('  FAIL: classifyTickDirection was elided or a branch went missing');
+    return false;
+  }
+
+  // Budget: >5M ops/sec (i.e., <200ns/call). Comfortably above any
+  // reasonable CI hardware floor. If the classifier ever allocates,
+  // logs, or hits a slow path, this catches it.
+  const MIN_OPS_PER_SEC = 5_000_000;
+  if (opsPerSec < MIN_OPS_PER_SEC) {
+    console.error(
+      `  FAIL: classifyTickDirection throughput ${(opsPerSec / 1_000_000).toFixed(2)} M ops/sec is below ${MIN_OPS_PER_SEC / 1_000_000} M ops/sec budget`,
+    );
+    return false;
+  }
+  console.log(`  ✓ classifier above ${MIN_OPS_PER_SEC / 1_000_000} M ops/sec budget.`);
+  return true;
+}
+
 async function runBenchmark() {
   console.log('=====================================================================');
   console.log('BENCHMARK: Adaptive Concurrency Controller — Phase D (partial)');
@@ -230,11 +310,13 @@ async function runBenchmark() {
   const ok1 = await phase1SingleTickCost();
   const ok2 = await phase2ListenerScaling();
   const ok3 = await phase3MemoryFootprint();
+  const ok4 = await phase4ClassifierThroughput();
 
   console.log('\n=====================================================================');
-  if (ok1 && ok2 && ok3) {
+  if (ok1 && ok2 && ok3 && ok4) {
     console.log('VERDICT: all phases pass — Phase D overhead budget respected.');
-    console.log('(Full Phase D with grow/shrink/opt-out/telemetry lands in T10.)');
+    console.log('(T5 decision matrix wired. Full Phase D with end-to-end grow/shrink');
+    console.log(' and runtime.stats lands in T7+T10.)');
   } else {
     console.error('VERDICT: at least one phase FAILED — see lines above.');
     process.exit(1);
