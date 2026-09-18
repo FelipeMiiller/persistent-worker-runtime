@@ -1,7 +1,7 @@
 # Agent Handover Guide: Persistent Worker Runtime
 
 > **Audience**: AI Coding Agents (Antigravity, Claude Code, Cursor, Windsurf, Copilot) or engineers starting a new chat/session on this repository.
-> **Last Updated**: 2026-09-17
+> **Last Updated**: 2026-09-18
 > **Active Branch**: `develop`
 
 ---
@@ -28,7 +28,7 @@
 
 ## 📍 3. Current State Snapshot
 
-### Code Health (as of last commit `77394f6`)
+### Code Health (as of last commit `af0a906`)
 - **Tests**: 323 passing across 105 suites (`node:test`), 0 failures, 0 skipped, 0 cancelled.
 - **Coverage**: 95.62% lines / 90.57% branches / 92.56% functions across `src/`.
 - **Lint**: 0 errors, 0 warnings across `src/`, `test/`, `examples/`, `benchmarks/` (Biome 2.x).
@@ -55,9 +55,12 @@
 - **CI flake fix** — `runtime.execute()` without await caused `WorkerCrashError` to fire after test exit on slower CI runners (macOS Node 22). Fixed by `await`ing in tests.
 - **Biome 2.x** + **husky 9** + **lint-staged 15** for lint infrastructure.
 - **Docs cleanup** (`77394f6`) — stripped internal Node.js core submission language from the repository (per Felipe's direction). The RFC draft itself (`NODEJS_RFC_PROPOSAL_DRAFT.md`) is preserved as a design proposal without the upstream PR roadmap context.
+- **ADR-0014 refined** (`af0a906`) — superseded the simplified 2026-09-16 version of the ELU adaptive concurrency ADR with a production-grade dual-signal controller design: ELU + `monitorEventLoopDelay` p99 with EWMA α=0.3 smoothing and 5-tick debounce; grow + drain-shrink (not terminate); first-class telemetry in `runtime.stats.adaptive`; opt-out via `concurrency: 'fixed'`; pool band `[1, maxWorkers]` that respects the ADR-0019 conservative default. Spec + 12-task breakdown in `.specs/features/adaptive-concurrency/`. Implementation pending (T1 → T12).
+- **BENCHMARKS.md backfill** (`356b7ae`) — documented the four orphan benchmarks that shipped via hardening + ADR-0019 but were never sectioned (`streaming-throughput`, `streaming-memory`, `streaming-stress`, `default-sizing-memory`). `How to Reproduce All Results` snippet now lists all 17 scripts.
+- **HANDOVER + README state refresh** (`3aa9c60`) — replaced stale state snapshot (commit ref, test counts, coverage, benchmark count, reproduction snippet) so a new chat session lands on the current numbers, not the pre-T5 ones.
 
 ### Documented but NOT YET Implemented (deferred ADRs)
-- **ADR-0014** — Adaptive concurrency auto-tuning via ELU.
+- **ADR-0014** — Adaptive concurrency auto-tuning via ELU. Design locked (refined 2026-09-18, commit `af0a906`); spec + 12-task breakdown ready in `.specs/features/adaptive-concurrency/`. Implementation pending.
 
 ---
 
@@ -78,7 +81,7 @@
    npm run validate        # lint + test (must pass)
    npm run benchmark:all   # confirm all 17 benchmarks run
    ```
-2. **Create the spec** under `.specs/features/<feature-name>/spec.md` and `tasks.md` (see existing specs for structure).
+2. **Open the existing spec + tasks** at `.specs/features/adaptive-concurrency/{spec.md,tasks.md}` (already drafted 2026-09-18; local-only via gitignore). Review the locked decisions in the Assumptions table before coding.
 3. **Implement T1 → T2 → ...** following the same conventional-commit cadence used by the previous features.
 4. **Update the docs** in the same commit(s) — README.md section, BENCHMARKS.md if relevant, embedded skill references if user-facing.
 
@@ -97,7 +100,7 @@ npm run format           # biome format --write
 npm run format:check     # biome format (no fix)
 npm run validate         # lint + test (used by pre-push, prepublish)
 
-# Benchmarks (14 total — full results in BENCHMARKS.md)
+# Benchmarks (17 total — full results in BENCHMARKS.md)
 npm run benchmark:all
 npm run benchmark                  # Event Loop lag under load
 npm run benchmark:stateful         # Warm L1 vs stateless reload (30.7× faster)
@@ -110,10 +113,12 @@ npm run benchmark:scaling          # Worker count scaling
 npm run benchmark:preemption       # Hard preemption watchdog + pool healing
 npm run benchmark:recycling        # Automatic recycling
 npm run benchmark:broadcast        # BroadcastChannel fan-out (18.3× faster)
+npm run benchmark:streaming-queue-dispatch   # T5 queued stream dispatch latency
+npm run benchmark:streaming-abort-latency    # Consumer break → worker finally
 npm run benchmark:streaming-throughput  # chunks/sec by stream length × HWM
 npm run benchmark:streaming-memory      # RSS steady-state + queue footprint
 npm run benchmark:streaming-stress      # concurrent streams + 50k chunks + abort latency
-npm run benchmark:default-sizing-memory # ADR-0019 (default workers=1 is 6.45× cheaper)
+npm run benchmark:default-sizing-memory # ADR-0019 (default workers=1 is 5× to 20× cheaper on multi-core hosts)
 
 # Examples (9 total)
 node examples/broadcast-cache-invalidation.js
@@ -140,7 +145,7 @@ node --input-type=module -e "import * as mod from './src/index.js'; console.log(
 | Priority queue | `src/task-queue.js` |
 | Error hierarchy | `src/errors.js` |
 | BroadcastChannel wrapper | `src/broadcast-channel.js` |
-| Architectural decisions | `docs/adr/0001..0017-*.md` (see `docs/adr/README.md`) |
+| Architectural decisions | `docs/adr/0001..0019-*.md` (see `docs/adr/README.md`) |
 | Empirical benchmark results | `BENCHMARKS.md` |
 | Embedded AI-agent skill | `skills/persistent-worker-runtime/` |
 | Local spec/state | `.specs/STATE.md` (gitignored) |
