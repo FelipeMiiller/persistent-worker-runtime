@@ -17,8 +17,24 @@
  *   - `reset()` / `value()` / `onFire()` lifecycle
  *   - Validation (threshold bounds, direction enum, listener type)
  *
- * T4+ coverage (decision matrix, resize actions, runtime integration)
- * lands in subsequent suites.
+ * T4 coverage:
+ *   - `spawnWorker()` invokes the injected `spawnIdleWorker` callback
+ *     and fires the listener with `reason: 'grow'`
+ *   - `retireLowestLoadWorker()` invokes the injected
+ *     `retireLowestLoadWorker` callback and fires with
+ *     `reason: 'shrink'`
+ *   - `worker:retiring` runtime event emitted on successful retire
+ *     with `{ workerId, reason: 'drain' }`
+ *   - Stats fields mutate correctly on resize (`effectiveWorkers`,
+ *     `ticksSinceResize`, `lastResizeReason`, `lastResizeAt`)
+ *   - Graceful no-op on missing callback / throwing callback /
+ *     non-string return
+ *   - `ResizeEvent` shape includes `signals` (current EWMA snapshot
+ *     or `null` before any tick)
+ *
+ * T5+ coverage (decision matrix, WorkerRuntime integration, telemetry
+ * block on `runtime.stats`, integration tests) lands in subsequent
+ * suites.
  */
 
 import assert from 'node:assert/strict';
@@ -369,6 +385,326 @@ describe('DebounceCounter', () => {
     assert.throws(() => debounce.onFire('not-a-fn'), TypeError);
     assert.throws(() => debounce.onFire(42), TypeError);
     assert.throws(() => debounce.onFire({}), TypeError);
+  });
+});
+
+describe('createAdaptiveController — T4 resize actions', () => {
+  test('spawnWorker() calls spawnIdleWorker callback and increments effectiveWorkers', async () => {
+    let spawnCalls = 0;
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => {
+        spawnCalls++;
+        return `w-${spawnCalls}`;
+      },
+    });
+    assert.equal(controller.getStats().effectiveWorkers, 1);
+    const ok = await controller.spawnWorker();
+    assert.equal(ok, true);
+    assert.equal(spawnCalls, 1);
+    assert.equal(controller.getStats().effectiveWorkers, 2);
+  });
+
+  test('spawnWorker() fires onResize listener with reason=grow + signals snapshot', async () => {
+    /** @type {Array<import('../src/adaptive-controller.js').ResizeEvent>} */
+    const events = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+    });
+    controller.onResize((e) => events.push(e));
+    await controller.spawnWorker();
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reason, 'grow');
+    assert.equal(events[0].effectiveWorkers, 2);
+    assert.equal(typeof events[0].at, 'number');
+    assert.ok(events[0].at > 0);
+    // No ticks yet → signals must be null on the resize event.
+    assert.equal(events[0].signals.elu, null);
+    assert.equal(events[0].signals.latencyP99Ms, null);
+  });
+
+  test('spawnWorker() reflects EWMA values in ResizeEvent.signals after ticks', async () => {
+    /** @type {Array<import('../src/adaptive-controller.js').ResizeEvent>} */
+    const events = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+    });
+    controller.onResize((e) => events.push(e));
+    // 3 ticks → both EWMAs have numeric values.
+    controller.tick();
+    controller.tick();
+    controller.tick();
+    await controller.spawnWorker();
+    assert.equal(typeof events[0].signals.elu, 'number');
+    assert.equal(typeof events[0].signals.latencyP99Ms, 'number');
+  });
+
+  test('spawnWorker() is a graceful no-op when no spawnIdleWorker callback', async () => {
+    /** @type {Array<unknown>} */
+    const events = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+    });
+    controller.onResize((e) => events.push(e));
+    const ok = await controller.spawnWorker();
+    assert.equal(ok, false);
+    assert.equal(events.length, 0);
+    assert.equal(controller.getStats().effectiveWorkers, 1);
+  });
+
+  test('spawnWorker() returns false on callback rejection (no state change, no event)', async () => {
+    /** @type {Array<unknown>} */
+    const events = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => {
+        throw new Error('spawn failed');
+      },
+    });
+    controller.onResize((e) => events.push(e));
+    const ok = await controller.spawnWorker();
+    assert.equal(ok, false);
+    assert.equal(events.length, 0);
+    assert.equal(controller.getStats().effectiveWorkers, 1);
+  });
+
+  test('spawnWorker() returns false when callback resolves to null/empty/non-string', async () => {
+    /** @type {Array<unknown>} */
+    const events = [];
+    for (const badReturn of [null, undefined, '', 42, {}, []]) {
+      const controller = createAdaptiveController({
+        minWorkers: 1,
+        maxWorkers: 4,
+        spawnIdleWorker: async () => /** @type {any} */ (badReturn),
+      });
+      controller.onResize((e) => events.push(e));
+      const ok = await controller.spawnWorker();
+      assert.equal(ok, false, `badReturn=${JSON.stringify(badReturn)} should yield false`);
+      assert.equal(controller.getStats().effectiveWorkers, 1);
+    }
+    assert.equal(events.length, 0);
+  });
+
+  test('retireLowestLoadWorker() calls retire callback and fires with reason=shrink', async () => {
+    /** @type {Array<import('../src/adaptive-controller.js').ResizeEvent>} */
+    const events = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+      retireLowestLoadWorker: async () => 'w-1',
+    });
+    controller.onResize((e) => events.push(e));
+    // Grow to 3 first so the retire is meaningful.
+    await controller.spawnWorker();
+    await controller.spawnWorker();
+    assert.equal(controller.getStats().effectiveWorkers, 3);
+    events.length = 0; // discard grow events
+
+    const ok = await controller.retireLowestLoadWorker();
+    assert.equal(ok, true);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reason, 'shrink');
+    assert.equal(events[0].effectiveWorkers, 2);
+  });
+
+  test('retireLowestLoadWorker() emits worker:retiring with { workerId, reason: drain } BEFORE shrink', async () => {
+    /** @type {Array<{ event: string, payload: any, workersAtEmit: number }>} */
+    const emitted = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+      retireLowestLoadWorker: async () => 'w-1',
+      events: {
+        emit: (event, payload) =>
+          emitted.push({
+            event,
+            payload,
+            workersAtEmit: controller.getStats().effectiveWorkers,
+          }),
+      },
+    });
+    /** @type {Array<{ reason: string, effectiveWorkers: number }>} */
+    const resize = [];
+    controller.onResize((e) =>
+      resize.push({ reason: e.reason, effectiveWorkers: e.effectiveWorkers }),
+    );
+
+    await controller.spawnWorker(); // 2 workers
+    await controller.spawnWorker(); // 3 workers
+    emitted.length = 0;
+    resize.length = 0;
+
+    await controller.retireLowestLoadWorker();
+    // worker:retiring fired with the pre-retire worker count (3),
+    // proving the event lands BEFORE effectiveWorkers is decremented.
+    assert.equal(emitted.length, 1);
+    assert.equal(emitted[0].event, 'worker:retiring');
+    assert.deepEqual(emitted[0].payload, { workerId: 'w-1', reason: 'drain' });
+    assert.equal(emitted[0].workersAtEmit, 3);
+    // Resize event lands AFTER with the post-retire count.
+    assert.equal(resize.length, 1);
+    assert.equal(resize[0].reason, 'shrink');
+    assert.equal(resize[0].effectiveWorkers, 2);
+  });
+
+  test('retireLowestLoadWorker() does NOT emit worker:retiring when callback returns null', async () => {
+    /** @type {Array<unknown>} */
+    const emitted = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      retireLowestLoadWorker: async () => null,
+      events: { emit: (event) => emitted.push(event) },
+    });
+    /** @type {Array<unknown>} */
+    const events = [];
+    controller.onResize((e) => events.push(e));
+    const ok = await controller.retireLowestLoadWorker();
+    assert.equal(ok, false);
+    assert.equal(emitted.length, 0, 'worker:retiring must not fire on no-op retire');
+    assert.equal(events.length, 0);
+    assert.equal(controller.getStats().effectiveWorkers, 1);
+  });
+
+  test('retireLowestLoadWorker() is a graceful no-op when no retire callback', async () => {
+    /** @type {Array<unknown>} */
+    const events = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+    });
+    controller.onResize((e) => events.push(e));
+    const ok = await controller.retireLowestLoadWorker();
+    assert.equal(ok, false);
+    assert.equal(events.length, 0);
+    assert.equal(controller.getStats().effectiveWorkers, 1);
+  });
+
+  test('retireLowestLoadWorker() returns false on callback rejection (no state change, no event)', async () => {
+    /** @type {Array<unknown>} */
+    const emitted = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      retireLowestLoadWorker: async () => {
+        throw new Error('drain timeout');
+      },
+      events: { emit: (event) => emitted.push(event) },
+    });
+    /** @type {Array<unknown>} */
+    const events = [];
+    controller.onResize((e) => events.push(e));
+    const ok = await controller.retireLowestLoadWorker();
+    assert.equal(ok, false);
+    assert.equal(emitted.length, 0);
+    assert.equal(events.length, 0);
+    assert.equal(controller.getStats().effectiveWorkers, 1);
+  });
+
+  test('worker:retiring emission is silently skipped when no events emitter configured', async () => {
+    // No `events` option — the controller must not crash.
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+      retireLowestLoadWorker: async () => 'w-1',
+    });
+    await controller.spawnWorker();
+    const ok = await controller.retireLowestLoadWorker();
+    assert.equal(ok, true);
+    assert.equal(controller.getStats().effectiveWorkers, 1);
+  });
+
+  test('resize stats fields (effectiveWorkers, ticksSinceResize, lastResizeReason, lastResizeAt) all update', async () => {
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+      retireLowestLoadWorker: async () => 'w-1',
+    });
+    controller.tick();
+    controller.tick();
+    controller.tick();
+    assert.equal(controller.getStats().effectiveWorkers, 1);
+    assert.equal(controller.getStats().ticksSinceResize, 3);
+    assert.equal(controller.getStats().lastResizeReason, null);
+    assert.equal(controller.getStats().lastResizeAt, null);
+
+    await controller.spawnWorker();
+    assert.equal(controller.getStats().effectiveWorkers, 2);
+    assert.equal(
+      controller.getStats().ticksSinceResize,
+      0,
+      'ticksSinceResize resets to 0 after resize',
+    );
+    assert.equal(controller.getStats().lastResizeReason, 'grow');
+    assert.ok(
+      typeof controller.getStats().lastResizeAt === 'number' &&
+        controller.getStats().lastResizeAt > 0,
+    );
+
+    controller.tick();
+    controller.tick();
+    assert.equal(controller.getStats().ticksSinceResize, 2);
+
+    await controller.retireLowestLoadWorker();
+    assert.equal(controller.getStats().effectiveWorkers, 1);
+    assert.equal(controller.getStats().ticksSinceResize, 0);
+    assert.equal(controller.getStats().lastResizeReason, 'shrink');
+  });
+
+  test('multiple resize listeners all fire in registration order (snapshot semantics)', async () => {
+    /** @type {string[]} */
+    const order = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+    });
+    controller.onResize(() => order.push('first'));
+    controller.onResize(() => order.push('second'));
+    controller.onResize(() => order.push('third'));
+    await controller.spawnWorker();
+    assert.deepEqual(order, ['first', 'second', 'third']);
+  });
+
+  test('multiple sequential resizes fire listeners each time with fresh stats', async () => {
+    /** @type {Array<import('../src/adaptive-controller.js').ResizeEvent>} */
+    const events = [];
+    const controller = createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      spawnIdleWorker: async () => 'w-1',
+      retireLowestLoadWorker: async () => 'w-1',
+    });
+    controller.onResize((e) => events.push(e));
+
+    await controller.spawnWorker(); // 1 → 2
+    await controller.spawnWorker(); // 2 → 3
+    await controller.spawnWorker(); // 3 → 4
+    await controller.retireLowestLoadWorker(); // 4 → 3
+    await controller.retireLowestLoadWorker(); // 3 → 2
+
+    assert.equal(events.length, 5);
+    assert.deepEqual(
+      events.map((e) => [e.reason, e.effectiveWorkers]),
+      [
+        ['grow', 2],
+        ['grow', 3],
+        ['grow', 4],
+        ['shrink', 3],
+        ['shrink', 2],
+      ],
+    );
   });
 });
 

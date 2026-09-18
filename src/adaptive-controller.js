@@ -35,9 +35,19 @@
  * Phase 1 status:
  *   - T1 — public surface + factory: complete.
  *   - T2 — `Ewma` + `SignalMonitor` wired into `tick()`: complete.
- *   - T3 — `DebounceCounter` primitive: complete (not yet fed by the
- *     resize decision logic — that wiring lands in T5).
- *   - T4-T5 — resize actions + decision logic: pending.
+ *   - T3 — `DebounceCounter` primitive: complete.
+ *
+ * Phase 2 status:
+ *   - T4 — `spawnWorker()` + `retireLowestLoadWorker()` with drain
+ *     semantics: complete. Resize callbacks (`spawnIdleWorker`,
+ *     `retireLowestLoadWorker`) and `events` emitter are injected via
+ *     factory options so T4 stays unit-testable in isolation. T7 will
+ *     wire the real `WorkerRuntime.spawnIdleWorker()` /
+ *     `WorkerRuntime.retireLowestLoadWorker()` and pass
+ *     `runtime.events` here.
+ *   - T5 — resize decision logic wiring (`tick()` calls
+ *     `debounce.note(direction)` after the EWMAs and before the
+ *     resize actions): pending.
  *
  * @see ADR-0014 — Adaptive Concurrency via Event Loop Utilization
  * @see .specs/features/adaptive-concurrency/{spec.md,tasks.md}
@@ -57,6 +67,22 @@ import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
  * @property {number} [growEluThreshold=0.5] EWMA ELU below which grow can fire (paired with latency).
  * @property {number} [growLatencyP99Ms=10] EWMA p99 (ms) below which grow can fire (paired with ELU).
  * @property {boolean} [enabled=true] When false, the tick still samples for telemetry but never resizes.
+ * @property {() => Promise<string> | string} [spawnIdleWorker] T7 will inject this — spawns a new
+ *   idle worker and returns its `workerId`. When the callback resolves to a non-empty string
+ *   the controller increments `effectiveWorkers` and fires an `onResize` event with
+ *   `reason: 'grow'`. Rejections / non-string returns are treated as failures (no state change,
+ *   no event). When absent, `spawnWorker()` is a graceful no-op.
+ * @property {() => Promise<string | null> | string | null} [retireLowestLoadWorker] T7 will
+ *   inject this — picks the lowest-load worker (LRU proxy: smallest `tasksCompletedSinceBoot`),
+ *   marks it `draining`, awaits the in-flight task to complete naturally (NO
+ *   `worker.terminate()`), then retires and returns the `workerId`. The controller emits
+ *   `runtime.events` `worker:retiring` with `{ workerId, reason: 'drain' }` BEFORE decrementing
+ *   `effectiveWorkers` and firing `onResize` with `reason: 'shrink'`. Returning `null` (or an
+ *   empty string) means "no worker to retire" — graceful no-op.
+ * @property {{ emit(event: string, payload: object): void }} [events] T7 will inject
+ *   `runtime.events` here. When present, the controller emits `worker:retiring` for every
+ *   successful retire. When absent, the controller skips emission silently (still updates
+ *   stats and fires `onResize`).
  */
 
 /**
@@ -389,6 +415,8 @@ export class DebounceCounter {
  *   start(): void,
  *   stop(): void,
  *   tick(): void,
+ *   spawnWorker(): Promise<boolean>,
+ *   retireLowestLoadWorker(): Promise<boolean>,
  *   onResize(listener: ResizeListener): () => boolean,
  *   getStats(): AdaptiveStats,
  * }} Adaptive controller with the documented public surface.
@@ -408,6 +436,9 @@ export function createAdaptiveController(options) {
     growEluThreshold: 0.5,
     growLatencyP99Ms: 10,
     enabled: true,
+    spawnIdleWorker: undefined,
+    retireLowestLoadWorker: undefined,
+    events: undefined,
     ...options,
   };
 
@@ -424,6 +455,8 @@ export function createAdaptiveController(options) {
   /**
    * Latest telemetry snapshot. Live `elu` / `latencyP99Ms` updates
    * land in `tick()` after the EWMA smooths each fresh sample.
+   * `effectiveWorkers`, `ticksSinceResize`, `lastResizeReason`, and
+   * `lastResizeAt` mutate on every successful spawn/retire (T4).
    *
    * @type {AdaptiveStats}
    */
@@ -439,6 +472,52 @@ export function createAdaptiveController(options) {
 
   /** @type {ReturnType<typeof setInterval> | null} */
   let timer = null;
+
+  /**
+   * Emits a `worker:retiring` runtime event via the injected
+   * `events` emitter. Silent no-op when no emitter is configured
+   * (T4 is testable in isolation without wiring `runtime.events`).
+   *
+   * @param {string} event
+   * @param {object} payload
+   */
+  const emitRuntimeEvent = (event, payload) => {
+    if (
+      config.events &&
+      typeof config.events === 'object' &&
+      typeof config.events.emit === 'function'
+    ) {
+      config.events.emit(event, payload);
+    }
+  };
+
+  /**
+   * Fires the on-resize listener set + updates the post-resize stats
+   * fields (`ticksSinceResize`, `lastResizeReason`, `lastResizeAt`).
+   * Called only when the resize actually mutated `effectiveWorkers`;
+   * failed spawn/retries are silent on this path.
+   *
+   * @param {'grow' | 'shrink'} reason
+   */
+  const fireResize = (reason) => {
+    const at = performance.now();
+    stats.lastResizeReason = reason;
+    stats.lastResizeAt = at;
+    stats.ticksSinceResize = 0;
+    const event = {
+      reason,
+      effectiveWorkers: stats.effectiveWorkers,
+      at,
+      signals: { elu: stats.elu, latencyP99Ms: stats.latencyP99Ms },
+    };
+    // Snapshot listeners before iterating — same defensive pattern as
+    // DebounceCounter — so a listener that calls `spawnWorker()`
+    // recursively cannot mutate the set mid-fire.
+    const listeners = [...resizeListeners];
+    for (const listener of listeners) {
+      listener(event);
+    }
+  };
 
   const api = {
     /**
@@ -478,8 +557,10 @@ export function createAdaptiveController(options) {
      * `DebounceCounter` primitive (exported below); the actual call
      * `debounce.note(direction)` is intentionally NOT wired here yet
      * — that lands in T5 once the resize decision matrix exists.
-     * T4 (spawn / retire actions) also lands later. This method does
-     * NOT currently fire any resize event.
+     * T4 lands the `spawnWorker()` + `retireLowestLoadWorker()` API
+     * surface; T5 will invoke them from `tick()` based on the
+     * debounced decision. This method does NOT currently fire any
+     * resize event.
      */
     tick() {
       const { elu, latencyP99 } = signals.sample();
@@ -488,6 +569,94 @@ export function createAdaptiveController(options) {
       stats.elu = eluEwma.value();
       stats.latencyP99Ms = latencyEwma.value();
       stats.ticksSinceResize++;
+    },
+
+    /**
+     * Spawns a new idle worker via the injected `spawnIdleWorker`
+     * callback (T7 wires this to `WorkerRuntime.spawnIdleWorker()`).
+     *
+     * On success: increments `stats.effectiveWorkers`, fires every
+     * registered `onResize` listener with `reason: 'grow'`, and
+     * resets `stats.ticksSinceResize` to `0`.
+     *
+     * Failures (no callback configured, callback throws, callback
+     * resolves to a non-string or empty string) are silent: no state
+     * mutation, no event fired, the method returns `false`.
+     *
+     * Boundary enforcement (`effectiveWorkers < maxWorkers`) is the
+     * caller's responsibility — T5's decision matrix gates this call
+     * before invocation. The controller itself does NOT refuse to
+     * spawn past the band.
+     *
+     * @returns {Promise<boolean>} `true` if the worker was spawned,
+     *   `false` otherwise.
+     */
+    async spawnWorker() {
+      if (typeof config.spawnIdleWorker !== 'function') {
+        return false;
+      }
+      let workerId;
+      try {
+        workerId = await config.spawnIdleWorker();
+      } catch {
+        return false;
+      }
+      if (typeof workerId !== 'string' || workerId.length === 0) {
+        return false;
+      }
+      stats.effectiveWorkers++;
+      fireResize('grow');
+      return true;
+    },
+
+    /**
+     * Retires the lowest-load worker via the injected
+     * `retireLowestLoadWorker` callback (T7 wires this to the
+     * matching `WorkerRuntime.retireLowestLoadWorker()`, which picks
+     * the worker with the smallest `tasksCompletedSinceBoot`, marks
+     * it `draining`, and awaits natural in-flight completion — NO
+     * `worker.terminate()`).
+     *
+     * On success: emits `runtime.events` `worker:retiring` with
+     * `{ workerId, reason: 'drain' }` BEFORE decrementing
+     * `effectiveWorkers` and firing `onResize` with `reason: 'shrink'`.
+     *
+     * No-op outcomes (no callback configured, callback returns
+     * `null` or an empty string, callback throws) are silent: no
+     * `worker:retiring` event, no state mutation, the method returns
+     * `false`. `null` typically means "already at the floor — T5's
+     * decision matrix should have gated this call, but the runtime
+     * is the authoritative source of truth on what can be retired".
+     *
+     * Boundary enforcement (`effectiveWorkers > minWorkers`) is the
+     * caller's responsibility — T5's decision matrix gates this call
+     * before invocation. The controller itself does NOT refuse to
+     * retire below the band.
+     *
+     * @returns {Promise<boolean>} `true` if a worker was retired,
+     *   `false` otherwise.
+     */
+    async retireLowestLoadWorker() {
+      if (typeof config.retireLowestLoadWorker !== 'function') {
+        return false;
+      }
+      let workerId;
+      try {
+        workerId = await config.retireLowestLoadWorker();
+      } catch {
+        return false;
+      }
+      if (typeof workerId !== 'string' || workerId.length === 0) {
+        return false;
+      }
+      // Emit `worker:retiring` BEFORE decrementing / firing resize so
+      // observers see a consistent snapshot: the worker is on its way
+      // out, but `effectiveWorkers` still reflects the pre-retire
+      // count when this event lands.
+      emitRuntimeEvent('worker:retiring', { workerId, reason: 'drain' });
+      stats.effectiveWorkers--;
+      fireResize('shrink');
+      return true;
     },
 
     /**
