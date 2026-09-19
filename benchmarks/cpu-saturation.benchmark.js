@@ -98,7 +98,7 @@ function formatRow(workers, durationMs, throughput, idealScaling, efficiency) {
   return `  workers=${w}: ${dur}ms -> ${tput} tasks/sec  (ideal ${ideal}, ${eff}% efficient)`;
 }
 
-async function measureWorkload(workers, workloadFn, isAsync) {
+async function measureWorkload(workers, workloadFn, _isAsync) {
   const runtime = await createWorkerRuntime({ workers });
   try {
     const tasks = [];

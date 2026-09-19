@@ -18,7 +18,23 @@ export class Supervisor extends EventEmitter {
 
   constructor(options = {}) {
     super();
-    this.#targetWorkers = options.workers || 4;
+    // ADR-0023 (T6) — the previous `options.workers || 4` magic-number
+    // fallback was unreachable: `WorkerRuntime` always passes a finite
+    // integer >= 1 to the Supervisor after running its options through
+    // `resolveWorkerCount()`. We replace the silent fallback with an
+    // explicit validation that fails fast when the contract is broken
+    // (e.g. a third-party consumer constructs a `Supervisor` directly
+    // without `workers`).
+    if (
+      typeof options.workers !== 'number' ||
+      !Number.isInteger(options.workers) ||
+      options.workers < 1
+    ) {
+      throw new RangeError(
+        `Supervisor: options.workers must be a positive integer, got ${options.workers}`,
+      );
+    }
+    this.#targetWorkers = options.workers;
     this.#maxTasksPerWorker =
       options.maxTasksPerWorker === undefined ? Infinity : options.maxTasksPerWorker;
     this.#maxMemoryMb = options.maxMemoryMb === undefined ? Infinity : options.maxMemoryMb;

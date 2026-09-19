@@ -59,6 +59,7 @@
  * @see .specs/features/adaptive-concurrency/{spec.md,tasks.md}
  */
 
+import { availableParallelism } from 'node:os';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 
 /**
@@ -480,12 +481,61 @@ export function classifyTickDirection(
  * }} Adaptive controller with the documented public surface.
  */
 export function createAdaptiveController(options) {
+  // Band validation (T6 — per ADR-0014 / ADR-0023). Validate BEFORE
+  // defaults land so a bogus `minWorkers > maxWorkers` does not silently
+  // mutate into a valid band, and so `options.maxWorkers: undefined`
+  // can be defaulted to `availableParallelism()` without tripping the
+  // finite-integer check.
+  //
+  // The convention (TypeError vs RangeError) mirrors the existing
+  // `Ewma` validation: TypeError for non-numeric / non-finite inputs,
+  // RangeError for numeric inputs outside the accepted band. This keeps
+  // the type/range split consistent across the module so callers can
+  // match on error class without parsing the message.
+  if (options == null || typeof options !== 'object') {
+    throw new TypeError('createAdaptiveController requires an options object');
+  }
+  if (typeof options.minWorkers !== 'number' || !Number.isFinite(options.minWorkers)) {
+    throw new TypeError(
+      `createAdaptiveController: minWorkers must be a finite number, got ${options.minWorkers}`,
+    );
+  }
+  if (!Number.isInteger(options.minWorkers) || options.minWorkers < 1) {
+    throw new RangeError(
+      `createAdaptiveController: minWorkers must be an integer >= 1, got ${options.minWorkers}`,
+    );
+  }
+  if (options.maxWorkers !== undefined) {
+    if (typeof options.maxWorkers !== 'number' || !Number.isFinite(options.maxWorkers)) {
+      throw new TypeError(
+        `createAdaptiveController: maxWorkers must be a finite number, got ${options.maxWorkers}`,
+      );
+    }
+    if (!Number.isInteger(options.maxWorkers) || options.maxWorkers < 1) {
+      throw new RangeError(
+        `createAdaptiveController: maxWorkers must be an integer >= 1, got ${options.maxWorkers}`,
+      );
+    }
+  }
+  // Resolve maxWorkers BEFORE the band check so the error message
+  // reflects the actually-applied upper bound (not the raw undefined).
+  const resolvedMaxWorkers = options.maxWorkers ?? availableParallelism();
+  if (options.minWorkers > resolvedMaxWorkers) {
+    throw new RangeError(
+      `createAdaptiveController: minWorkers (${options.minWorkers}) must be <= ` +
+        `maxWorkers (${resolvedMaxWorkers})`,
+    );
+  }
+
   // Defaults are resolved here so downstream code can read a complete
-  // config object. Full validation (band bounds, type checks) lands in
-  // T6 alongside WorkerRuntime wiring.
+  // config object. `maxWorkers` defaults to `availableParallelism()` per
+  // ADR-0023 — Phase E measured the CPU-bound saturation knee at
+  // exactly the host core count, and the env-driven production path
+  // (T7) will re-resolve via `resolveWorkerCount(options.workers)`
+  // before reaching this factory.
   const config = {
-    minWorkers: options?.minWorkers,
-    maxWorkers: options?.maxWorkers,
+    minWorkers: options.minWorkers,
+    maxWorkers: resolvedMaxWorkers,
     samplingCadenceMs: 100,
     ewmaAlpha: 0.3,
     debounceTicks: 5,
@@ -499,6 +549,10 @@ export function createAdaptiveController(options) {
     events: undefined,
     ...options,
   };
+  // Re-anchor the resolved defaults after the spread so a caller that
+  // passes `{ maxWorkers: undefined }` explicitly still gets the
+  // `availableParallelism()` default.
+  config.maxWorkers = resolvedMaxWorkers;
 
   /** @type {Set<ResizeListener>} */
   const resizeListeners = new Set();

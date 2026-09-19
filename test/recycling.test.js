@@ -24,7 +24,13 @@ describe('Worker Recycling - Configuration & Validation (T1)', () => {
     });
 
     it('defaults Supervisor maxTasksPerWorker and maxMemoryMb to Infinity when instantiated directly', () => {
-      const supervisor = new Supervisor();
+      // T6 (ADR-0023): Supervisor no longer carries a magic default for
+      // `workers` — WorkerRuntime always passes a finite integer via
+      // `resolveWorkerCount`. Direct Supervisor construction must
+      // therefore pass `workers` explicitly; passing `{ workers: 1 }`
+      // here exercises the option-getter defaults without spawning a
+      // pool (this test never calls `supervisor.start()`).
+      const supervisor = new Supervisor({ workers: 1 });
       assert.equal(supervisor.maxTasksPerWorker, Infinity);
       assert.equal(supervisor.maxMemoryMb, Infinity);
     });
@@ -57,7 +63,11 @@ describe('Worker Recycling - Configuration & Validation (T1)', () => {
     });
 
     it('Supervisor receives maxTasksPerWorker and maxMemoryMb correctly', () => {
+      // T6 (ADR-0023): `workers` is now mandatory on direct Supervisor
+      // construction; pass it explicitly even when the test only
+      // exercises the option getters.
       const supervisor = new Supervisor({
+        workers: 1,
         maxTasksPerWorker: 50,
         maxMemoryMb: 128,
       });

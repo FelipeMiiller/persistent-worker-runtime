@@ -9,6 +9,11 @@ import { Supervisor } from './supervisor.js';
 import { TaskHandle } from './task-handle.js';
 import { TaskQueue } from './task-queue.js';
 import { WorkerHandle } from './worker-handle.js';
+import {
+  isDefaultSizing,
+  resolveAdaptiveEnabled,
+  resolveWorkerCount,
+} from './worker-pool-sizing.js';
 
 /**
  * WorkerRuntime is the primary concurrency engine.
@@ -23,6 +28,7 @@ export class WorkerRuntime extends EventEmitter {
   #maxMemoryMb;
   #forceKillOnTimeout;
   #killGracePeriodMs;
+  #adaptiveEnabled;
   /** @type {Map<string, {stream: Stream, worker: import('./worker-handle.js').WorkerHandle}>} */
   #activeStreams = new Map();
   /** FIFO queue of stream requests waiting for a free worker. Each entry
@@ -92,21 +98,29 @@ export class WorkerRuntime extends EventEmitter {
     this.#maxMemoryMb = maxMemoryMb;
     this.#forceKillOnTimeout = forceKillOnTimeout;
     this.#killGracePeriodMs = killGracePeriodMs;
+    // Set below after `resolveAdaptiveEnabled` resolves; placeholder so
+    // the field always has a defined value (matches the other
+    // primitive private fields above).
+    this.#adaptiveEnabled = true;
 
-    // Default worker pool size = 1 (was availableParallelism() - 1; see ADR-0019).
-    // On hosts with >4 cores, emit a startup warning so users on big boxes know
-    // they can opt up via createWorkerRuntime({ workers: N }).
-    const userSpecifiedWorkerCount = typeof options.workers === 'number';
-    const defaultWorkers = 1;
-    const workerCount = userSpecifiedWorkerCount ? options.workers : defaultWorkers;
-    if (!userSpecifiedWorkerCount) {
+    // Resolve the initial pool size from options + WORKER_CONCURRENCY env
+    // (ADR-0023) and remember whether adaptive concurrency should be wired
+    // up. `resolveAdaptiveEnabled` is computed NOW so its result is
+    // observable even before T7 actually instantiates the controller —
+    // callers (e.g. dashboards, tests) can read `adaptiveEnabled` off the
+    // runtime immediately after construction.
+    const workerCount = resolveWorkerCount(options);
+    const adaptiveEnabled = resolveAdaptiveEnabled(options);
+    this.#adaptiveEnabled = adaptiveEnabled;
+    if (isDefaultSizing(options)) {
       const cores = availableParallelism();
       if (cores > 4) {
         process.emitWarning(
           `persistent-worker-runtime: started with default workers=1 on a ${cores}-core host. ` +
             `Each Node worker is a separate V8 isolate (~30-50 MB RSS) and uses a parallel OS thread; ` +
-            `size the pool explicitly via createWorkerRuntime({ workers: N }) where N <= ` +
-            `os.availableParallelism() - 1. See BENCHMARKS.md §Memory and ADR-0019 for sizing guidance.`,
+            `size the pool explicitly via createWorkerRuntime({ workers: N }), ` +
+            `set WORKER_CONCURRENCY=<N|auto>, or pass { concurrency: 'auto' } ` +
+            `(see ADR-0023 and BENCHMARKS.md §18 Phase E for sizing guidance).`,
           'PersistentWorkerRuntimeDefaultSizing',
         );
       }
@@ -254,6 +268,20 @@ export class WorkerRuntime extends EventEmitter {
 
   get killGracePeriodMs() {
     return this.#killGracePeriodMs;
+  }
+
+  /**
+   * Whether the adaptive concurrency controller is enabled for this
+   * runtime. Per ADR-0014 the controller is opt-out: explicit numeric
+   * `workers` and `concurrency: 'fixed'` both disable it. T7 will use
+   * this getter to decide whether to instantiate the controller at
+   * all; until then the value is observable via the getter but the
+   * runtime still spawns `workerCount` workers at start.
+   *
+   * @returns {boolean}
+   */
+  get adaptiveEnabled() {
+    return this.#adaptiveEnabled;
   }
 
   /**

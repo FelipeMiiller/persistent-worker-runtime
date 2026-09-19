@@ -116,7 +116,10 @@ describe('Hard Preemption - Config, Error & Validation (T1)', () => {
     });
 
     it('Supervisor receives default preemption options', () => {
-      const supervisor = new Supervisor();
+      // T6 (ADR-0023): Supervisor no longer carries a magic `|| 4`
+      // fallback for `workers`. Direct construction must pass
+      // `workers` explicitly; this test never calls `start()`.
+      const supervisor = new Supervisor({ workers: 1 });
       assert.equal(supervisor.forceKillOnTimeout, false);
       assert.equal(supervisor.killGracePeriodMs, 500);
     });
