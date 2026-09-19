@@ -24,12 +24,17 @@ export interface WorkerRuntimeOptions {
   maxMemoryMb?: number;
 
   /**
-   * Minimum number of worker threads kept alive in the elastic pool.
+   * Lower bound for the adaptive concurrency controller's resize band.
+   * Defaults to `1`. Honoured only when adaptive is enabled (no explicit
+   * `workers: N` and no `concurrency: 'fixed'`); otherwise the pool stays
+   * pinned to the explicit size.
    */
   minWorkers?: number;
 
   /**
-   * Maximum number of worker threads allowed during burst periods.
+   * Upper bound for the adaptive concurrency controller's resize band.
+   * Defaults to `availableParallelism()`. Honoured only when adaptive is
+   * enabled (no explicit `workers: N` and no `concurrency: 'fixed'`).
    */
   maxWorkers?: number;
 

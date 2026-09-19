@@ -271,16 +271,65 @@ export class WorkerRuntime extends EventEmitter {
     // Supervisor) so this stays consistent with the T7 architectural
     // decision to forward-declare the seam and wire it here.
     if (this.#adaptiveEnabled) {
-      this.#adaptiveController = createAdaptiveController({
-        minWorkers: 1,
-        maxWorkers: availableParallelism(),
+      // Resolve the adaptive band from factory options. The defaults
+      // preserve the pre-T9 behaviour (`minWorkers: 1`,
+      // `maxWorkers: availableParallelism()`); explicit options let
+      // T9 integration tests constrain the band so a single grow / shrink
+      // cycle completes inside the test budget.
+      //
+      // `initialWorkers` (T9 — fixes a pre-existing inconsistency) makes
+      // `runtime.stats.adaptive.effectiveWorkers` mirror the real pool at
+      // start. Before this, the controller hard-initialised
+      // `effectiveWorkers = minWorkers`, so a `workers: 4` config briefly
+      // reported `effectiveWorkers: 1` to dashboards until the first
+      // resize — a transient but real inconsistency that T9 P2 surfaced.
+      const adaptiveMinWorkers = options.minWorkers === undefined ? 1 : options.minWorkers;
+      const adaptiveMaxWorkers =
+        options.maxWorkers === undefined ? availableParallelism() : options.maxWorkers;
+      if (
+        typeof adaptiveMinWorkers !== 'number' ||
+        !Number.isInteger(adaptiveMinWorkers) ||
+        adaptiveMinWorkers < 1
+      ) {
+        throw new RangeError(
+          `createWorkerRuntime: options.minWorkers must be a positive integer, got ${options.minWorkers}`,
+        );
+      }
+      if (
+        typeof adaptiveMaxWorkers !== 'number' ||
+        !Number.isInteger(adaptiveMaxWorkers) ||
+        adaptiveMaxWorkers < 1
+      ) {
+        throw new RangeError(
+          `createWorkerRuntime: options.maxWorkers must be a positive integer, got ${options.maxWorkers}`,
+        );
+      }
+      if (adaptiveMinWorkers > adaptiveMaxWorkers) {
+        throw new RangeError(
+          `createWorkerRuntime: options.minWorkers (${adaptiveMinWorkers}) must be <= options.maxWorkers (${adaptiveMaxWorkers})`,
+        );
+      }
+
+      // Build the controller's options object. Production code leaves
+      // the threshold knobs (`shrinkEluThreshold`, etc.) and the
+      // smoothing knobs (`ewmaAlpha`, `debounceTicks`) unset; the
+      // controller's Phase-E derived defaults are correct for prod.
+      // Integration tests that need to pin the band (T9 P1/P2 against
+      // CI environments where GC pauses push idle p99 above the
+      // default grow threshold) wire threshold pass-through here.
+      const controllerOptions = {
+        minWorkers: adaptiveMinWorkers,
+        maxWorkers: adaptiveMaxWorkers,
+        initialWorkers: workerCount,
         samplingCadenceMs: 100,
         // `events` flows through the controller's retire path so the
         // `worker:retiring` event lands on the runtime's own EE.
         events: this,
         spawnIdleWorker: () => this.#supervisor.spawnIdleWorker(),
         retireLowestLoadWorker: () => this.#supervisor.retireLowestLoadWorker(),
-      });
+      };
+
+      this.#adaptiveController = createAdaptiveController(controllerOptions);
     }
   }
 
