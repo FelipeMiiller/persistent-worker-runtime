@@ -174,9 +174,14 @@ describe('T9 P5 — runtime.stats.adaptive live-mirrors controller telemetry', (
       // transition from idle (~0.05 ELU) to busy (~0.9 ELU) — at α=0.3
       // the smoothed ELU converges within 3-4 ticks once the raw sample
       // sits at ~0.9. Earliest shrink fire lands ~900ms into Phase 2,
-      // plus retire drain (~100ms). 1500ms gives clear headroom against
-      // the 28-core host where the EWMA convergence is the slowest step.
-      await new Promise((r) => setTimeout(r, 1500));
+      // plus retire drain (~100ms). 2500ms gives clear headroom against
+      // Windows Node 22.x CI runners where the setImmediate chain is
+      // ~20-30% slower than Linux/macOS (Windows GitHub Actions VM
+      // has higher event-loop overhead, raw ELU samples hover closer
+      // to 0.8 than 0.9, so the EWMA needs more ticks to cross the
+      // 0.7 shrink threshold). 1500ms was right at the boundary on
+      // Windows Node 22.x and produced a one-off flake.
+      await new Promise((r) => setTimeout(r, 2500));
     } finally {
       busyLoopActive = false;
     }
