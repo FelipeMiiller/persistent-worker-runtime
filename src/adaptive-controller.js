@@ -74,6 +74,12 @@ import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
  * @property {number} [growEluThreshold=0.5] EWMA ELU below which grow can fire (paired with latency).
  * @property {number} [growLatencyP99Ms=10] EWMA p99 (ms) below which grow can fire (paired with ELU).
  * @property {boolean} [enabled=true] When false, the tick still samples for telemetry but never resizes.
+ * @property {number} [initialWorkers] Sets the initial value of `stats.effectiveWorkers`
+ *   at construction time. When omitted, falls back to `minWorkers`. WorkerRuntime
+ *   passes the resolved initial pool size here so `effectiveWorkers` mirrors the
+ *   real pool at start (avoids a transient `effectiveWorkers = 1` while the pool
+ *   actually has N workers — the bug a `workers: 4` config would otherwise expose
+ *   to dashboards reading `runtime.stats.adaptive.effectiveWorkers` pre-resize).
  * @property {() => Promise<string> | string} [spawnIdleWorker] T7 will inject this — spawns a new
  *   idle worker and returns its `workerId`. When the callback resolves to a non-empty string
  *   the controller increments `effectiveWorkers` and fires an `onResize` event with
@@ -580,7 +586,14 @@ export function createAdaptiveController(options) {
     enabled: config.enabled,
     elu: null,
     latencyP99Ms: null,
-    effectiveWorkers: config.minWorkers,
+    // Initialize from `initialWorkers` (falls back to `minWorkers`). WorkerRuntime
+    // passes the resolved initial pool size so `effectiveWorkers` mirrors the
+    // real pool at start. Without this, a `workers: 4` config would briefly
+    // report `effectiveWorkers: 1` while the pool actually has 4 workers, which
+    // is what dashboards see before the first tick — a transient but visible
+    // inconsistency. The pre-T9 fix that landed in `ae5c980` (T7) only set
+    // `effectiveWorkers` from `minWorkers`, which is the floor, not the start.
+    effectiveWorkers: config.initialWorkers ?? config.minWorkers,
     ticksSinceResize: 0,
     lastResizeReason: null,
     lastResizeAt: null,

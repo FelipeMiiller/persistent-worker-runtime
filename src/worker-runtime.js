@@ -310,13 +310,14 @@ export class WorkerRuntime extends EventEmitter {
         );
       }
 
-      // Build the controller's options object. Production code leaves
-      // the threshold knobs (`shrinkEluThreshold`, etc.) and the
-      // smoothing knobs (`ewmaAlpha`, `debounceTicks`) unset; the
-      // controller's Phase-E derived defaults are correct for prod.
-      // Integration tests that need to pin the band (T9 P1/P2 against
-      // CI environments where GC pauses push idle p99 above the
-      // default grow threshold) wire threshold pass-through here.
+      // Build the controller's options object. Pass-through overrides
+      // for the threshold knobs (`shrinkEluThreshold`, etc.) and the
+      // smoothing knobs (`ewmaAlpha`, `debounceTicks`) — production code
+      // leaves these unset and relies on the controller's Phase-E
+      // derived defaults; integration tests use them to pin the band
+      // in environments where GC pauses (p99 ~31ms even on an idle
+      // Event Loop) or background load would otherwise keep the
+      // signals out of the default grow window.
       const controllerOptions = {
         minWorkers: adaptiveMinWorkers,
         maxWorkers: adaptiveMaxWorkers,
@@ -328,6 +329,19 @@ export class WorkerRuntime extends EventEmitter {
         spawnIdleWorker: () => this.#supervisor.spawnIdleWorker(),
         retireLowestLoadWorker: () => this.#supervisor.retireLowestLoadWorker(),
       };
+      // Conditional pass-through — `undefined` would overwrite the
+      // controller's defaults via the `...options` spread inside the
+      // factory, so only set keys the caller actually provided.
+      for (const key of [
+        'shrinkEluThreshold',
+        'shrinkLatencyP99Ms',
+        'growEluThreshold',
+        'growLatencyP99Ms',
+        'ewmaAlpha',
+        'debounceTicks',
+      ]) {
+        if (options[key] !== undefined) controllerOptions[key] = options[key];
+      }
 
       this.#adaptiveController = createAdaptiveController(controllerOptions);
     }

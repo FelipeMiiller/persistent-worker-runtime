@@ -79,4 +79,118 @@ describe('T9 P5 — runtime.stats.adaptive live-mirrors controller telemetry', (
     assert.equal(after.lastResizeReason, null);
     assert.equal(after.lastResizeAt, null);
   });
+
+  it('flips lastResizeReason between grow and shrink with monotonic lastResizeAt', async () => {
+    // Threshold overrides — see the comment block below. Production code
+    // never sets these; the controller's defaults come from Phase E
+    // empirical data. The overrides exist so this test can pin the
+    // band in CI environments where GC pauses and Event Loop noise
+    // would otherwise keep signals out of the default grow window.
+    runtime = await createWorkerRuntime({
+      minWorkers: 1,
+      maxWorkers: 2,
+      // `growLatencyP99Ms` defaults to 10ms. Idle Event Loop p99 in
+      // a typical Node 22 process is ~31ms (V8 minor GC pauses are
+      // captured as event-loop delays). Bumping the threshold to 100ms
+      // makes an idle-loop run classify as 'grow' — without this, the
+      // default threshold keeps the controller permanently in 'noop'
+      // and the grow fire never happens.
+      growLatencyP99Ms: 100,
+      // `shrinkEluThreshold` defaults to 0.85. The busy-loop burst
+      // below produces ~94% ELU on a single core, but on a
+      // multi-core host (this CI runner has 28 cores) the EWMA
+      // smooths down to ~85-90% — sometimes just under the default.
+      // Drop to 0.7 to make the shrink fire deterministic without
+      // touching production thresholds.
+      shrinkEluThreshold: 0.7,
+    });
+
+    // Wait for any initial ticks to settle so the first tick doesn't
+    // start from a stale signal window.
+    await new Promise((r) => setTimeout(r, 100));
+
+    // PHASE 1 — Induce GROW. Dispatch a flood of fast sync tasks so the
+    // main thread stays idle (low ELU + low latencyP99 below the
+    // overridden grow thresholds) while queue depth peaks. The
+    // controller's grow condition (both signals below the grow
+    // thresholds) fires after `debounceTicks` (=5) ticks.
+    const handles = [];
+    for (let i = 0; i < 200; i++) {
+      handles.push(
+        runtime.dispatch({
+          type: 'mirror_task',
+          fn: () => 1 + 1,
+        }),
+      );
+    }
+
+    // 5 ticks × 100ms = 500ms debounce + ~200ms spawn budget on a typical
+    // CI runner. macOS GitHub Actions Node 22 is the slowest known target;
+    // allow generous slack for a deterministic green.
+    await new Promise((r) => setTimeout(r, 1200));
+    await Promise.all(handles.map((h) => h.promise.catch(() => {})));
+
+    const afterGrow = runtime.stats.adaptive;
+    assert.equal(afterGrow.lastResizeReason, 'grow');
+    const growAt = afterGrow.lastResizeAt;
+    assert.ok(typeof growAt === 'number' && growAt > 0);
+    assert.equal(
+      afterGrow.effectiveWorkers,
+      2,
+      'pool should grow to the band ceiling (effectiveWorkers === maxWorkers)',
+    );
+
+    // PHASE 2 — Induce SHRINK. Phase 1's task drain leaves all workers
+    // idle, so `retireLowestLoadWorker` can fire without waiting on
+    // in-flight work. Use a recursive `setImmediate` chain to keep the
+    // event loop near-100% busy — a `setInterval`-based burst loop
+    // (the previous attempt) left ~0.5ms idle gaps where the controller's
+    // own setInterval could land, producing oscillating ELU samples
+    // (0.59 ↔ 0.68) that never reliably crossed the shrink threshold
+    // (T9 P2 flake rate ~33% on this 28-core host). `setImmediate`
+    // chain yields to the event loop only between iterations; the
+    // resulting busy ratio is high enough that the EWMA converges
+    // toward ~0.9 within 2-3 ticks and stays there.
+    //
+    // The busy loop runs until AFTER the stats read below. Stopping
+    // it earlier lets the Event Loop go idle and grow direction
+    // accumulates again — the next debounce window would flip
+    // `lastResizeReason` back to 'grow' and the assertion would race.
+    let busyLoopActive = true;
+    const BURST_MS = 9;
+    function busyTick() {
+      if (!busyLoopActive) return;
+      const burstStart = Date.now();
+      let _acc = 0;
+      while (Date.now() - burstStart < BURST_MS) {
+        for (let i = 0; i < 1e6; i++) _acc += i;
+      }
+      setImmediate(busyTick);
+    }
+    setImmediate(busyTick);
+
+    try {
+      // Wait for shrink debounce (5 ticks × 100ms = 500ms) + EWMA
+      // transition from idle (~0.05 ELU) to busy (~0.9 ELU) — at α=0.3
+      // the smoothed ELU converges within 3-4 ticks once the raw sample
+      // sits at ~0.9. Earliest shrink fire lands ~900ms into Phase 2,
+      // plus retire drain (~100ms). 1500ms gives clear headroom against
+      // the 28-core host where the EWMA convergence is the slowest step.
+      await new Promise((r) => setTimeout(r, 1500));
+    } finally {
+      busyLoopActive = false;
+    }
+
+    const afterShrink = runtime.stats.adaptive;
+    assert.equal(afterShrink.lastResizeReason, 'shrink');
+    assert.ok(
+      afterShrink.lastResizeAt >= growAt,
+      `lastResizeAt must advance past grow timestamp (shrink=${afterShrink.lastResizeAt}, grow=${growAt})`,
+    );
+    assert.equal(
+      afterShrink.effectiveWorkers,
+      1,
+      'pool should shrink to the floor (effectiveWorkers === minWorkers)',
+    );
+  });
 });

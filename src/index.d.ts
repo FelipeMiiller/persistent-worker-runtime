@@ -73,6 +73,42 @@ export interface WorkerRuntimeOptions {
   forceKillOnTimeout?: boolean;
 
   /**
+   * Override for the adaptive controller's shrink ELU threshold.
+   * Pass-through to the controller (ADR-0014). Leave unset for production.
+   */
+  shrinkEluThreshold?: number;
+
+  /**
+   * Override for the adaptive controller's shrink latency p99 threshold (ms).
+   * Pass-through to the controller. Leave unset for production.
+   */
+  shrinkLatencyP99Ms?: number;
+
+  /**
+   * Override for the adaptive controller's grow ELU threshold.
+   * Pass-through to the controller. Leave unset for production.
+   */
+  growEluThreshold?: number;
+
+  /**
+   * Override for the adaptive controller's grow latency p99 threshold (ms).
+   * Pass-through to the controller. Leave unset for production.
+   */
+  growLatencyP99Ms?: number;
+
+  /**
+   * Override for the adaptive controller's EWMA smoothing factor.
+   * Pass-through to the controller. Leave unset for production.
+   */
+  ewmaAlpha?: number;
+
+  /**
+   * Override for the adaptive controller's debounce window (consecutive ticks).
+   * Pass-through to the controller. Leave unset for production.
+   */
+  debounceTicks?: number;
+
+  /**
    * Grace period (ms) to allow cooperative cancellation before hard thread termination.
    * Defaults to 500ms.
    */
