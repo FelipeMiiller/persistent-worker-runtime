@@ -187,6 +187,7 @@ A new **§Memory** subsection in `BENCHMARKS.md` will publish per-benchmark `pro
 2. **`worker.getHeapSnapshot()`-based profile diff** — when investigating suspected leaks, call `worker.getHeapSnapshot()` from each worker and `heapProfiler` the result. Convenience method on the runtime to gather and emit per-worker `.heapsnapshot` files on demand.
 3. **`maxOldGenerationSizeMb` warning helper** — when the user passes `resourceLimits` whose values collectively exceed the recommended ~75 % of host physical memory (read from `os.totalmem()` / `cgroup memory.max`), emit a startup warning.
 4. **Per-benchmark memory sections** in `BENCHMARKS.md` (deferred — large content; should be a spec on its own).
+5. **Production escape hatch (env var + auto mode)** — added by [ADR-0023](0023-worker-concurrency-and-auto-sizing-policy.md). `WORKER_CONCURRENCY=auto` or `concurrency: 'auto'` opts into `availableParallelism()`-sized pools for production; the conservative default of 1 stays for tests/CI/small containers.
 
 ## Links
 
