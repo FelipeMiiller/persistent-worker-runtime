@@ -126,6 +126,85 @@ export class Supervisor extends EventEmitter {
   }
 
   /**
+   * Spawns a new general-purpose worker and returns its id. Wired into
+   * the adaptive concurrency controller's `spawnIdleWorker` callback
+   * (T7 — ADR-0014) so the controller can grow the pool within the
+   * `[minWorkers, maxWorkers]` band without touching the private
+   * `#spawnWorker` machinery.
+   *
+   * Returns `null` when shutting down (matches the "graceful no-op"
+   * contract documented on the controller's spawn callback — the
+   * controller treats `null`/empty as "no spawn", no state mutation).
+   *
+   * @returns {Promise<string | null>}
+   */
+  async spawnIdleWorker() {
+    if (this.#isShuttingDown) return null;
+    const worker = await this.#spawnWorker();
+    return worker?.id ?? null;
+  }
+
+  /**
+   * Picks the general-purpose worker with the smallest
+   * `tasksCompleted` (LRU proxy — fewer completions ⇒ less
+   * warmed-up ⇒ cheaper to drop without losing work) and drains it.
+   * Wired into the adaptive concurrency controller's
+   * `retireLowestLoadWorker` callback (T7 — ADR-0014). The controller's
+   * fire site already enforces the `effectiveWorkers > minWorkers`
+   * band (T5), so this method trusts the call to have room to retire.
+   *
+   * "Drain" semantics per ADR-0014 / ADAPTIVE-09:
+   *   - No `worker.terminate()` while a task is in-flight (no forced
+   *     kill — that is the ADR-0011 preemption escape hatch).
+   *   - The worker is marked `draining` so the supervisor's
+   *     `findWorkerForTask` skips it (won't dispatch new tasks).
+   *   - When the in-flight task settles, the worker terminates.
+   *   - The supervisor pool entry is removed eagerly so a concurrent
+   *     grow-fire cannot race against the drain and over-spawn.
+   *
+   * Returns the retired worker id, or `null` when no general-purpose
+   * worker is eligible (all are dedicated, draining, recycling, or
+   * already on their way out).
+   *
+   * @returns {Promise<string | null>}
+   */
+  async retireLowestLoadWorker() {
+    if (this.#isShuttingDown) return null;
+
+    // Filter out workers that cannot be retired (dedicated, already
+    // draining, recycling, preempting). LRU proxy: smallest
+    // `tasksCompleted` is the cheapest to drop.
+    let candidate = null;
+    for (const w of this.#workers.values()) {
+      if (w.isDedicated) continue;
+      if (
+        w.status === 'draining' ||
+        w.status === 'recycling' ||
+        w.status === 'terminating' ||
+        w.status === 'terminated' ||
+        w.status === 'preempting'
+      ) {
+        continue;
+      }
+      if (candidate === null || w.tasksCompleted < candidate.tasksCompleted) {
+        candidate = w;
+      }
+    }
+    if (candidate === null) return null;
+
+    // Eagerly remove from the pool so a concurrent grow-fire sees the
+    // post-retire size. The worker is still alive (draining) so any
+    // in-flight task completes naturally.
+    this.#workers.delete(candidate.id);
+    try {
+      const workerId = await candidate.retire();
+      return workerId;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Checks whether a worker has exceeded task or memory limits and initiates recycling.
    */
   #checkRecycling(worker) {

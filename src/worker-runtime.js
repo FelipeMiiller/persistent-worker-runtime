@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { availableParallelism } from 'node:os';
+import { createAdaptiveController } from './adaptive-controller.js';
 import { ChannelRegistry } from './broadcast-channel.js';
 import { StreamConfigError, WorkerRuntimeError } from './errors.js';
 import { isGeneratorFunction } from './stream-runner.js';
@@ -29,6 +30,14 @@ export class WorkerRuntime extends EventEmitter {
   #forceKillOnTimeout;
   #killGracePeriodMs;
   #adaptiveEnabled;
+  /**
+   * Adaptive concurrency controller (ADR-0014 T7). `null` when the
+   * factory detected an opt-out (`workers: N` or `concurrency: 'fixed'`)
+   * — the resolver in `worker-pool-sizing.js` is the single source of
+   * truth for the opt-out decision (computed eagerly in the constructor).
+   * @type {ReturnType<typeof createAdaptiveController> | null}
+   */
+  #adaptiveController = null;
   /** @type {Map<string, {stream: Stream, worker: import('./worker-handle.js').WorkerHandle}>} */
   #activeStreams = new Map();
   /** FIFO queue of stream requests waiting for a free worker. Each entry
@@ -232,6 +241,47 @@ export class WorkerRuntime extends EventEmitter {
       }
       this.#scheduleNext();
     });
+
+    // T7 — instantiate the adaptive concurrency controller (ADR-0014 +
+    // ADR-0023). The factory is the single source of truth for the
+    // opt-out decision (`resolveAdaptiveEnabled` in
+    // `worker-pool-sizing.js`): explicit numeric `workers` or
+    // `concurrency: 'fixed'` leave `#adaptiveController` as `null` and
+    // the runtime stays in fixed-mode. Otherwise the controller is
+    // wired with:
+    //
+    //   - `minWorkers: 1` — the ADR-0019 floor; never below this.
+    //   - `maxWorkers: availableParallelism()` — the empirical saturation
+    //     knee from Phase E. Grows UP from `workerCount` when
+    //     `workerCount < cores` (the conservative default), or matches
+    //     `workerCount` exactly when the user already opted into the
+    //     host-core count via `WORKER_CONCURRENCY=auto` /
+    //     `concurrency: 'auto'`.
+    //   - `spawnIdleWorker` / `retireLowestLoadWorker` — methods on
+    //     `Supervisor` added in T7. The controller's debounce + band
+    //     gates (T5) keep these in `[minWorkers, maxWorkers]`, so the
+    //     controller never asks the supervisor to grow past the cap.
+    //   - `events: this` — the runtime's own EventEmitter. The
+    //     controller's T4 retire path emits `worker:retiring` here,
+    //     giving observers one canonical stream for both supervisor
+    //     and adaptive events.
+    //
+    // The controller's `start()` is called in `runtime.start()` — the
+    // controller arms its own sampling interval (no new timer on the
+    // Supervisor) so this stays consistent with the T7 architectural
+    // decision to forward-declare the seam and wire it here.
+    if (this.#adaptiveEnabled) {
+      this.#adaptiveController = createAdaptiveController({
+        minWorkers: 1,
+        maxWorkers: availableParallelism(),
+        samplingCadenceMs: 100,
+        // `events` flows through the controller's retire path so the
+        // `worker:retiring` event lands on the runtime's own EE.
+        events: this,
+        spawnIdleWorker: () => this.#supervisor.spawnIdleWorker(),
+        retireLowestLoadWorker: () => this.#supervisor.retireLowestLoadWorker(),
+      });
+    }
   }
 
   get stats() {
@@ -251,6 +301,29 @@ export class WorkerRuntime extends EventEmitter {
       // "running" from "waiting to run".
       activeStreams: this.#activeStreams.size,
       pendingStreams: this.#pendingStreams.length,
+      // T7/T8 telemetry (ADR-0014 §Architectural Mechanics): the adaptive
+      // concurrency controller's stats block. When adaptive is disabled
+      // (`concurrency: 'fixed'` or explicit `workers: N`), `enabled` is
+      // `false` and the live EWMA signals are `null` per spec — the
+      // sampling cadence is suppressed at the controller level, so any
+      // observation of non-null signals implies adaptive is active.
+      //
+      // `effectiveWorkers` and `ticksSinceResize` stay meaningful even
+      // when disabled — they reflect the current pool state and the
+      // "ticks since last resize" counter, which only advances when
+      // adaptive is sampling. Observers (dashboards, alerting) can
+      // therefore still read pool state from this block.
+      adaptive: this.#adaptiveController
+        ? this.#adaptiveController.getStats()
+        : {
+            enabled: false,
+            elu: null,
+            latencyP99Ms: null,
+            effectiveWorkers: this.#supervisor.totalWorkers,
+            ticksSinceResize: 0,
+            lastResizeReason: null,
+            lastResizeAt: null,
+          },
     };
   }
 
@@ -290,6 +363,14 @@ export class WorkerRuntime extends EventEmitter {
   async start() {
     if (this.#isStarted) return this;
     await this.#supervisor.start();
+    // T7 — arm the adaptive concurrency controller's sampling cadence.
+    // `start()` is idempotent (no double-arm). The controller uses its
+    // own `setInterval` per ADR-0014 — we do NOT add a parallel timer
+    // on the Supervisor. When adaptive is disabled (#adaptiveController
+    // is null), this branch is a no-op.
+    if (this.#adaptiveController) {
+      this.#adaptiveController.start();
+    }
     this.#isStarted = true;
     return this;
   }
@@ -656,6 +737,16 @@ export class WorkerRuntime extends EventEmitter {
    */
   async shutdown() {
     this.#isShuttingDown = true;
+    // T7 — stop the adaptive controller BEFORE tearing down the
+    // supervisor. The controller's setInterval is .unref()-ed so it
+    // would not block Event Loop exit on its own, but ordering matters:
+    // if a tick fires concurrently with supervisor.shutdown(), the
+    // controller might call `spawnIdleWorker` against a shut-down
+    // supervisor and the new worker would be stranded. Stop the
+    // controller first so no further fires can land during teardown.
+    if (this.#adaptiveController) {
+      this.#adaptiveController.stop();
+    }
     this.#queue.destroy(new WorkerRuntimeError('Runtime is shutting down'));
     // Abort every active stream so the worker's generator can drain its
     // finally blocks. pushAbortEnd fires `stream:aborted` which the

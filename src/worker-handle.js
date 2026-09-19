@@ -479,6 +479,67 @@ export class WorkerHandle extends EventEmitter {
   }
 
   /**
+   * Gracefully retires the worker: lets any in-flight task complete
+   * naturally, then terminates. Used by the adaptive concurrency
+   * controller's shrink path (T7 — ADR-0014) where preemption is
+   * explicitly forbidden (drain semantics, see ADAPTIVE-09).
+   *
+   * Behaviour matrix:
+   *   - `idle`: terminate immediately. Nothing to drain.
+   *   - `busy`: arm a one-shot listener on the next `task_completed`
+   *     or `task_failed` event. When the in-flight task settles, the
+   *     worker is terminated. The listener is registered BEFORE we
+   *     flip status to `draining` so a task completing concurrently
+   *     with the call cannot race past us.
+   *   - `draining` / `recycling` / `terminating` / `terminated`: no-op
+   *     (idempotent + safe under repeated calls from the controller's
+   *     fire site).
+   *
+   * Returns the worker id so the supervisor can map the retire back
+   * to its pool entry. The supervisor is responsible for removing the
+   * entry — this method only handles the worker-side drain.
+   *
+   * @returns {Promise<string>} The worker id.
+   */
+  async retire() {
+    if (
+      this.#status === 'terminating' ||
+      this.#status === 'terminated' ||
+      this.#status === 'draining' ||
+      this.#status === 'recycling' ||
+      this.#status === 'preempting'
+    ) {
+      return this.id;
+    }
+
+    if (this.#status === 'idle') {
+      await this.terminate();
+      return this.id;
+    }
+
+    // `busy` (or `stream` task in flight). Mark as `draining` so the
+    // supervisor's `findWorkerForTask` skips us (isIdle returns false)
+    // and so the task-complete handler keeps the status pinned until we
+    // explicitly terminate.
+    this.#status = 'draining';
+
+    return new Promise((resolve) => {
+      const onSettled = () => {
+        // Belt + suspenders: task_completed flips status to 'idle' only
+        // when not in 'draining'/'recycling'/'terminating'. Pin it
+        // before terminate so no observer ever sees 'idle' on a draining
+        // worker.
+        this.#status = 'terminating';
+        this.terminate()
+          .then(() => resolve(this.id))
+          .catch(() => resolve(this.id)); // termination errors are not actionable
+      };
+      this.once('task_completed', onSettled);
+      this.once('task_failed', onSettled);
+    });
+  }
+
+  /**
    * Gracefully terminates the worker thread.
    */
   async terminate() {
