@@ -293,6 +293,93 @@ describe('WorkerRuntime — adaptive controller wiring (T7)', () => {
       assert.equal(runtime.stats.adaptive.enabled, false);
     });
   });
+
+  describe('T9 P3 — fixed-mode runtime stays silent under load (no controller wired)', () => {
+    // The opt-out resolver (`workers` or `concurrency: 'fixed'`) must
+    // skip controller construction entirely — no spawn/retire fires,
+    // no telemetry populates, no ticks advance, the pool stays at its
+    // declared size even when sustained work would otherwise trigger
+    // grow. Verifies the runtime-level opt-out is a true opt-out, not
+    // a "controller exists but is silently disabled" simulation.
+    before(() => clearSizingEnv());
+
+    afterEach(async () => {
+      if (runtime) {
+        await runtime.shutdown();
+        runtime = null;
+      }
+      restoreSizingEnv();
+    });
+
+    it('explicit `workers: 1` keeps totalWorkers=1 across a sustained burst', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+
+      const before = {
+        totalWorkers: runtime.stats.totalWorkers,
+        adaptiveEnabled: runtime.stats.adaptive.enabled,
+        ticksSinceResize: runtime.stats.adaptive.ticksSinceResize,
+        lastResizeReason: runtime.stats.adaptive.lastResizeReason,
+      };
+      assert.equal(before.totalWorkers, 1);
+      assert.equal(before.adaptiveEnabled, false);
+      assert.equal(before.ticksSinceResize, 0);
+      assert.equal(before.lastResizeReason, null);
+
+      // Submit 12 tasks × 100ms each. With a 1-worker pool, the burst
+      // queues ~11 tasks at peak. An adaptive controller with low ELU
+      // + queue-pending would classify as `grow` after 5 ticks. The
+      // opt-out must suppress that.
+      const handles = [];
+      for (let i = 0; i < 12; i++) {
+        handles.push(
+          runtime.dispatch({
+            type: 'opt_out_task',
+            payload: { i, ms: 100 },
+            fn: (p) => new Promise((r) => setTimeout(() => r({ id: p.i }), p.ms)),
+          }),
+        );
+      }
+      // Wait for the burst to fully drain. 12 tasks × 100ms / 1 worker
+      // = ~1.2s of wall-clock. The 600ms wait in the middle gives the
+      // (hypothetical) controller time to fire several grow ticks.
+      await new Promise((r) => setTimeout(r, 600));
+      const mid = runtime.stats;
+      await Promise.all(handles.map((h) => new Promise((r) => h.onComplete(r))));
+      const after = runtime.stats;
+
+      // Pool size never grew past 1.
+      assert.equal(mid.totalWorkers, 1, 'pool must not grow mid-burst');
+      assert.equal(after.totalWorkers, 1, 'pool must not grow post-burst');
+      // Adaptive block stayed in the opt-out shape across the burst.
+      assert.equal(after.adaptive.enabled, false);
+      assert.equal(after.adaptive.elu, null);
+      assert.equal(after.adaptive.latencyP99Ms, null);
+      assert.equal(after.adaptive.ticksSinceResize, 0, 'no controller ticks should advance');
+      assert.equal(after.adaptive.lastResizeReason, null);
+    });
+
+    it("explicit `concurrency: 'fixed'` keeps totalWorkers=1 and adaptive disabled", async () => {
+      runtime = await createWorkerRuntime({ concurrency: 'fixed' });
+
+      const handles = [];
+      for (let i = 0; i < 8; i++) {
+        handles.push(
+          runtime.dispatch({
+            type: 'opt_out_task',
+            payload: { i, ms: 80 },
+            fn: (p) => new Promise((r) => setTimeout(() => r({ id: p.i }), p.ms)),
+          }),
+        );
+      }
+      await new Promise((r) => setTimeout(r, 400));
+      await Promise.all(handles.map((h) => new Promise((resolve) => h.onComplete(resolve))));
+
+      assert.equal(runtime.stats.totalWorkers, 1);
+      assert.equal(runtime.stats.adaptive.enabled, false);
+      assert.equal(runtime.stats.adaptive.lastResizeReason, null);
+      assert.equal(runtime.stats.adaptive.lastResizeAt, null);
+    });
+  });
 });
 
 describe('Microbenchmark — per-tick overhead < 1ms (T7 SLA)', () => {
