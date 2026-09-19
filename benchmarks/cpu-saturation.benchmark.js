@@ -159,8 +159,18 @@ async function runBenchmark() {
 
   // Anchor the saturation test on the actual worker counts in the
   // sweep (capped at MAX_WORKERS), not on the host's CORES value.
-  const maxW = WORKER_COUNTS[WORKER_COUNTS.length - 1];
-  const halfW = WORKER_COUNTS[WORKER_COUNTS.length - 2];
+  // WORKER_COUNTS is constructed by appending `Math.min(MAX_WORKERS,
+  // CORES)` last, which on small-core hosts (< 16 cores) ends up
+  // smaller than the second-to-last entry — e.g. on a 3-core macOS
+  // GitHub Actions runner the array is `[1, 2, 4, 8, 16, 3]`. Picking
+  // the largest / second-largest by index then silently inverts the
+  // ratio (3-worker tput / 16-worker tput = 0.18× instead of the
+  // intended 16-worker tput / 8-worker tput ≈ 2×). Sort ascending
+  // and pick the tail two entries to make the selection robust to
+  // the array shape.
+  const sortedCounts = [...WORKER_COUNTS].sort((a, b) => a - b);
+  const maxW = sortedCounts[sortedCounts.length - 1];
+  const halfW = sortedCounts[sortedCounts.length - 2];
 
   let baselineThroughput = null;
   for (const workers of WORKER_COUNTS) {
