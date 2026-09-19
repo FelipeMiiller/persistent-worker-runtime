@@ -206,6 +206,31 @@ describe('SignalMonitor', () => {
     monitor.stop();
     assert.ok(true);
   });
+
+  test('sample().latencyP99 is in MILLISECONDS, not raw nanoseconds (regression: spec field is latencyP99Ms)', () => {
+    // Regression for the latent units bug found while wiring T11. The
+    // Node `monitorEventLoopDelay.percentile()` returns nanoseconds,
+    // but the spec, the public `latencyP99Ms` field, and the default
+    // thresholds (`shrinkLatencyP99Ms: 50`, `growLatencyP99Ms: 10`) are
+    // all in milliseconds. Without the conversion, a 30ms p99 stored
+    // as 30,000,000 made the default `growLatencyP99Ms: 10` unreachable
+    // — the controller never grew the pool.
+    //
+    // The histogram-disabled sentinel is 511 nanoseconds (Node resolves
+    // disabled percentile to 2^9 - 1). 511 ns = 5.11e-4 ms. We bound
+    // the disabled value above 0 (sanity) and below 1 (it can never
+    // be a real millisecond value while the histogram is disabled).
+    const monitor = new SignalMonitor();
+    monitor.start();
+    monitor.sample(); // seed prevElu
+    const second = monitor.sample();
+    assert.ok(second.latencyP99 >= 0, `latencyP99=${second.latencyP99} should be non-negative`);
+    assert.ok(
+      second.latencyP99 < 1,
+      `latencyP99=${second.latencyP99} should be in ms, not ns (511 ns = 5.11e-4 ms while histogram disabled)`,
+    );
+    monitor.stop();
+  });
 });
 
 describe('DebounceCounter', () => {

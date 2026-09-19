@@ -256,13 +256,20 @@ export class SignalMonitor {
     }
     this.#prevElu = performance.eventLoopUtilization();
 
-    const latencyP99 = this.#histogram.percentile(99);
+    // `monitorEventLoopDelay.percentile()` returns NANOSECONDS in Node.js.
+    // The spec, the public `latencyP99Ms` field, and the
+    // `shrinkLatencyP99Ms` / `growLatencyP99Ms` thresholds are all in
+    // MILLISECONDS — so we convert at the source. Without this conversion
+    // a 30ms p99 stores as 30,000,000, the default `growLatencyP99Ms: 10`
+    // is interpreted as "10 ns" (essentially unreachable below), and the
+    // controller never grows the pool. Found while wiring the T11 example.
+    const latencyP99Ms = this.#histogram.percentile(99) / 1_000_000;
     // Reset so the next sample reflects only the new window (between
     // this call and the next). Tiny sample-loss at the boundary is
     // acceptable for an EWMA-driven signal.
     this.#histogram.reset();
 
-    return { elu, latencyP99 };
+    return { elu, latencyP99: latencyP99Ms };
   }
 }
 
