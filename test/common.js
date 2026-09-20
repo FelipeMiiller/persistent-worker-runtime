@@ -511,3 +511,73 @@ export function waitForEvent(emitter, eventName, exact = 1, timeoutMs = 3000) {
     }
   });
 }
+
+// ─── waitForSubscription ──────────────────────────────────────────────────────
+//
+// Same as `waitForEvent` but for the `runtime.subscribe(channelName, handler)`
+// API (which returns an unsubscribe function, not an EventEmitter).
+//
+// Wraps `handler` with `mustCall(exact=N)` so the test asserts the listener
+// fires EXACTLY N times. Replaces this ad-hoc pattern:
+//
+//   let received = null;
+//   runtime.subscribe('ch', (msg) => { received = msg; });
+//   await runtime.execute({ ... });
+//   while (received === null && Date.now() < deadline) await sleep(50);
+//   assert.deepEqual(received, expected);
+//
+// With:
+//
+//   const received = await common.waitForSubscription(
+//     runtime, 'ch', 1, 2000,
+//   );
+//   assert.deepEqual(received, expected);
+//
+// Both `mustCall` (for the EXACTLY-N contract) AND the Promise (for waiting)
+// are wired up; the timeout fires if the listener never gets called.
+//
+// @param {object} target - the runtime / publisher
+// @param {string} channelName
+// @param {number} exact - expected call count (default 1)
+// @param {number} [timeoutMs=3000]
+// @returns {Promise<unknown>} resolves with the FIRST handler payload
+
+export function waitForSubscription(target, channelName, exact = 1, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    let fired = false;
+    let mustCallContext = null;
+
+    const handler = mustCall((payload) => {
+      if (fired) return;
+      fired = true;
+      clearTimeout(timer);
+      try {
+        unsub();
+      } catch {
+        // ignore
+      }
+      resolve(payload);
+    }, exact);
+
+    timer = setTimeout(() => {
+      if (fired) return;
+      try {
+        unsub();
+      } catch {
+        // ignore
+      }
+      if (mustCallContext && callChecks.includes(mustCallContext)) {
+        callChecks.splice(callChecks.indexOf(mustCallContext), 1);
+      }
+      reject(
+        new Error(
+          `waitForSubscription: channel '${channelName}' handler did not fire ${exact} time(s) within ${timeoutMs}ms`,
+        ),
+      );
+    }, timeoutMs);
+
+    mustCallContext = callChecks[callChecks.length - 1];
+    const unsub = target.subscribe(channelName, handler);
+  });
+}

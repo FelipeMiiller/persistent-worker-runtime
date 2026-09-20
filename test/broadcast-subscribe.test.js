@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { createWorkerRuntime, WorkerRuntimeError } from '../src/index.js';
+import * as common from './common.js';
 
 describe('T7 — Main-Thread subscribe() / unsubscribe() / hasSubscribers() + shutdown hardening', () => {
   describe('runtime.unsubscribe(name, handler)', () => {
@@ -180,10 +181,11 @@ describe('T7 — Main-Thread subscribe() / unsubscribe() / hasSubscribers() + sh
 
     it('subscribe() called before shutdown is observable but the underlying BC is closed on shutdown', async () => {
       const r = await createWorkerRuntime({ workers: 1 });
-      let received = null;
-      r.subscribe('pre-shutdown', (msg) => {
-        received = msg;
-      });
+
+      // Node-pattern: waitForSubscription wraps the subscribe handler with
+      // mustCall(1) so the test asserts exactly one delivery. Replaces
+      // 'let received = null; while (... === null && ...) await sleep(50)'.
+      const receivedPromise = common.waitForSubscription(r, 'pre-shutdown', 1, 2000);
 
       // Pre-shutdown: a worker can publish to this channel
       await r.execute({
@@ -191,11 +193,7 @@ describe('T7 — Main-Thread subscribe() / unsubscribe() / hasSubscribers() + sh
         fn: (_p, _s, context) => context.channel('pre-shutdown').publish({ ok: true }),
       });
 
-      // Give the bus a beat
-      const deadline = Date.now() + 1000;
-      while (received === null && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
+      const received = await receivedPromise;
       assert.deepEqual(received, { ok: true });
 
       await r.shutdown();

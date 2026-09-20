@@ -84,4 +84,29 @@ describe('test/common.js smoke', () => {
     const emitter = new EventEmitter();
     await assert.rejects(common.waitForEvent(emitter, 'never-fires', 1, 50), /did not fire 1 time/);
   });
+
+  it('waitForSubscription resolves when handler fires', async () => {
+    // Mimics the runtime.subscribe(channel, handler) contract: returns an
+    // unsubscribe function and calls `handler(payload)` on publish.
+    const target = {
+      subscribe(_channel, handler) {
+        setImmediate(() => handler({ ok: true }));
+        return () => {};
+      },
+    };
+    const payload = await common.waitForSubscription(target, 'test-channel', 1, 1000);
+    assert.deepEqual(payload, { ok: true });
+  });
+
+  it('waitForSubscription rejects on timeout', async () => {
+    const target = {
+      subscribe() {
+        return () => {};
+      },
+    };
+    await assert.rejects(
+      common.waitForSubscription(target, 'never-publishes', 1, 50),
+      /did not fire 1 time/,
+    );
+  });
 });
