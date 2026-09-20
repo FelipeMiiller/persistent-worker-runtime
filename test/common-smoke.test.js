@@ -67,4 +67,21 @@ describe('test/common.js smoke', () => {
     const sources = common.getBufferSources(buf);
     assert.ok(sources.includes(buf));
   });
+
+  it('waitForEvent resolves when event fires', async () => {
+    const { EventEmitter } = await import('node:events');
+    const emitter = new EventEmitter();
+    const payload = common.waitForEvent(emitter, 'test', 1, 1000);
+
+    setImmediate(() => emitter.emit('test', { hello: 'world' }));
+
+    const result = await payload;
+    assert.deepEqual(result, { hello: 'world' });
+  });
+
+  it('waitForEvent rejects on timeout', async () => {
+    const { EventEmitter } = await import('node:events');
+    const emitter = new EventEmitter();
+    await assert.rejects(common.waitForEvent(emitter, 'never-fires', 1, 50), /did not fire 1 time/);
+  });
 });

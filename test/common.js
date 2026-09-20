@@ -428,3 +428,86 @@ export function expectsError(validator, exact = 1) {
     return true;
   }, exact);
 }
+
+// ─── waitForEvent ─────────────────────────────────────────────────────────────
+//
+// Waits for an event to fire on an EventEmitter (or Node-style .on/.off API).
+// Wraps the listener with `common.mustCall(fn, exact=N)` so the test asserts
+// the event fires EXACTLY N times — catches "fired 0 times", "fired twice",
+// and "fired on the wrong emitter".
+//
+// Replaces the ad-hoc polling pattern:
+//
+//   let count = 0;
+//   runtime.on('worker:recycled', () => { count++; });
+//   await runtime.dispatch({ fn: work });
+//   const deadline = Date.now() + 3000;
+//   while (count === 0 && Date.now() < deadline) await sleep(50);
+//   assert.ok(count === 1);  // passes even if event fires again post-assert
+//
+//   const event = await common.waitForEvent(runtime, 'worker:recycled', 1, 3000);
+//   assert.equal(event.workerId, expected);  // event fires EXACTLY 1x
+//
+// The Promise RESOLVES with the FIRST event payload. Subsequent firings are
+// captured by mustCall and asserted at process.exit.
+//
+// @param {EventEmitter} emitter - any object with .on/.off (Node EventEmitter)
+// @param {string} eventName - event to subscribe to
+// @param {number} exact - expected call count (default 1)
+// @param {number} [timeoutMs=3000] - timeout for resolving the Promise
+// @returns {Promise<unknown>} resolves with the event payload (first fire)
+// @throws {Error} if timeout elapses before event fires
+
+export function waitForEvent(emitter, eventName, exact = 1, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    let fired = false;
+    // Capture the mustCall context for cleanup if the promise rejects. Without
+    // this, a timeout leaves an unfulfilled mustCall(N) registered, and
+    // process.exit complains that the listener was called 0 times.
+    let mustCallContext = null;
+
+    const handler = mustCall((payload) => {
+      if (fired) return; // only resolve once
+      fired = true;
+      clearTimeout(timer);
+      try {
+        emitter.off(eventName, handler);
+      } catch {
+        // Some emitters use removeListener; ignore if .off doesn't exist.
+      }
+      resolve(payload);
+    }, exact);
+
+    timer = setTimeout(() => {
+      if (fired) return;
+      try {
+        emitter.off(eventName, handler);
+      } catch {
+        // ignore
+      }
+      // Remove the mustCall context so a timeout doesn't fail at process.exit.
+      if (mustCallContext && callChecks.includes(mustCallContext)) {
+        callChecks.splice(callChecks.indexOf(mustCallContext), 1);
+      }
+      reject(
+        new Error(
+          `waitForEvent: '${eventName}' did not fire ${exact} time(s) within ${timeoutMs}ms`,
+        ),
+      );
+    }, timeoutMs);
+
+    // mustCall just pushed a context; record it for cleanup.
+    mustCallContext = callChecks[callChecks.length - 1];
+
+    try {
+      emitter.on(eventName, handler);
+    } catch (err) {
+      clearTimeout(timer);
+      if (mustCallContext && callChecks.includes(mustCallContext)) {
+        callChecks.splice(callChecks.indexOf(mustCallContext), 1);
+      }
+      reject(new Error(`waitForEvent: failed to subscribe to '${eventName}': ${err.message}`));
+    }
+  });
+}
