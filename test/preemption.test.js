@@ -11,6 +11,7 @@ import {
   WorkerHandle,
   WorkerRuntime,
 } from '../src/index.js';
+import * as common from './common.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -331,16 +332,10 @@ describe('Hard Preemption - Supervisor Autonomous Pool Healing (T3)', () => {
     });
 
     try {
-      let preemptedEvent = null;
-      let replacedEvent = null;
-
-      runtime.on('worker_preempted', (ev) => {
-        preemptedEvent = ev;
-      });
-
-      runtime.on('worker_replaced', (ev) => {
-        replacedEvent = ev;
-      });
+      // Node-pattern: waitForEvent wraps the listener with mustCall(1) so the
+      // events are asserted to fire EXACTLY once. Replaces ad-hoc polling.
+      const preemptedPromise = common.waitForEvent(runtime, 'worker_preempted', 1, 3000);
+      const replacedPromise = common.waitForEvent(runtime, 'worker_replaced', 1, 3000);
 
       // Dispatch one unyielding runaway task and one normal task in parallel
       const runawayTask = runtime.execute({
@@ -363,11 +358,11 @@ describe('Hard Preemption - Supervisor Autonomous Pool Healing (T3)', () => {
         return true;
       });
 
-      // Wait for preemption and replacement events to arrive
-      const deadline = Date.now() + 3000;
-      while ((!preemptedEvent || !replacedEvent) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
+      // Wait for both events with EXACTLY-once guarantees (mustCall enforces).
+      const [preemptedEvent, replacedEvent] = await Promise.all([
+        preemptedPromise,
+        replacedPromise,
+      ]);
 
       assert.ok(preemptedEvent, 'worker_preempted event was emitted');
       assert.ok(replacedEvent, 'worker_replaced event was emitted');
