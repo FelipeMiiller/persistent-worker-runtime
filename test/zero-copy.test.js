@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { createWorkerRuntime } from '../src/index.js';
+import * as common from './common.js';
 
 describe('Zero-Copy ArrayBuffer Transfer', () => {
   let runtime;
@@ -13,11 +14,25 @@ describe('Zero-Copy ArrayBuffer Transfer', () => {
     if (runtime) await runtime.shutdown();
   });
 
-  it('transfers a single ArrayBuffer to the worker and detaches it on the sender', async () => {
+  // Node-pattern: pre-capture typed-array views BEFORE the transfer. After
+  // the transfer, `buf.byteLength === 0`, but `view.byteLength` throws on a
+  // detached buffer. We assert against `v.buffer.byteLength` (returns 0 per
+  // V8 spec when detached) for each pre-captured view.
+  //
+  // Why this matters: catches regressions where only Uint8Array is detached
+  // but DataView / Int32Array / BigInt64Array is not.
+  it('transfers a single ArrayBuffer to the worker and detaches ALL typed-array views', async () => {
     const buf = new ArrayBuffer(1024);
     const view = new Uint8Array(buf);
     view[0] = 0x42;
     view[1023] = 0xff;
+
+    // Pre-flight: enumerate every typed-array view of the buffer.
+    const viewsBefore = common.getArrayBufferViews(buf);
+    assert.ok(viewsBefore.length > 0, 'should enumerate at least one typed-array view');
+    for (const v of viewsBefore) {
+      assert.equal(v.buffer.byteLength, 1024, 'pre-transfer view should be full');
+    }
 
     const result = await runtime.execute({
       type: 'inspect',
@@ -32,7 +47,18 @@ describe('Zero-Copy ArrayBuffer Transfer', () => {
     assert.equal(result.byteLength, 1024);
     assert.equal(result.first, 0x42);
     assert.equal(result.last, 0xff);
+
+    // Root buffer must be detached.
     assert.equal(buf.byteLength, 0, 'sender buffer must be detached after transfer');
+
+    // Every captured view's underlying ArrayBuffer must be detached.
+    for (const v of viewsBefore) {
+      assert.equal(
+        v.buffer.byteLength,
+        0,
+        `${v.constructor.name}'s ArrayBuffer must be detached after transfer`,
+      );
+    }
   });
 
   it('handles multiple ArrayBuffers in transferList', async () => {
