@@ -31,6 +31,8 @@ export class WorkerRuntime extends EventEmitter {
   #forceKillOnTimeout;
   #killGracePeriodMs;
   #silentTimeoutDefaultWarning;
+  #observeWorkerMemory;
+  #memoryEmitIntervalMs;
   #adaptiveEnabled;
   /**
    * Adaptive concurrency controller (ADR-0014 T7). `null` when the
@@ -87,6 +89,17 @@ export class WorkerRuntime extends EventEmitter {
       throw new RangeError('killGracePeriodMs must be a non-negative number');
     }
 
+    // HARDEN-05 (ADR-0024 B3): opt-in per-worker memory observability. When
+    // true, the runtime emits `worker:memory` events at most once per
+    // worker per `memoryEmitIntervalMs` (default 1000 ms — will be
+    // shared with `workerPollIntervalMs` in T10/Wave 4). Default off =
+    // zero overhead in WorkerHandle.
+    const observeWorkerMemory = options.observeWorkerMemory === true;
+    const memoryEmitIntervalMs =
+      typeof options.memoryEmitIntervalMs === 'number' && options.memoryEmitIntervalMs > 0
+        ? options.memoryEmitIntervalMs
+        : 1000;
+
     // HARDEN-01 (ADR-0024 A1): suppress the once-per-process warning that
     // fires when a TaskHandle is built with `forceKillOnTimeout: true` AND
     // `timeoutMs === 0`. Per-TaskHandle override is still available via the
@@ -116,6 +129,8 @@ export class WorkerRuntime extends EventEmitter {
     this.#forceKillOnTimeout = forceKillOnTimeout;
     this.#killGracePeriodMs = killGracePeriodMs;
     this.#silentTimeoutDefaultWarning = silentTimeoutDefaultWarning;
+    this.#observeWorkerMemory = observeWorkerMemory;
+    this.#memoryEmitIntervalMs = memoryEmitIntervalMs;
     // Set below after `resolveAdaptiveEnabled` resolves; placeholder so
     // the field always has a defined value (matches the other
     // primitive private fields above).
@@ -158,6 +173,9 @@ export class WorkerRuntime extends EventEmitter {
       maxMemoryMb: this.#maxMemoryMb,
       forceKillOnTimeout: this.#forceKillOnTimeout,
       killGracePeriodMs: this.#killGracePeriodMs,
+      // HARDEN-05 (ADR-0024 B3): opt-in memory observability propagation.
+      observeMemory: this.#observeWorkerMemory,
+      memoryEmitIntervalMs: this.#memoryEmitIntervalMs,
     });
 
     // Wire supervisor events to runtime events
@@ -187,6 +205,14 @@ export class WorkerRuntime extends EventEmitter {
     this.#supervisor.on('worker_preempted', (data) => {
       this.emit('worker_preempted', data);
       this.emit('worker:preempted', data);
+    });
+
+    // HARDEN-05 (ADR-0024 B3): forward opt-in memory events from the
+    // supervisor to the public `worker:memory` event. When
+    // `observeWorkerMemory` is false (default), WorkerHandle never
+    // emits `memory`, so this listener is dead overhead — zero work.
+    this.#supervisor.on('worker_memory', (data) => {
+      this.emit('worker:memory', data);
     });
 
     this.#supervisor.on('task_preempted', (data) => {

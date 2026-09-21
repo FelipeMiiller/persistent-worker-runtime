@@ -30,6 +30,14 @@ export class WorkerHandle extends EventEmitter {
   // supervisor.js), so this stays 0 for live workers. The field is wired
   // here so a future in-place recycler can increment without an API break.
   #recycledCount = 0;
+  // HARDEN-05 (ADR-0024 B3): opt-in `worker:memory` event emission. When
+  // `observeMemory` is true the worker emits `memory` after each task
+  // settlement, rate-limited to ≤ 1 emission per `memoryEmitIntervalMs`.
+  // Default off — zero overhead when false (we never set the timer or
+  // touch the rate-limit field).
+  #observeMemory = false;
+  #memoryEmitIntervalMs = 1000;
+  #lastMemoryEmitAt = 0;
   #watchdogTimer = null;
   #graceTimer = null;
   #isPreempted = false;
@@ -45,6 +53,17 @@ export class WorkerHandle extends EventEmitter {
     this.workerScript = options.workerScript || DEFAULT_WORKER_SCRIPT;
     this.handlerPath = options.handlerPath || null;
     this.resourceLimits = options.resourceLimits || null;
+    // HARDEN-05 (ADR-0024 B3): opt-in memory observability. When true,
+    // this worker emits a `memory` event after each task settlement,
+    // rate-limited via `#memoryEmitIntervalMs`. The option is read once
+    // at spawn — flipping it later has no effect (intentional: the
+    // overhead cost would be paying for the listener wiring we'd never
+    // get back).
+    this.#observeMemory = Boolean(options.observeMemory);
+    this.#memoryEmitIntervalMs =
+      typeof options.memoryEmitIntervalMs === 'number' && options.memoryEmitIntervalMs > 0
+        ? options.memoryEmitIntervalMs
+        : 1000;
 
     this.#readyPromise = new Promise((resolve, reject) => {
       this.#readyResolver = { resolve, reject };
@@ -197,6 +216,22 @@ export class WorkerHandle extends EventEmitter {
         // HARDEN-03 (ADR-0024 B1): record wall-clock time of last task
         // settlement so `snapshot().lastTaskAt` reflects fresh data.
         this.#lastTaskAt = Date.now();
+        // HARDEN-05 (ADR-0024 B3): opt-in memory observability. Rate-limited
+        // to ≤ 1 emission per `memoryEmitIntervalMs` per worker. When off
+        // (default), the `if` short-circuits — zero overhead. During
+        // shutdown, `this.#status` is `terminating` so we also skip — the
+        // spec forbids emission during shutdown.
+        if (this.#observeMemory && this.#status === 'idle') {
+          const now = Date.now();
+          if (now - this.#lastMemoryEmitAt >= this.#memoryEmitIntervalMs) {
+            this.#lastMemoryEmitAt = now;
+            this.emit('memory', {
+              workerId: this.id,
+              memoryUsageBytes: this.#lastMemoryUsageBytes,
+              atMs: now,
+            });
+          }
+        }
 
         if (message.success) {
           task.resolve(message.result);

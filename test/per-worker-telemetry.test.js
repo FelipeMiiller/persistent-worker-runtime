@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createWorkerRuntime, Supervisor, WorkerHandle } from '../src/index.js';
+import * as common from './common.js';
 
 // HARDEN-03 (ADR-0024 B1): `runtime.getWorkers()` returns an array of
 // `WorkerSnapshot` objects, sync, zero-IPC. Dashboards/alerts use it to
@@ -307,5 +308,130 @@ describe('WorkerRuntime — runtime.stats.workers aggregate (HARDEN-04)', () => 
     } finally {
       await runtime.shutdown();
     }
+  });
+});
+
+describe('WorkerRuntime — worker:memory event opt-in (HARDEN-05)', () => {
+  it('emits ZERO worker:memory events when observeWorkerMemory is false (default)', async () => {
+    const runtime = await createWorkerRuntime({ workers: 2 });
+    try {
+      // Trap any worker:memory events — must never fire.
+      const memoryHandler = common.mustNotCall(
+        'worker:memory fired while observeWorkerMemory was false',
+      );
+      runtime.on('worker:memory', memoryHandler);
+
+      // Dispatch 100 tasks. Without the opt-in, no memory events fire.
+      await Promise.all(
+        Array.from({ length: 100 }, (_, i) => runtime.execute({ fn: (p) => p + 1, payload: i })),
+      );
+
+      // Give async emissions a moment to drain.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // mustNotCall asserts at process.exit — no explicit assert here.
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('emits worker:memory events when observeWorkerMemory is true', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 2,
+      observeWorkerMemory: true,
+    });
+    try {
+      const events = [];
+      runtime.on('worker:memory', (data) => {
+        events.push(data);
+      });
+
+      // Dispatch 50 tasks. With opt-in and default 1s rate limit, we
+      // expect at least 1 event (and at most ~5 — depends on test
+      // scheduler). We assert the contract: events carry the right
+      // shape and the workerId matches one of the workers.
+      await Promise.all(
+        Array.from({ length: 50 }, (_, i) => runtime.execute({ fn: (p) => p + 1, payload: i })),
+      );
+
+      // Drain async dispatch loop.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      assert.ok(
+        events.length > 0,
+        `expected ≥1 worker:memory event after 50 tasks, got ${events.length}`,
+      );
+
+      // Validate payload shape on every event.
+      for (const evt of events) {
+        assert.equal(typeof evt.workerId, 'string');
+        assert.ok(evt.workerId.length > 0);
+        assert.equal(typeof evt.memoryUsageBytes, 'number');
+        assert.ok(evt.memoryUsageBytes >= 0);
+        assert.equal(typeof evt.atMs, 'number');
+        assert.ok(evt.atMs > 0, 'atMs is a real timestamp');
+      }
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('rate-limits worker:memory emissions to ≤ 1 per memoryEmitIntervalMs per worker', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 1,
+      observeWorkerMemory: true,
+      memoryEmitIntervalMs: 5000, // 5 s — far longer than the test wall time
+    });
+    try {
+      const events = [];
+      runtime.on('worker:memory', (data) => {
+        events.push(data);
+      });
+
+      // Dispatch 100 tasks as fast as possible.
+      await Promise.all(
+        Array.from({ length: 100 }, (_, i) => runtime.execute({ fn: (p) => p + 1, payload: i })),
+      );
+
+      // Allow async dispatch loop to drain.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // With a 5 s rate limit, even though 100 tasks completed, at most
+      // 1 event should have fired (the first one after the worker's
+      // first task). Subsequent settlements within the 5 s window are
+      // suppressed.
+      assert.ok(events.length <= 1, `expected ≤1 event with 5s rate limit, got ${events.length}`);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('does NOT emit worker:memory events during shutdown', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 1,
+      observeWorkerMemory: true,
+    });
+    const events = [];
+    runtime.on('worker:memory', (data) => {
+      events.push(data);
+    });
+
+    // One task to establish the worker.
+    await runtime.execute({ fn: () => 42 });
+    const eventsAfterOneTask = events.length;
+
+    // Begin shutdown. After this point, no worker:memory event must
+    // fire (per spec AC5: "WHEN the runtime is shutting down, no
+    // events SHALL be emitted").
+    const shutdownPromise = runtime.shutdown();
+
+    // Drain microtasks.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(
+      events.length,
+      eventsAfterOneTask,
+      'no new worker:memory events after shutdown began',
+    );
+    await shutdownPromise;
   });
 });

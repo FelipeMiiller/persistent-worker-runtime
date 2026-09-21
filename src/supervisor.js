@@ -45,6 +45,14 @@ export class Supervisor extends EventEmitter {
       workerScript: options.workerScript,
       handlerPath: options.handlerPath,
       resourceLimits: options.resourceLimits,
+      // HARDEN-05 (ADR-0024 B3): propagate opt-in memory observability.
+      // When false (default), no overhead — WorkerHandle skips the emit
+      // branch entirely.
+      observeMemory: options.observeMemory === true,
+      memoryEmitIntervalMs:
+        typeof options.memoryEmitIntervalMs === 'number' && options.memoryEmitIntervalMs > 0
+          ? options.memoryEmitIntervalMs
+          : 1000,
     };
   }
 
@@ -334,6 +342,16 @@ export class Supervisor extends EventEmitter {
     worker.on('task_completed', (data) => {
       this.#checkRecycling(data.worker);
       this.emit('task_completed', data);
+    });
+
+    // HARDEN-05 (ADR-0024 B3): forward opt-in `memory` events from the
+    // worker handle to the supervisor (and through it, the runtime).
+    // WorkerHandle already rate-limits emission per its own config; the
+    // supervisor is a passive re-emit point. When `observeMemory` is
+    // false (default), this listener never fires — the WorkerHandle
+    // short-circuits the emit branch.
+    worker.on('memory', (data) => {
+      this.emit('worker_memory', data);
     });
 
     worker.on('task_failed', (data) => {
