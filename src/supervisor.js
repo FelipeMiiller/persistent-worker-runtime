@@ -44,6 +44,17 @@ export class Supervisor extends EventEmitter {
   // recycle every poll tick.
   #minRecycleIntervalMs = 30000;
   #lastRecycledAt = new Map(); // workerId -> ms timestamp
+  // HARDEN-08 (ADR-0024 C3): opt-out from recycling on
+  // `maxTasksPerWorker` exhaustion. When `false`, the worker exceeding
+  // the task limit emits `worker_tasks:exhausted` warning event instead
+  // of being recycled. The user keeps full control — they decide
+  // externally when (if ever) to drain + recycle.
+  // Default `true` preserves the pre-HARDEN-08 behavior.
+  // `#tasksExhaustedNotified` is a per-worker idempotency guard so the
+  // warning fires at most once per worker exhaustion cycle (avoids
+  // spamming the listener on every subsequent `task_completed`).
+  #recycleOnTasksExhausted = true;
+  #tasksExhaustedNotified = new Set(); // workerId (one-shot per worker)
   // Hard-coded 1000 ms for T6; T10 (HARDEN-10 / Wave 4) exposes this as
   // `workerPollIntervalMs` and decouples it from `timeoutMs`.
   #accumulationPollIntervalMs = 1000;
@@ -114,6 +125,18 @@ export class Supervisor extends EventEmitter {
     } else {
       this.#minRecycleIntervalMs = options.minRecycleIntervalMs;
     }
+    // HARDEN-08 (ADR-0024 C3): opt-out from recycling on tasks-exhausted.
+    // `true` (default) preserves the pre-HARDEN-08 behavior. `false`
+    // emits a one-time `worker_tasks:exhausted` warning event per worker
+    // instead of recycling — the user controls recycling externally.
+    if (options.recycleOnTasksExhausted !== undefined) {
+      if (typeof options.recycleOnTasksExhausted !== 'boolean') {
+        throw new TypeError(
+          `Supervisor: options.recycleOnTasksExhausted must be a boolean, got ${typeof options.recycleOnTasksExhausted}`,
+        );
+      }
+      this.#recycleOnTasksExhausted = options.recycleOnTasksExhausted;
+    }
     this.#workerOptions = {
       workerScript: options.workerScript,
       handlerPath: options.handlerPath,
@@ -150,6 +173,14 @@ export class Supervisor extends EventEmitter {
   // the SAME worker.
   get minRecycleIntervalMs() {
     return this.#minRecycleIntervalMs;
+  }
+
+  // HARDEN-08 (ADR-0024 C3): exposes the tasks-exhausted recycle opt.
+  // `true` (default) recycles on `maxTasksPerWorker` (pre-HARDEN-08
+  // behavior). `false` emits `worker_tasks:exhausted` warning event
+  // instead — user controls recycling externally.
+  get recycleOnTasksExhausted() {
+    return this.#recycleOnTasksExhausted;
   }
 
   /**
@@ -373,6 +404,25 @@ export class Supervisor extends EventEmitter {
 
     if (!reason) return;
 
+    // HARDEN-08 (ADR-0024 C3): opt-out from recycling on tasks-exhausted.
+    // When the user set `recycleOnTasksExhausted: false`, the supervisor
+    // emits a one-time `worker_tasks:exhausted` warning event per worker
+    // and skips the recycle decision. Memory and accumulation reasons
+    // are NOT affected — they still trigger recycling because they're
+    // crash-class signals (OOM, leak), not "warmed-up" thresholds like
+    // task count. The opt-out only applies to the tasks-exhausted path.
+    if (reason === 'tasks_exceeded' && !this.#recycleOnTasksExhausted) {
+      if (!this.#tasksExhaustedNotified.has(worker.id)) {
+        this.#tasksExhaustedNotified.add(worker.id);
+        this.emit('worker_tasks:exhausted', {
+          workerId: worker.id,
+          tasksCompleted: worker.tasksCompleted,
+          maxTasksPerWorker: this.#maxTasksPerWorker,
+        });
+      }
+      return;
+    }
+
     // HARDEN-07 (ADR-0024 C2): throttle when the same worker was
     // recycled less than `minRecycleIntervalMs` ago. The skipped event
     // payload carries `lastRecycledAt` so dashboards can render the
@@ -469,6 +519,10 @@ export class Supervisor extends EventEmitter {
       // reasoning. A recycled-out worker is gone; its hysteresis state
       // must not survive into a restart that reuses the worker id.
       this.#lastRecycledAt.delete(worker.id);
+      // HARDEN-08 (ADR-0024 C3): drop the tasks-exhausted notification
+      // idempotency flag so a replacement worker (same id reused after
+      // recycle) gets a fresh warning when IT exhausts.
+      this.#tasksExhaustedNotified.delete(worker.id);
       this.emit('worker_exit', { workerId: worker.id, exitCode, prevStatus, isPreempted });
 
       // If worker was preempted and we are not shutting down, immediately spawn a replacement
@@ -567,6 +621,9 @@ export class Supervisor extends EventEmitter {
     // a post-shutdown restart must NOT inherit stale `lastRecycledAt`
     // entries from the previous pool.
     this.#lastRecycledAt.clear();
+    // HARDEN-08 (ADR-0024 C3): same reasoning for the tasks-exhausted
+    // notification set — a post-shutdown restart starts fresh.
+    this.#tasksExhaustedNotified.clear();
     const terminations = Array.from(this.#workers.values()).map((w) => w.terminate());
     await Promise.all(terminations);
     this.#workers.clear();

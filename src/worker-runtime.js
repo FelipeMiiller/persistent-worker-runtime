@@ -41,6 +41,10 @@ export class WorkerRuntime extends EventEmitter {
   // value passed to the supervisor; exposed via `runtime.minRecycleIntervalMs`.
   // Runtime default is `0` (back-compat); supervisor default is `30000`.
   #minRecycleIntervalMs = 0;
+  // HARDEN-08 (ADR-0024 C3): tasks-exhausted recycle opt. `true`
+  // (default) recycles on `maxTasksPerWorker`; `false` emits a one-time
+  // warning instead.
+  #recycleOnTasksExhausted = true;
   #adaptiveEnabled;
   /**
    * Adaptive concurrency controller (ADR-0014 T7). `null` when the
@@ -165,6 +169,20 @@ export class WorkerRuntime extends EventEmitter {
     }
     this.#minRecycleIntervalMs = minRecycleIntervalMs;
 
+    // HARDEN-08 (ADR-0024 C3): opt-out from recycling on tasks-exhausted.
+    // `true` (default) preserves the pre-HARDEN-08 behavior; `false`
+    // emits a one-time `worker:tasks:exhausted` warning per worker
+    // instead of recycling. Memory and accumulation reasons are NOT
+    // affected — only tasks-exhausted respects this opt-out.
+    if (options.recycleOnTasksExhausted !== undefined) {
+      if (typeof options.recycleOnTasksExhausted !== 'boolean') {
+        throw new TypeError(
+          `createWorkerRuntime: options.recycleOnTasksExhausted must be a boolean, got ${typeof options.recycleOnTasksExhausted}`,
+        );
+      }
+      this.#recycleOnTasksExhausted = options.recycleOnTasksExhausted;
+    }
+
     // Validate resourceLimits before any worker spawn. See ADR-0019 §2.
     if (options.resourceLimits !== undefined) {
       const rl = options.resourceLimits;
@@ -243,6 +261,9 @@ export class WorkerRuntime extends EventEmitter {
       // (runtime default) disables the throttle; users opt in by
       // passing `minRecycleIntervalMs: 30000` or similar.
       minRecycleIntervalMs: this.#minRecycleIntervalMs,
+      // HARDEN-08 (ADR-0024 C3): tasks-exhausted recycle opt. Defaults
+      // to `true` (pre-HARDEN-08 behavior).
+      recycleOnTasksExhausted: this.#recycleOnTasksExhausted,
     });
 
     // Wire supervisor events to runtime events
@@ -271,6 +292,15 @@ export class WorkerRuntime extends EventEmitter {
     this.#supervisor.on('worker_recycle:skipped', (data) => {
       this.emit('worker_recycle:skipped', data);
       this.emit('worker:recycle:skipped', data);
+    });
+
+    // HARDEN-08 (ADR-0024 C3): forward the tasks-exhausted warning when
+    // `recycleOnTasksExhausted: false`. Emitted at most once per worker
+    // (supervisor-side idempotency) so the listener isn't spammed on
+    // every subsequent `task_completed` after the threshold is crossed.
+    this.#supervisor.on('worker_tasks:exhausted', (data) => {
+      this.emit('worker_tasks:exhausted', data);
+      this.emit('worker:tasks:exhausted', data);
     });
 
     this.#supervisor.on('worker_recycled', (data) => {
@@ -579,6 +609,12 @@ export class WorkerRuntime extends EventEmitter {
   // window (ms). `0` (runtime default) disables the throttle.
   get minRecycleIntervalMs() {
     return this.#minRecycleIntervalMs;
+  }
+
+  // HARDEN-08 (ADR-0024 C3): exposes the tasks-exhausted recycle opt.
+  // `true` (default) recycles on `maxTasksPerWorker`.
+  get recycleOnTasksExhausted() {
+    return this.#recycleOnTasksExhausted;
   }
 
   get forceKillOnTimeout() {
