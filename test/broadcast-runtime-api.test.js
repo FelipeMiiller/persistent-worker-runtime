@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { createWorkerRuntime, WorkerRuntimeError } from '../src/index.js';
+import * as common from './common.js';
 
 describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => {
   describe('runtime.broadcast()', () => {
@@ -130,7 +131,10 @@ describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => 
       await Promise.race([
         receivedPromise,
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('did not receive in 2s')), 2000),
+          setTimeout(
+            () => reject(new Error(`did not receive in ${common.platformTimeout(2000)}ms`)),
+            common.platformTimeout(2000),
+          ),
         ),
       ]);
       assert.deepEqual(received, { hi: 'from-worker' });
@@ -206,7 +210,12 @@ describe('WorkerRuntime.broadcast() and subscribe() — main-thread API', () => 
 
       await Promise.race([
         allReceived,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('not received in 2s')), 2000)),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`not received in ${common.platformTimeout(2000)}ms`)),
+            common.platformTimeout(2000),
+          ),
+        ),
       ]);
 
       assert.equal(seen.length, 2);

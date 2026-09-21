@@ -25,6 +25,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, before, describe, it } from 'node:test';
 import { createWorkerRuntime } from '../src/index.js';
+import * as common from './common.js';
 
 const ORIGINAL_ENV = Object.hasOwn(process.env, 'WORKER_CONCURRENCY')
   ? process.env.WORKER_CONCURRENCY
@@ -174,14 +175,14 @@ describe('T9 P5 — runtime.stats.adaptive live-mirrors controller telemetry', (
       // transition from idle (~0.05 ELU) to busy (~0.9 ELU) — at α=0.3
       // the smoothed ELU converges within 3-4 ticks once the raw sample
       // sits at ~0.9. Earliest shrink fire lands ~900ms into Phase 2,
-      // plus retire drain (~100ms). 2500ms gives clear headroom against
-      // Windows Node 22.x CI runners where the setImmediate chain is
-      // ~20-30% slower than Linux/macOS (Windows GitHub Actions VM
-      // has higher event-loop overhead, raw ELU samples hover closer
-      // to 0.8 than 0.9, so the EWMA needs more ticks to cross the
-      // 0.7 shrink threshold). 1500ms was right at the boundary on
-      // Windows Node 22.x and produced a one-off flake.
-      await new Promise((r) => setTimeout(r, 2500));
+      // plus retire drain (~100ms). The previous 2500ms value (bumped
+      // from 1500ms in daedaf6 to dodge a Windows Node 22.x CI flake)
+      // is now derived from common.platformTimeout(1500) — fast CI
+      // gets the right 1500ms, slow CI gets the multiplier automatically.
+      // Windows Node 22.x note: raw ELU samples hover closer to 0.8 than
+      // 0.9 there, so the EWMA needs more ticks to cross the 0.7 shrink
+      // threshold — platformTimeout handles this.
+      await new Promise((r) => setTimeout(r, common.platformTimeout(1500)));
     } finally {
       busyLoopActive = false;
     }

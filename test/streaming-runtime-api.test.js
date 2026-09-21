@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 import { StreamConfigError, WorkerRuntimeError } from '../src/errors.js';
 import { createWorkerRuntime } from '../src/index.js';
+import * as common from './common.js';
 
 let runtime;
 afterEach(async () => {
@@ -322,7 +323,11 @@ describe('ADR-0012 — runtime.stream() API (T4)', () => {
       const result = await Promise.race([
         parked,
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('parked next() never settled')), 2000),
+          setTimeout(
+            () =>
+              reject(new Error(`parked next() never settled in ${common.platformTimeout(2000)}ms`)),
+            common.platformTimeout(2000),
+          ),
         ),
       ]);
       await shutdownP;
