@@ -84,3 +84,7 @@ works again (consistent with current `#isShuttingDown` reset in
 - Spec impact: none — fix is to existing behavior
 - Backward compat: if any consumer depends on double-start
   (unlikely), they need to handle the new throw/return.
+- **Status: ✅ FIXED** in the bug-hunt commit. Added `#isStarted`
+  flag + early-return guard in `start()`. Reset in `shutdown()` so
+  post-shutdown restart still works. Regression test added in
+  `test/supervisor-units.test.js` — passes after fix.
