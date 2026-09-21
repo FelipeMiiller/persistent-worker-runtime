@@ -581,3 +581,58 @@ export function waitForSubscription(target, channelName, exact = 1, timeoutMs = 
     const unsub = target.subscribe(channelName, handler);
   });
 }
+
+// ─── awaitWarning ─────────────────────────────────────────────────────────────
+//
+// Async helper for per-test process warning assertions. Subscribes to
+// `process.on('warning')`, asserts the named warning with the expected
+// message/code, then auto-unsubscribes.
+//
+// Distinct from `expectWarning` (which uses mustCall + fires at
+// process.exit). `awaitWarning` resolves during the test body, so it's
+// the right choice when a SINGLE warning is expected in a SINGLE test.
+//
+// Usage:
+//
+//   let fired = null;
+//   process.on('warning', (w) => { fired = w; });
+//   try {
+//     createWorkerRuntime({});  // emits the warning asynchronously
+//     await common.awaitWarning(
+//       'PersistentWorkerRuntimeDefaultSizing',
+//       /started with default workers=1/,
+//       1000,
+//     );
+//     // do more assertions on `fired`...
+//   } finally {
+//     process.off('warning', trap);
+//   }
+//
+// @param {string} name - expected warning.name
+// @param {string|RegExp} [expectedMessage] - optional message matcher (substring or regex)
+// @param {number} [timeoutMs=3000]
+// @returns {Promise<Warning>} resolves with the matching warning
+
+export function awaitWarning(name, expectedMessage, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    const handler = (warning) => {
+      if (warning.name !== name) return;
+      clearTimeout(timer);
+      process.off('warning', handler);
+      if (expectedMessage !== undefined) {
+        if (typeof expectedMessage === 'string') {
+          assert.strictEqual(warning.message, expectedMessage);
+        } else {
+          assert.match(warning.message, expectedMessage);
+        }
+      }
+      resolve(warning);
+    };
+    process.on('warning', handler);
+    timer = setTimeout(() => {
+      process.off('warning', handler);
+      reject(new Error(`awaitWarning: '${name}' did not fire within ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+}

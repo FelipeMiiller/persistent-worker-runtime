@@ -109,4 +109,16 @@ describe('test/common.js smoke', () => {
       /did not fire 1 time/,
     );
   });
+
+  it('awaitWarning resolves when matching warning fires', async () => {
+    const promise = common.awaitWarning('MyTestWarning', /hello \d+/, 1000);
+    setImmediate(() => process.emitWarning('hello 42', 'MyTestWarning'));
+    const warning = await promise;
+    assert.equal(warning.name, 'MyTestWarning');
+    assert.match(warning.message, /hello 42/);
+  });
+
+  it('awaitWarning rejects on timeout', async () => {
+    await assert.rejects(common.awaitWarning('NeverFires', /.*/, 50), /did not fire within/);
+  });
 });

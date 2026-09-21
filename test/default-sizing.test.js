@@ -10,46 +10,12 @@ import assert from 'node:assert/strict';
 import { availableParallelism } from 'node:os';
 import { afterEach, describe, it } from 'node:test';
 import { createWorkerRuntime } from '../src/index.js';
+import * as common from './common.js';
 
 describe('ADR-0019: Default worker pool sizing and resourceLimits validation', () => {
   let runtime;
 
-  // Capture every Node process warning emitted during a test scope so we can
-  // assert on the optional PersistentWorkerRuntimeDefaultSizing code. We
-  // monkey-patch `process.emitWarning` rather than relying on the
-  // `'warning'` event because the Node test runner installs its own internal
-  // warning handlers, and emitted warnings can race with listener attachment.
-  let warnings;
-  let originalEmitWarning;
-
-  function captureWarnings() {
-    warnings = [];
-    originalEmitWarning = process.emitWarning;
-    process.emitWarning = function patchedEmitWarning(warning, ...args) {
-      const opts = args[0];
-      const code = typeof opts === 'string' ? opts : opts?.code;
-      warnings.push({ message: String(warning), code });
-      // Intentionally do NOT forward to the original emitWarning — this keeps
-      // the test output clean and prevents the Node test runner from
-      // converting the warning into a test-report diagnostic.
-    };
-    return () => {
-      process.emitWarning = originalEmitWarning;
-      originalEmitWarning = null;
-      warnings = null;
-    };
-  }
-
-  function sizingWarnings() {
-    return warnings.filter((w) => w.code === 'PersistentWorkerRuntimeDefaultSizing');
-  }
-
   afterEach(async () => {
-    if (originalEmitWarning) {
-      process.emitWarning = originalEmitWarning;
-      originalEmitWarning = null;
-      warnings = null;
-    }
     if (runtime) {
       await runtime.shutdown();
       runtime = null;
@@ -65,20 +31,22 @@ describe('ADR-0019: Default worker pool sizing and resourceLimits validation', (
   // 2) ADR §Verification — Explicit `workers: N` produces N workers and
   //    suppresses the default-sizing warning regardless of host size.
   it('respects an explicit workers:N and emits no default-sizing warning', async () => {
-    const stop = captureWarnings();
+    let fired = null;
+    const trap = (warning) => {
+      fired = warning;
+    };
+    process.on('warning', trap);
     try {
       runtime = await createWorkerRuntime({ workers: 3 });
       assert.equal(runtime.stats.totalWorkers, 3);
-      // Let any pending warning event drain through the Event Loop.
-      await new Promise((r) => setImmediate(r));
-      assert.equal(
-        sizingWarnings().length,
-        0,
-        'explicit workers:N must suppress the PersistentWorkerRuntimeDefaultSizing warning',
-      );
     } finally {
-      stop();
+      process.off('warning', trap);
     }
+    assert.equal(
+      fired,
+      null,
+      `explicit workers:N must suppress the PersistentWorkerRuntimeDefaultSizing warning, but got: ${fired?.name ?? 'unknown'}`,
+    );
   });
 
   // 3) ADR §Verification — On a host with >4 cores, default sizing emits the
@@ -88,19 +56,18 @@ describe('ADR-0019: Default worker pool sizing and resourceLimits validation', (
       // The other branch is exercised on this run; nothing to assert here.
       return;
     }
-    const stop = captureWarnings();
-    try {
-      runtime = await createWorkerRuntime({});
-      assert.equal(runtime.stats.totalWorkers, 1);
-      await new Promise((r) => setImmediate(r));
-      const found = sizingWarnings();
-      assert.equal(found.length, 1, 'expected exactly one sizing warning');
-      assert.match(found[0].message, /workers=1/);
-      assert.match(found[0].message, /core host/);
-      assert.match(found[0].message, /createWorkerRuntime\(\{ workers: N \}\)/);
-    } finally {
-      stop();
-    }
+    // Set up the warning promise BEFORE createWorkerRuntime so we don't
+    // miss the asynchronous fire. awaitWarning auto-unsubscribes after
+    // matching (or timeout).
+    const warningPromise = common.awaitWarning(
+      'PersistentWorkerRuntimeDefaultSizing',
+      /started with default workers=1 on a \d+-core host/,
+      3000,
+    );
+    runtime = await createWorkerRuntime({});
+    const warning = await warningPromise;
+    assert.equal(warning.name, 'PersistentWorkerRuntimeDefaultSizing');
+    assert.equal(runtime.stats.totalWorkers, 1);
   });
 
   // 4) ADR §Verification — On a host with ≤4 cores, default sizing emits
@@ -112,19 +79,22 @@ describe('ADR-0019: Default worker pool sizing and resourceLimits validation', (
       // Cannot simulate a smaller host without DI/mocking hooks; skip on big boxes.
       return;
     }
-    const stop = captureWarnings();
+    let fired = null;
+    const trap = (warning) => {
+      fired = warning;
+    };
+    process.on('warning', trap);
     try {
       runtime = await createWorkerRuntime({});
       assert.equal(runtime.stats.totalWorkers, 1);
-      await new Promise((r) => setImmediate(r));
-      assert.equal(
-        sizingWarnings().length,
-        0,
-        'small hosts must not be nagged with the sizing warning',
-      );
     } finally {
-      stop();
+      process.off('warning', trap);
     }
+    assert.equal(
+      fired,
+      null,
+      `small hosts must not be nagged with the sizing warning, but got: ${fired?.name ?? 'unknown'}`,
+    );
   });
 
   // 5) ADR §2 — resourceLimits must be an object or undefined.
