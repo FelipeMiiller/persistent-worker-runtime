@@ -105,6 +105,7 @@ export function createPauseController() {
  * @param {Object}   ctx.context           The execution context exposed to user code
  * @param {Object}   [ctx.signal]          An `AbortSignal`; when aborted, calls `.return()` on the iterator
  * @param {Object}   [ctx.pauseController] Pause controller (createPauseController()); awaited between yields
+ * @param {Object}   [ctx.__modules]       HARDEN-02 (ADR-0024 A2) per-task `node:*` dependency map; passed as 4th arg to the streaming fn
  * @returns {Promise<void>}                Resolves when the stream has been fully drained or aborted
  */
 export async function runStream({
@@ -116,10 +117,16 @@ export async function runStream({
   context,
   signal,
   pauseController,
+  __modules,
 }) {
   let gen;
   try {
-    gen = fn(payload, localStorage, context);
+    // HARDEN-02 (ADR-0024 A2): streaming fns receive the per-task `node:*`
+    // dependency map as the 4th argument so `net.createConnection(...)` is
+    // directly accessible inside the generator body without dynamic-import
+    // boilerplate. Existing generators (3 args) keep working — `__modules`
+    // defaults to an empty object.
+    gen = fn(payload, localStorage, context, __modules ?? {});
   } catch (err) {
     postError(parentPort, taskId, err);
     return;

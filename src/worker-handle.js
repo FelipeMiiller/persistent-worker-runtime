@@ -249,6 +249,11 @@ export class WorkerHandle extends EventEmitter {
       type: task.type,
       payload: task.payload,
       fnCode: task.fnCode || null,
+      // HARDEN-02 (ADR-0024 A2): `node:*` specifiers the worker should
+      // pre-resolve and inject as bare-name closure bindings so the fn
+      // can call `net.createConnection(...)` directly. Empty array is
+      // safe — the worker falls back to user code's own dynamic imports.
+      fnDeps: Array.isArray(task.fnDeps) ? task.fnDeps.slice() : [],
     };
 
     if (task.transferList && task.transferList.length > 0) {
@@ -277,7 +282,7 @@ export class WorkerHandle extends EventEmitter {
    * @param {(reason: any) => void} opts.onAbort
    * @returns {void}
    */
-  executeStreamTask({ taskId, fnCode, payload, onChunk, onEnd, onError, onAbort }) {
+  executeStreamTask({ taskId, fnCode, fnDeps, payload, onChunk, onEnd, onError, onAbort }) {
     if (!this.isIdle) {
       throw new WorkerRuntimeError(`Worker ${this.id} is busy with status: ${this.#status}`);
     }
@@ -293,6 +298,10 @@ export class WorkerHandle extends EventEmitter {
       type: 'stream',
       payload,
       fnCode,
+      // HARDEN-02 (ADR-0024 A2): same manifest as the regular path. Empty
+      // array = no `node:*` injection; the streaming fn uses dynamic import
+      // for user-installed deps or bare-name refs as before.
+      fnDeps: Array.isArray(fnDeps) ? fnDeps.slice() : [],
     });
   }
 

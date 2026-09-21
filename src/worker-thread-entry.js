@@ -61,7 +61,7 @@ function buildContext() {
  * Executes a single task inside the worker thread.
  */
 async function processTask(message) {
-  const { taskId, type, payload, fnCode } = message;
+  const { taskId, type, payload, fnCode, fnDeps } = message;
 
   try {
     let result;
@@ -81,15 +81,33 @@ async function processTask(message) {
     } else if (type === '__ping__') {
       result = 'pong';
     } else if (fnCode) {
-      // 2. Dynamic serialized function execution.
-      // The function receives (payload, state, context) so existing fnCode
-      // that uses only payload or (payload, state) continues to work.
-      const fn = new Function(
-        'payload',
-        'state',
-        'context',
-        `return (${fnCode})(payload, state, context);`,
-      );
+      // 2. Dynamic serialized function execution with HARDEN-02 (ADR-0024 A2)
+      // `node:*` dependency injection.
+      //
+      // The fn receives (payload, state, context) so existing fnCode that
+      // uses only payload or (payload, state) continues to work. We also
+      // build a per-task `__fnDeps` object from the manifest (e.g.
+      // `{ 'node:net': <net module> }`) and inject each module as a
+      // bare-name closure variable BEFORE the user code, so users can call
+      // `net.createConnection(...)` directly without `await import(...)`
+      // boilerplate. Fns that reference a module NOT in the manifest fall
+      // back to their own `await import(...)` (preserves A2-from-before for
+      // user-installed deps — ADR-0005 zero external deps applies to the
+      // runtime, not to user code).
+      const modules = {};
+      for (const name of fnDeps || []) {
+        // `import('node:net')` is idempotent in Node.js — repeated calls
+        // return the same module namespace instance from the loader cache.
+        modules[name] = await import(name);
+      }
+      const captureLines = Object.keys(modules)
+        .map((name) => {
+          const bare = name.replace(/^node:/, '');
+          return `const ${bare} = __modules[${JSON.stringify(name)}];`;
+        })
+        .join('\n');
+      const wrappedSource = `${captureLines}\nreturn (${fnCode})(payload, state, context);`;
+      const fn = new Function('payload', 'state', 'context', '__modules', wrappedSource);
 
       // 2a. Streaming path — generator function (async or sync).
       // Detected via the source string (`new Function(...)` strips the
@@ -112,6 +130,9 @@ async function processTask(message) {
             context,
             signal: ac.signal,
             pauseController,
+            // HARDEN-02 (ADR-0024 A2): pass per-task `node:*` deps so
+            // streaming generators can call bare-name `net`, `crypto`, etc.
+            __modules: modules,
           });
         } finally {
           activeStreams.delete(taskId);
@@ -123,7 +144,9 @@ async function processTask(message) {
       }
 
       // 2b. Regular (async) function path — single result back to main.
-      result = await fn(payload, localState, context);
+      // `modules` is the per-task `node:*` dependency map built above;
+      // empty object when the fn has no `node:*` references.
+      result = await fn(payload, localState, context, modules);
     } else if (typeof customHandler === 'function') {
       // 3. User-defined module handler (object signature includes context)
       result = await customHandler({ type, payload, state: localState, context });

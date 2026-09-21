@@ -4,6 +4,7 @@ import { availableParallelism } from 'node:os';
 import { createAdaptiveController } from './adaptive-controller.js';
 import { ChannelRegistry } from './broadcast-channel.js';
 import { StreamConfigError, WorkerRuntimeError } from './errors.js';
+import { scanFnDeps } from './fn-deps-scanner.js';
 import { isGeneratorFunction } from './stream-runner.js';
 import { Stream } from './streaming.js';
 import { Supervisor } from './supervisor.js';
@@ -519,6 +520,14 @@ export class WorkerRuntime extends EventEmitter {
     if (taskOptions.silentTimeoutDefaultWarning === undefined) {
       taskOptions.silentTimeoutDefaultWarning = this.#silentTimeoutDefaultWarning;
     }
+    // HARDEN-02 (ADR-0024 A2): scan the serialized fn source for `node:*`
+    // references so the worker can pre-resolve them and inject as bare-name
+    // closure bindings. Backward-compat: explicit `taskOptions.fnDeps` from
+    // the caller overrides the scan (use case: opt-in to bare-name injection
+    // without changing the fn source).
+    if (taskOptions.fnDeps === undefined) {
+      taskOptions.fnDeps = scanFnDeps(taskOptions.fnCode);
+    }
 
     const task = new TaskHandle(taskOptions);
     this.#stats.submittedTasks++;
@@ -699,6 +708,11 @@ export class WorkerRuntime extends EventEmitter {
     worker.executeStreamTask({
       taskId,
       fnCode: taskFn.toString(),
+      // HARDEN-02 (ADR-0024 A2): scan for `node:*` refs and ship them to
+      // the worker so the streaming fn can use bare-name `net`, `crypto`,
+      // etc. without dynamic-import boilerplate. Empty array = no manifest;
+      // the streaming fn falls back to its own dynamic imports.
+      fnDeps: scanFnDeps(taskFn.toString()),
       payload,
       onChunk: ({ seq, chunk }) => {
         stream.pushChunk(chunk);

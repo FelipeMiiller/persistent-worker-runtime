@@ -89,6 +89,11 @@ export class TaskHandle {
 
     this.fnCode =
       options.fnCode || (typeof options.fn === 'function' ? options.fn.toString() : null);
+    // HARDEN-02 (ADR-0024 A2): list of `node:*` specifiers the worker should
+    // pre-import and inject as bare-name closure variables for `fnCode`.
+    // Populated by `runtime.dispatch()` via `scanFnDeps()`; may be overridden
+    // by explicit `options.fnDeps` for advanced callers.
+    this.fnDeps = Array.isArray(options.fnDeps) ? options.fnDeps.slice() : [];
     this.transferList = options.transferList || [];
     this.retries = options.retries || 0;
     this.retryDelayMs = options.retryDelayMs || 500;
