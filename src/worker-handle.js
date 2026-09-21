@@ -512,6 +512,29 @@ export class WorkerHandle extends EventEmitter {
   }
 
   /**
+   * HARDEN-10 (ADR-0024 D2): public entry point for the supervisor's
+   * poll-based watchdog. Preempts the currently-active task with the
+   * same semantics as the per-task watchdog (TaskTimeoutError with
+   * `preempted: true`, worker terminates, `task_preempted` event
+   * emitted). No-op when the worker is already preempting or
+   * terminated, or when there is no active task.
+   *
+   * Added so `Supervisor.#checkWorkerWatchdog` can drive preemption
+   * without reaching into private state. Per-task watchdog in
+   * `#armWatchdog` keeps firing at `task.timeoutMs` as the first line
+   * of defense; this is the second.
+   */
+  preempt() {
+    if (this.#status === 'preempting' || this.#status === 'terminated') {
+      return;
+    }
+    if (!this.#currentTask) {
+      return;
+    }
+    this.#preemptWorker(this.#currentTask);
+  }
+
+  /**
    * Forcibly preempts the active worker thread and terminates the underlying V8 isolate.
    * @param {TaskHandle} task
    */

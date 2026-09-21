@@ -51,6 +51,13 @@ export class WorkerRuntime extends EventEmitter {
   // uniformly among idle workers. Recycled-fresh workers always get
   // priority regardless of strategy (cheapest slot to fill).
   #dispatchStrategy = 'lru';
+  // HARDEN-10 (ADR-0024 D2): supervisor poll cadence. Drives accumulation-
+  // rate memory sampling (when enabled), recycling re-checks, AND the
+  // supervisor-level runaway watchdog. Default `1000` ms; clamp minimum
+  // `100` ms. Independent of per-task `timeoutMs` — the spec calls out
+  // `timeoutMs` (per-task budget) and `workerPollIntervalMs` (per-worker
+  // watchdog cadence) as orthogonal knobs.
+  #workerPollIntervalMs = 1000;
   #adaptiveEnabled;
   /**
    * Adaptive concurrency controller (ADR-0014 T7). `null` when the
@@ -205,6 +212,30 @@ export class WorkerRuntime extends EventEmitter {
       this.#dispatchStrategy = options.dispatchStrategy;
     }
 
+    // HARDEN-10 (ADR-0024 D2): `workerPollIntervalMs` validation. Default
+    // `1000` ms. Clamp minimum `100` ms — values below this are rejected
+    // with `RangeError` because timer skew + IPC variance push preemption
+    // past `workerPollIntervalMs + 50 ms` (the AC4 contract). The
+    // supervisor-level runaway watchdog relies on this floor; the
+    // per-task `timeoutMs` budget is unaffected (the two are independent
+    // knobs per the ADR).
+    if (options.workerPollIntervalMs !== undefined) {
+      if (
+        typeof options.workerPollIntervalMs !== 'number' ||
+        !Number.isFinite(options.workerPollIntervalMs)
+      ) {
+        throw new TypeError(
+          `createWorkerRuntime: options.workerPollIntervalMs must be a finite number, got ${options.workerPollIntervalMs}`,
+        );
+      }
+      if (options.workerPollIntervalMs < 100) {
+        throw new RangeError(
+          `createWorkerRuntime: options.workerPollIntervalMs must be >= 100 (clamp minimum), got ${options.workerPollIntervalMs}`,
+        );
+      }
+      this.#workerPollIntervalMs = options.workerPollIntervalMs;
+    }
+
     // Validate resourceLimits before any worker spawn. See ADR-0019 §2.
     if (options.resourceLimits !== undefined) {
       const rl = options.resourceLimits;
@@ -289,6 +320,11 @@ export class WorkerRuntime extends EventEmitter {
       // HARDEN-09 (ADR-0024 D1): dispatch strategy propagation.
       // Default `'lru'` — round-robin.
       dispatchStrategy: this.#dispatchStrategy,
+      // HARDEN-10 (ADR-0024 D2): supervisor poll cadence propagation.
+      // Default `1000` ms; clamp min `100` ms validated above. Drives
+      // accumulation sampling, recycling re-checks, AND the supervisor-
+      // level runaway watchdog.
+      workerPollIntervalMs: this.#workerPollIntervalMs,
     });
 
     // Wire supervisor events to runtime events
@@ -649,6 +685,16 @@ export class WorkerRuntime extends EventEmitter {
   // priority in ALL strategies.
   get dispatchStrategy() {
     return this.#dispatchStrategy;
+  }
+
+  // HARDEN-10 (ADR-0024 D2): exposes the supervisor poll cadence (ms).
+  // Drives accumulation-rate memory sampling (when enabled), recycling
+  // re-checks, AND the supervisor-level runaway watchdog. Default
+  // `1000` ms; clamp minimum `100` ms (constructor rejects anything
+  // below). Independent of per-task `timeoutMs` — setting one does not
+  // affect the other.
+  get workerPollIntervalMs() {
+    return this.#workerPollIntervalMs;
   }
 
   get forceKillOnTimeout() {

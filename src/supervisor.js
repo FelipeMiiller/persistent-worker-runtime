@@ -33,7 +33,7 @@ export class Supervisor extends EventEmitter {
   #accumulationRateMbPerSec = Infinity;
   #accumulationHistory = new Map(); // workerId -> Array<{atMs, bytes}>
   #accumulationEwma = new Map(); // workerId -> MB/s (smoothed)
-  #accumulationPollTimer = null;
+  #workerPollTimer = null;
   // HARDEN-07 (ADR-0024 C2): per-worker recycle hysteresis. Records the
   // wall-clock timestamp of each worker's LAST ACTUAL recycle. Subsequent
   // `#checkRecycling` decisions for the same worker within
@@ -57,7 +57,7 @@ export class Supervisor extends EventEmitter {
   #tasksExhaustedNotified = new Set(); // workerId (one-shot per worker)
   // Hard-coded 1000 ms for T6; T10 (HARDEN-10 / Wave 4) exposes this as
   // `workerPollIntervalMs` and decouples it from `timeoutMs`.
-  #accumulationPollIntervalMs = 1000;
+  #workerPollIntervalMs = 1000;
   // HARDEN-09 (ADR-0024 D1): dispatch strategy + LRU cycle state. Default
   // `'lru'` round-robins through idle workers in spawn order; `'fifo'`
   // preserves pre-HARDEN-09 "first idle wins" behavior; `'random'` picks
@@ -161,6 +161,32 @@ export class Supervisor extends EventEmitter {
       }
       this.#dispatchStrategy = options.dispatchStrategy;
     }
+    // HARDEN-10 (ADR-0024 D2): `workerPollIntervalMs` is the supervisor's
+    // polling cadence — it drives accumulation-rate memory sampling
+    // (when enabled), recycling re-checks, AND the supervisor-level
+    // runaway watchdog (HARDEN-09 T9 used `accumulationPollIntervalMs`
+    // which was hard-coded at 1000 ms; T10 decouples it from the
+    // per-task `timeoutMs` budget). Default `1000` ms. Clamp minimum
+    // `100` ms — values lower than this are rejected with `RangeError`
+    // because the watchdog becomes unreliable at sub-100ms intervals
+    // (timer skew + IPC latency variance push preemption past
+    // `workerPollIntervalMs + 50 ms`).
+    if (options.workerPollIntervalMs !== undefined) {
+      if (
+        typeof options.workerPollIntervalMs !== 'number' ||
+        !Number.isFinite(options.workerPollIntervalMs)
+      ) {
+        throw new TypeError(
+          `Supervisor: options.workerPollIntervalMs must be a finite number, got ${options.workerPollIntervalMs}`,
+        );
+      }
+      if (options.workerPollIntervalMs < 100) {
+        throw new RangeError(
+          `Supervisor: options.workerPollIntervalMs must be >= 100 (clamp minimum), got ${options.workerPollIntervalMs}`,
+        );
+      }
+      this.#workerPollIntervalMs = options.workerPollIntervalMs;
+    }
     this.#workerOptions = {
       workerScript: options.workerScript,
       handlerPath: options.handlerPath,
@@ -214,6 +240,14 @@ export class Supervisor extends EventEmitter {
   // workers (`tasksCompleted === 0`) get priority in ALL strategies.
   get dispatchStrategy() {
     return this.#dispatchStrategy;
+  }
+
+  // HARDEN-10 (ADR-0024 D2): exposes the supervisor poll cadence. Drives
+  // accumulation-rate memory sampling (when enabled), recycling re-checks,
+  // AND the supervisor-level runaway watchdog. Default `1000` ms;
+  // clamp minimum `100` ms (constructor rejects anything below).
+  get workerPollIntervalMs() {
+    return this.#workerPollIntervalMs;
   }
 
   /**
@@ -281,11 +315,12 @@ export class Supervisor extends EventEmitter {
     if (this.#isStarted) return;
     this.#isShuttingDown = false;
     this.#isStarted = true;
-    // HARDEN-06 (ADR-0024 C1): start the accumulation-rate sampling poll
-    // ONLY when the user opted into a finite threshold. The poll is
-    // otherwise a no-op (no timer) — keeps the disabled-by-default
-    // path truly zero-overhead.
-    this.#startAccumulationPoll();
+    // HARDEN-10 (ADR-0024 D2): start the supervisor poll. Always on once
+    // the supervisor is started (no longer gated on accumulation rate —
+    // the watchdog needs it regardless of accumulationRateMbPerSec). The
+    // poll itself is cheap (one setInterval, O(N) per tick) and `unref`d
+    // so it never keeps the event loop alive on its own.
+    this.#startWorkerPoll();
     const spawnPromises = [];
 
     for (let i = 0; i < this.#targetWorkers; i++) {
@@ -725,7 +760,7 @@ export class Supervisor extends EventEmitter {
     // -1 in `#pickLru`, falling back to position 0 anyway — but resetting
     // here makes the contract explicit and avoids relying on the fallback.
     this.#lastDispatchedWorkerId = null;
-    this.#stopAccumulationPoll();
+    this.#stopWorkerPoll();
     // HARDEN-06 (ADR-0024 C1): clear per-worker accumulation state so a
     // post-shutdown restart doesn't inherit stale EWMA rates from the
     // previous pool (workerIds collide across restarts).
@@ -769,33 +804,99 @@ export class Supervisor extends EventEmitter {
   }
 
   /**
-   * HARDEN-06 (ADR-0024 C1): starts the periodic accumulation-rate sampler.
-   * No-op when `accumulationRateMbPerSec === Infinity` so the disabled
-   * default path stays zero-overhead. The sampler is a `setInterval`
-   * (not per-worker timers) so the cost is O(1) regardless of pool size.
+   * HARDEN-10 (ADR-0024 D2): starts the periodic worker-poll sampler.
+   * The poll always runs once the supervisor is started, regardless of
+   * whether the user opted into accumulation-rate memory sampling.
+   * Each tick does three things:
+   *   1. Accumulation-rate memory sampling (only when enabled — no-op
+   *      when `accumulationRateMbPerSec === Infinity`).
+   *   2. Recycling re-check (against the now-fresh EWMA rate when
+   *      accumulation is enabled; against `maxTasksPerWorker` and the
+   *      optional `recycleOnTasksExhausted` opt otherwise).
+   *   3. Supervisor-level runaway watchdog: any busy worker whose task
+   *      has been running for > `workerPollIntervalMs` with
+   *      `forceKillOnTimeout: true` is preempted. The per-task watchdog
+   *      in `WorkerHandle.#armWatchdog` is the FIRST line of defense
+   *      (fires at `task.timeoutMs`); this supervisor poll is the SECOND
+   *      line — it catches runaways faster than the per-task timeout
+   *      when `task.timeoutMs > workerPollIntervalMs`, satisfying AC4 of
+   *      HARDEN-10.
+   *
+   * The poll is a `setInterval` (not per-worker timers) so the cost is
+   * O(1) regardless of pool size. `unref` so the poll never keeps the
+   * event loop alive on its own — the workers themselves hold the loop open.
    */
-  #startAccumulationPoll() {
-    if (this.#accumulationPollTimer !== null) return;
-    if (this.#accumulationRateMbPerSec === Infinity) return;
-    this.#accumulationPollTimer = setInterval(() => {
+  #startWorkerPoll() {
+    if (this.#workerPollTimer !== null) return;
+    this.#workerPollTimer = setInterval(() => {
+      // Snapshot once — the iteration may add/remove workers (recycle
+      // spawns replacements; the watchdog terminates preempted workers).
+      const accumulationEnabled = this.#accumulationRateMbPerSec !== Infinity;
       for (const worker of this.#workers.values()) {
-        this.#sampleAccumulation(worker);
-        // Re-check recycling against the now-fresh EWMA rate. Cheap when
-        // no rate is exceeded (existing `if (!reason) return;` guard).
-        this.#checkRecycling(worker);
+        if (accumulationEnabled) {
+          this.#sampleAccumulation(worker);
+          // Re-check recycling against the now-fresh EWMA rate. Cheap
+          // when no rate is exceeded (existing `if (!reason) return;`
+          // guard in #checkRecycling).
+          this.#checkRecycling(worker);
+        } else {
+          // Always re-check recycling — even without accumulation, the
+          // supervisor poll gives us periodic re-evaluation instead of
+          // only on `task_completed`. This costs one cheap function call
+          // per worker per tick (the early-return guard short-circuits).
+          this.#checkRecycling(worker);
+        }
+        // Supervisor-level runaway watchdog (HARDEN-10 D2 / AC4).
+        this.#checkWorkerWatchdog(worker);
       }
-    }, this.#accumulationPollIntervalMs);
-    // `unref` so the poll never keeps the event loop alive on its own —
-    // the workers themselves hold the loop open.
-    if (typeof this.#accumulationPollTimer.unref === 'function') {
-      this.#accumulationPollTimer.unref();
+    }, this.#workerPollIntervalMs);
+    if (typeof this.#workerPollTimer.unref === 'function') {
+      this.#workerPollTimer.unref();
     }
   }
 
-  #stopAccumulationPoll() {
-    if (this.#accumulationPollTimer === null) return;
-    clearInterval(this.#accumulationPollTimer);
-    this.#accumulationPollTimer = null;
+  #stopWorkerPoll() {
+    if (this.#workerPollTimer === null) return;
+    clearInterval(this.#workerPollTimer);
+    this.#workerPollTimer = null;
+  }
+
+  /**
+   * HARDEN-10 (ADR-0024 D2 / AC4): supervisor-level runaway watchdog.
+   * Preempts any busy worker whose task has been running for more than
+   * `workerPollIntervalMs` AND has `forceKillOnTimeout: true`. The per-task
+   * watchdog in `WorkerHandle.#armWatchdog` still runs at `task.timeoutMs`
+   * (so short-timeout tasks preempt via the fast path), but this poll-
+   * based detection catches runaways faster when `timeoutMs` is much
+   * larger than `workerPollIntervalMs` — the AC4 contract
+   * "preemption fires within `workerPollIntervalMs + 50 ms` after
+   * runaway detection".
+   *
+   * Cost: O(1) per worker per tick — just a status check + startedAt
+   * subtraction. Termination cost (worker terminate + drain + exit handler
+   * + replacement spawn) is the same as a normal recycle.
+   *
+   * @param {WorkerHandle} worker
+   */
+  #checkWorkerWatchdog(worker) {
+    if (this.#isShuttingDown) return;
+    if (worker.isDedicated) return; // dedicated workers aren't preempted by the supervisor
+    if (worker.status !== 'busy') return;
+    if (worker.isPreempted) return;
+
+    const task = worker.currentTask;
+    if (!task || task.isSettled) return;
+    if (!task.forceKillOnTimeout) return; // cooperative timeout is the cooperative path
+    if (!task.startedAt || task.startedAt <= 0) return;
+
+    const elapsedMs = performance.now() - task.startedAt;
+    if (elapsedMs < this.#workerPollIntervalMs) return;
+
+    // HARDEN-10 (ADR-0024 D2 / AC4): "within workerPollIntervalMs + 50 ms
+    // after runaway detection". The check above IS the detection — the
+    // poll that observes elapsed >= workerPollIntervalMs fires preempt
+    // synchronously in the same tick, satisfying the AC.
+    worker.preempt();
   }
 
   /**
