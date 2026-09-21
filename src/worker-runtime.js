@@ -357,6 +357,16 @@ export class WorkerRuntime extends EventEmitter {
   }
 
   get stats() {
+    // HARDEN-04 (ADR-0024 B2): aggregate per-worker telemetry in a single
+    // object so Prometheus / Grafana scrapers can read all 6 fields in one
+    // pass instead of iterating `getWorkers()`. Built from the same
+    // in-memory snapshots used by `getWorkers()` — no IPC, no drift.
+    // `totalMemoryBytes` is the sum of every worker's last reported
+    // `process.memoryUsage().heapUsed`.
+    const workerSnapshots = this.getWorkers();
+    const totalMemoryBytes = workerSnapshots.reduce((sum, snap) => sum + snap.memoryUsageBytes, 0);
+    const idleWorkersInAggregate = workerSnapshots.filter((snap) => snap.status === 'idle').length;
+
     return {
       totalWorkers: this.#supervisor.totalWorkers,
       idleWorkers: this.#supervisor.idleWorkers.length,
@@ -373,6 +383,23 @@ export class WorkerRuntime extends EventEmitter {
       // "running" from "waiting to run".
       activeStreams: this.#activeStreams.size,
       pendingStreams: this.#pendingStreams.length,
+      // HARDEN-04 (ADR-0024 B2): per-worker aggregate. `idleWorkers` here
+      // is computed from `getWorkers()` (same source as the top-level
+      // `idleWorkers` key — both stay in sync). `recycledTotal` and
+      // `preemptedTotal` mirror supervisor-level counters. `maxMemoryMb`
+      // reflects the configured threshold (Infinity when unset) so
+      // dashboards can compute "% used" without re-reading runtime opts.
+      // Back-compat: the top-level `recycledWorkersCount` and
+      // `preemptedTasksCount` keys above are preserved for existing
+      // consumers; the new `workers` block is additive.
+      workers: {
+        totalWorkers: workerSnapshots.length,
+        idleWorkers: idleWorkersInAggregate,
+        maxMemoryMb: this.#maxMemoryMb,
+        recycledTotal: this.#supervisor.recycledCount,
+        preemptedTotal: this.#supervisor.preemptedCount,
+        totalMemoryBytes,
+      },
       // T7/T8 telemetry (ADR-0014 §Architectural Mechanics): the adaptive
       // concurrency controller's stats block. When adaptive is disabled
       // (`concurrency: 'fixed'` or explicit `workers: N`), `enabled` is

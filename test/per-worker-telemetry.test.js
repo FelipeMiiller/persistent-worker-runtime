@@ -226,3 +226,86 @@ describe('WorkerRuntime — getWorkers() (HARDEN-03)', () => {
     }
   });
 });
+
+describe('WorkerRuntime — runtime.stats.workers aggregate (HARDEN-04)', () => {
+  it('exposes the 6-field workers aggregate block', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 2,
+      maxMemoryMb: 256,
+    });
+    try {
+      const s = runtime.stats;
+      assert.ok(s.workers, 'stats.workers aggregate block exists');
+      assert.equal(typeof s.workers.totalWorkers, 'number');
+      assert.equal(typeof s.workers.idleWorkers, 'number');
+      assert.equal(typeof s.workers.maxMemoryMb, 'number');
+      assert.equal(typeof s.workers.recycledTotal, 'number');
+      assert.equal(typeof s.workers.preemptedTotal, 'number');
+      assert.equal(typeof s.workers.totalMemoryBytes, 'number');
+
+      // Specific values:
+      assert.equal(s.workers.totalWorkers, 2, 'totalWorkers mirrors supervisor');
+      assert.equal(s.workers.idleWorkers, 2, 'both workers idle at start');
+      assert.equal(s.workers.maxMemoryMb, 256, 'maxMemoryMb reflects config');
+      assert.equal(s.workers.recycledTotal, 0);
+      assert.equal(s.workers.preemptedTotal, 0);
+      // Dispatch one task so workers report non-zero memory back via IPC.
+      await runtime.execute({ fn: (p) => p + 1, payload: 1 });
+      assert.ok(
+        runtime.stats.workers.totalMemoryBytes > 0,
+        'totalMemoryBytes sums worker heapUsed',
+      );
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('totalMemoryBytes equals the sum of getWorkers()[i].memoryUsageBytes', async () => {
+    const runtime = await createWorkerRuntime({ workers: 3 });
+    try {
+      // Dispatch a few tasks so workers report non-zero memory.
+      await Promise.all(
+        [1, 2, 3, 4, 5, 6].map((n) => runtime.execute({ fn: (p) => p * 2, payload: n })),
+      );
+
+      const snaps = runtime.getWorkers();
+      const expectedSum = snaps.reduce((sum, s) => sum + s.memoryUsageBytes, 0);
+      assert.equal(runtime.stats.workers.totalMemoryBytes, expectedSum);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('idleWorkers in aggregate matches getWorkers().filter(status==="idle").length', async () => {
+    const runtime = await createWorkerRuntime({ workers: 4 });
+    try {
+      const aggregateIdle = runtime.stats.workers.idleWorkers;
+      const snapshotsIdle = runtime.getWorkers().filter((s) => s.status === 'idle').length;
+      assert.equal(aggregateIdle, snapshotsIdle);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('preserves back-compat with existing top-level stats keys', async () => {
+    const runtime = await createWorkerRuntime({ workers: 2 });
+    try {
+      const s = runtime.stats;
+      // Pre-existing keys MUST still be present.
+      assert.equal(typeof s.totalWorkers, 'number');
+      assert.equal(typeof s.idleWorkers, 'number');
+      assert.equal(typeof s.queueDepth, 'number');
+      assert.equal(typeof s.waitingQueueCount, 'number');
+      assert.equal(typeof s.submittedTasks, 'number');
+      assert.equal(typeof s.completedTasks, 'number');
+      assert.equal(typeof s.failedTasks, 'number');
+      assert.equal(typeof s.recycledWorkersCount, 'number');
+      assert.equal(typeof s.preemptedTasksCount, 'number');
+      assert.equal(typeof s.activeStreams, 'number');
+      assert.equal(typeof s.pendingStreams, 'number');
+      assert.equal(typeof s.adaptive, 'object');
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+});
