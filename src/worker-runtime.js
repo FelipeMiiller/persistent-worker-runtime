@@ -33,6 +33,10 @@ export class WorkerRuntime extends EventEmitter {
   #silentTimeoutDefaultWarning;
   #observeWorkerMemory;
   #memoryEmitIntervalMs;
+  // HARDEN-06 (ADR-0024 C1): accumulation-rate threshold (MB/s). Mirrors
+  // the value passed to the supervisor; exposed via `runtime.accumulationRateMbPerSec`
+  // for tests / dashboards. `Infinity` = disabled (back-compat default).
+  #accumulationRateMbPerSec = Infinity;
   #adaptiveEnabled;
   /**
    * Adaptive concurrency controller (ADR-0014 T7). `null` when the
@@ -106,6 +110,30 @@ export class WorkerRuntime extends EventEmitter {
     // `silentTimeoutDefaultWarning` task option.
     const silentTimeoutDefaultWarning = Boolean(options.silentTimeoutDefaultWarning);
 
+    // HARDEN-06 (ADR-0024 C1): accumulation-rate guard. `Infinity` =
+    // disabled (back-compat default); positive number = threshold in MB/s.
+    // The supervisor samples worker memory at a fixed interval and recycles
+    // a worker whose EWMA-smoothed growth rate exceeds the threshold —
+    // catches slow leaks BEFORE the absolute `maxMemoryMb` is crossed.
+    let accumulationRateMbPerSec;
+    if (options.accumulationRateMbPerSec === undefined) {
+      accumulationRateMbPerSec = Infinity;
+    } else if (
+      typeof options.accumulationRateMbPerSec !== 'number' ||
+      Number.isNaN(options.accumulationRateMbPerSec)
+    ) {
+      throw new TypeError(
+        `createWorkerRuntime: options.accumulationRateMbPerSec must be a non-negative number or Infinity, got ${options.accumulationRateMbPerSec}`,
+      );
+    } else if (options.accumulationRateMbPerSec < 0) {
+      throw new RangeError(
+        `createWorkerRuntime: options.accumulationRateMbPerSec must be non-negative or Infinity, got ${options.accumulationRateMbPerSec}`,
+      );
+    } else {
+      accumulationRateMbPerSec = options.accumulationRateMbPerSec;
+    }
+    this.#accumulationRateMbPerSec = accumulationRateMbPerSec;
+
     // Validate resourceLimits before any worker spawn. See ADR-0019 §2.
     if (options.resourceLimits !== undefined) {
       const rl = options.resourceLimits;
@@ -176,6 +204,10 @@ export class WorkerRuntime extends EventEmitter {
       // HARDEN-05 (ADR-0024 B3): opt-in memory observability propagation.
       observeMemory: this.#observeWorkerMemory,
       memoryEmitIntervalMs: this.#memoryEmitIntervalMs,
+      // HARDEN-06 (ADR-0024 C1): rate-based recycling guard. Disabled
+      // (Infinity) by default — back-compat with the absolute-threshold
+      // behavior the runtime had pre-HARDEN-06.
+      accumulationRateMbPerSec: this.#accumulationRateMbPerSec,
     });
 
     // Wire supervisor events to runtime events
@@ -470,6 +502,13 @@ export class WorkerRuntime extends EventEmitter {
 
   get maxMemoryMb() {
     return this.#maxMemoryMb;
+  }
+
+  // HARDEN-06 (ADR-0024 C1): exposes the configured accumulation-rate
+  // threshold (MB/s) for tests / dashboards. `Infinity` = disabled
+  // (default).
+  get accumulationRateMbPerSec() {
+    return this.#accumulationRateMbPerSec;
   }
 
   get forceKillOnTimeout() {

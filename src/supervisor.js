@@ -20,6 +20,23 @@ export class Supervisor extends EventEmitter {
   #killGracePeriodMs;
   #recycledCount = 0;
   #preemptedCount = 0;
+  // HARDEN-06 (ADR-0024 C1): per-worker memory accumulation-rate tracking.
+  // When `accumulationRateMbPerSec !== Infinity`, a background timer
+  // samples each worker's `lastMemoryUsageBytes` at `#accumulationPollIntervalMs`
+  // and computes an EWMA-smoothed rate. Rate exceeding the threshold fires
+  // `worker_recycling` with `reason: 'accumulation_exceeded'` BEFORE the
+  // absolute `maxMemoryMb` threshold — catches slow leaks early.
+  // `#accumulationHistory[workerId]` is a ring buffer of the last 3 samples
+  // (per ADR-0024 C1: "EWMA over last 3 samples"). `#accumulationEwma[workerId]`
+  // carries the smoothed rate across ticks so the EWMA is stable across
+  // sample windows rather than resetting per batch.
+  #accumulationRateMbPerSec = Infinity;
+  #accumulationHistory = new Map(); // workerId -> Array<{atMs, bytes}>
+  #accumulationEwma = new Map(); // workerId -> MB/s (smoothed)
+  #accumulationPollTimer = null;
+  // Hard-coded 1000 ms for T6; T10 (HARDEN-10 / Wave 4) exposes this as
+  // `workerPollIntervalMs` and decouples it from `timeoutMs`.
+  #accumulationPollIntervalMs = 1000;
 
   constructor(options = {}) {
     super();
@@ -46,6 +63,26 @@ export class Supervisor extends EventEmitter {
     this.#forceKillOnTimeout = Boolean(options.forceKillOnTimeout);
     this.#killGracePeriodMs =
       options.killGracePeriodMs === undefined ? 500 : options.killGracePeriodMs;
+    // HARDEN-06 (ADR-0024 C1): accumulation-rate guard. `Infinity` =
+    // disabled (back-compat default); positive number = threshold in MB/s.
+    // Negative or non-numeric values throw so a typo doesn't silently
+    // disable recycling.
+    if (options.accumulationRateMbPerSec === undefined) {
+      this.#accumulationRateMbPerSec = Infinity;
+    } else if (
+      typeof options.accumulationRateMbPerSec !== 'number' ||
+      Number.isNaN(options.accumulationRateMbPerSec)
+    ) {
+      throw new TypeError(
+        `Supervisor: options.accumulationRateMbPerSec must be a non-negative number or Infinity, got ${options.accumulationRateMbPerSec}`,
+      );
+    } else if (options.accumulationRateMbPerSec < 0) {
+      throw new RangeError(
+        `Supervisor: options.accumulationRateMbPerSec must be non-negative or Infinity, got ${options.accumulationRateMbPerSec}`,
+      );
+    } else {
+      this.#accumulationRateMbPerSec = options.accumulationRateMbPerSec;
+    }
     this.#workerOptions = {
       workerScript: options.workerScript,
       handlerPath: options.handlerPath,
@@ -67,6 +104,13 @@ export class Supervisor extends EventEmitter {
 
   get maxMemoryMb() {
     return this.#maxMemoryMb;
+  }
+
+  // HARDEN-06 (ADR-0024 C1): exposes the configured accumulation-rate
+  // threshold for tests / dashboards. `Infinity` means the rate-based
+  // guard is disabled (default).
+  get accumulationRateMbPerSec() {
+    return this.#accumulationRateMbPerSec;
   }
 
   get forceKillOnTimeout() {
@@ -121,6 +165,11 @@ export class Supervisor extends EventEmitter {
     if (this.#isStarted) return;
     this.#isShuttingDown = false;
     this.#isStarted = true;
+    // HARDEN-06 (ADR-0024 C1): start the accumulation-rate sampling poll
+    // ONLY when the user opted into a finite threshold. The poll is
+    // otherwise a no-op (no timer) — keeps the disabled-by-default
+    // path truly zero-overhead.
+    this.#startAccumulationPoll();
     const spawnPromises = [];
 
     for (let i = 0; i < this.#targetWorkers; i++) {
@@ -249,6 +298,15 @@ export class Supervisor extends EventEmitter {
     if (worker.tasksCompleted >= this.#maxTasksPerWorker) {
       reason = 'tasks_exceeded';
     } else if (
+      this.#accumulationRateMbPerSec !== Infinity &&
+      this.getAccumulationRateMbPerSec(worker.id) > this.#accumulationRateMbPerSec
+    ) {
+      // HARDEN-06 (ADR-0024 C1): rate-based recycling fires BEFORE the
+      // absolute `maxMemoryMb` threshold when growth is fast enough. The
+      // poll tick has already updated the EWMA by the time we read it
+      // here, so the value is fresh.
+      reason = 'accumulation_exceeded';
+    } else if (
       this.#maxMemoryMb !== Infinity &&
       worker.lastMemoryUsageBytes / (1024 * 1024) >= this.#maxMemoryMb
     ) {
@@ -304,6 +362,12 @@ export class Supervisor extends EventEmitter {
 
     worker.on('exit', ({ worker, exitCode, prevStatus, isPreempted }) => {
       this.#workers.delete(worker.id);
+      // HARDEN-06 (ADR-0024 C1): drop per-worker accumulation state when
+      // the worker exits. `worker.id` can be re-assigned to a fresh worker
+      // after restart, so leaving stale EWMA values would silently bias
+      // the rate of the replacement worker.
+      this.#accumulationHistory.delete(worker.id);
+      this.#accumulationEwma.delete(worker.id);
       this.emit('worker_exit', { workerId: worker.id, exitCode, prevStatus, isPreempted });
 
       // If worker was preempted and we are not shutting down, immediately spawn a replacement
@@ -392,8 +456,107 @@ export class Supervisor extends EventEmitter {
   async shutdown() {
     this.#isShuttingDown = true;
     this.#isStarted = false; // PWR-001: allow post-shutdown restart
+    this.#stopAccumulationPoll();
+    // HARDEN-06 (ADR-0024 C1): clear per-worker accumulation state so a
+    // post-shutdown restart doesn't inherit stale EWMA rates from the
+    // previous pool (workerIds collide across restarts).
+    this.#accumulationHistory.clear();
+    this.#accumulationEwma.clear();
     const terminations = Array.from(this.#workers.values()).map((w) => w.terminate());
     await Promise.all(terminations);
     this.#workers.clear();
+  }
+
+  /**
+   * HARDEN-06 (ADR-0024 C1): starts the periodic accumulation-rate sampler.
+   * No-op when `accumulationRateMbPerSec === Infinity` so the disabled
+   * default path stays zero-overhead. The sampler is a `setInterval`
+   * (not per-worker timers) so the cost is O(1) regardless of pool size.
+   */
+  #startAccumulationPoll() {
+    if (this.#accumulationPollTimer !== null) return;
+    if (this.#accumulationRateMbPerSec === Infinity) return;
+    this.#accumulationPollTimer = setInterval(() => {
+      for (const worker of this.#workers.values()) {
+        this.#sampleAccumulation(worker);
+        // Re-check recycling against the now-fresh EWMA rate. Cheap when
+        // no rate is exceeded (existing `if (!reason) return;` guard).
+        this.#checkRecycling(worker);
+      }
+    }, this.#accumulationPollIntervalMs);
+    // `unref` so the poll never keeps the event loop alive on its own —
+    // the workers themselves hold the loop open.
+    if (typeof this.#accumulationPollTimer.unref === 'function') {
+      this.#accumulationPollTimer.unref();
+    }
+  }
+
+  #stopAccumulationPoll() {
+    if (this.#accumulationPollTimer === null) return;
+    clearInterval(this.#accumulationPollTimer);
+    this.#accumulationPollTimer = null;
+  }
+
+  /**
+   * HARDEN-06 (ADR-0024 C1): pushes a (atMs, bytes) sample for the given
+   * worker into the 3-sample history ring and refreshes the EWMA rate.
+   * Called from the supervisor's poll tick.
+   */
+  #sampleAccumulation(worker) {
+    let history = this.#accumulationHistory.get(worker.id);
+    if (!history) {
+      history = [];
+      this.#accumulationHistory.set(worker.id, history);
+    }
+    history.push({ atMs: Date.now(), bytes: worker.lastMemoryUsageBytes });
+    // ADR-0024 C1: "EWMA over last 3 samples" — bounded ring buffer.
+    while (history.length > 3) history.shift();
+    // Refresh the EWMA state so `#getAccumulationRate` reflects the new
+    // sample without re-walking the history. Idempotent for tests.
+    this.#computeAccumulationRate(worker);
+  }
+
+  /**
+   * HARDEN-06 (ADR-0024 C1): returns the EWMA-smoothed accumulation rate
+   * (MB/s) for the given worker, or 0 when fewer than 2 samples are
+   * available. The EWMA smooths the per-tick instantaneous rate
+   * (computed from the two most recent samples) so transient GC pauses
+   * or jitter don't trigger spurious recycling. α = 0.3 matches the
+   * convention used by `adaptive-controller.js` Ewma.
+   */
+  #computeAccumulationRate(worker) {
+    const history = this.#accumulationHistory.get(worker.id);
+    if (!history || history.length < 2) {
+      this.#accumulationEwma.set(worker.id, 0);
+      return 0;
+    }
+    const newest = history[history.length - 1];
+    const prev = history[history.length - 2];
+    const bytesDelta = newest.bytes - prev.bytes;
+    const msDelta = newest.atMs - prev.atMs;
+    if (msDelta <= 0) {
+      // Same-millisecond samples (very fast polling) — keep the prior
+      // EWMA unchanged so the rate doesn't snap to zero.
+      return this.#accumulationEwma.get(worker.id) ?? 0;
+    }
+    const instantaneousMbPerSec = bytesDelta / (1024 * 1024) / (msDelta / 1000);
+    const prevEwma = this.#accumulationEwma.get(worker.id);
+    const ewma =
+      prevEwma === undefined ? instantaneousMbPerSec : 0.3 * instantaneousMbPerSec + 0.7 * prevEwma;
+    this.#accumulationEwma.set(worker.id, ewma);
+    return ewma;
+  }
+
+  /**
+   * HARDEN-06 (ADR-0024 C1): public read-only accessor for tests /
+   * dashboards. Returns the EWMA-smoothed rate in MB/s, or 0 when the
+   * worker has fewer than 2 samples (no rate computable yet).
+   */
+  getAccumulationRateMbPerSec(workerId) {
+    const ewma = this.#accumulationEwma.get(workerId);
+    if (ewma !== undefined) return ewma;
+    const worker = this.#workers.get(workerId);
+    if (!worker) return 0;
+    return this.#computeAccumulationRate(worker);
   }
 }
