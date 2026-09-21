@@ -93,6 +93,48 @@ Node tests fail on `process.exit` if any unexpected global appears in `globalThi
 
 ---
 
+## Process warning helpers — `expectWarning` vs `awaitWarning`
+
+Two helpers exist for `process.emit('warning', ...)` assertions. Pick the right one:
+
+| Helper | Contract | Use when |
+|---|---|---|
+| `awaitWarning(name, expectedMessage, timeoutMs)` | async — resolves during test body | Single warning expected per test, scoped to test lifetime |
+| `expectWarning(name, expected, code)` | sync — asserts at `process.exit` (uses `mustCall`) | Warning fires reliably in EVERY test in the process (rare) |
+
+**Why the distinction matters:** the `expectWarning` impl installs a singleton `'warning'` event listener at module load with a `warningTrap` map. Handlers persist for the entire process. **First bug we found**: Test A registers a `mustCall` handler for `PersistentWorkerRuntimeDefaultSizing`. Test B (later in the same process) doesn't emit that warning, but a downstream Test C emits it twice. At `process.exit`, the mustCall from Test A fails because it saw 2 unexpected fires.
+
+Fix: `awaitWarning` is per-test scope, no module-level state, no cross-test pollution. Use `awaitWarning` whenever only ONE test in the suite cares about the warning.
+
+**Template:**
+
+```js
+const warningPromise = common.awaitWarning(
+  'PersistentWorkerRuntimeDefaultSizing',
+  /started with default workers=1 on a \d+-core host/,
+  3000,
+);
+runtime = await createWorkerRuntime({});
+await warningPromise;  // asserts it fired with matching message
+```
+
+For "warning must NOT fire" — `awaitWarning` doesn't fit (it requires a fire). Use the trap pattern:
+
+```js
+let fired = null;
+process.on('warning', (w) => { fired = w; });
+try {
+  createWorkerRuntime({ workers: 4 });  // explicit, should silence the warning
+} finally {
+  process.off('warning', /* same trap */);
+}
+assert.equal(fired, null);
+```
+
+**Refactor demo:** `test/default-sizing.test.js` T3 ("emits warning on >4-core host") — was using a local `captureWarnings()` that monkey-patches `process.emitWarning`. Replaced with `awaitWarning`. The local helper is removed.
+
+---
+
 ## Patterns we deliberately did NOT adopt
 
 ### `// Flags: --expose-gc` / `// Env: WORKER_CONCURRENCY=4` metadata
@@ -118,12 +160,12 @@ Node's recent additions for ESM testing. Not needed — we're pure ESM, no `requ
 | Phase | Goal | Tests refactored | Effort |
 |---|---|---|---|
 | **Phase 1 (now)** | Helpers exist + 1 demo each | 1 (`zero-copy`) | ✅ Done |
-| **Phase 2** | Wrap all event-driven tests in `mustCall` | 5 files | ~3 hours |
-| **Phase 3** | Add `mustNotCall` to lifecycle tests | 3 files | ~1 hour |
-| **Phase 4** | Add `expectWarning` for `PersistentWorkerRuntimeDefaultSizing` | 1 file | ~30 min |
-| **Phase 5** | Add `platformTimeout` to long-running tests | 3+ files | ~1 hour |
-| **Phase 6** | Enable `getLeakedGlobals` enforcement | 1 setup file | ~30 min |
-| **Phase 7** | Switch to `--test-concurrency=4` | package.json | ~30 min |
+| **Phase 2** | Wrap all event-driven tests in `mustCall` | 5 files | ✅ 2 done (preemption T3, broadcast-subscribe); 3 spec-irrelevant |
+| **Phase 3** | Add `mustNotCall` to lifecycle tests | 3 files | ❌ pending |
+| **Phase 4** | Add `expectWarning` / `awaitWarning` for `PersistentWorkerRuntimeDefaultSizing` | 1 file | ✅ Done (`awaitWarning` in `default-sizing.test.js`) |
+| **Phase 5** | Add `platformTimeout` to long-running tests | 3+ files | ❌ pending |
+| **Phase 6** | Enable `getLeakedGlobals` enforcement | 1 setup file | ❌ pending |
+| **Phase 7** | Switch to `--test-concurrency=4` | package.json | ❌ blocked by Phase 6 |
 
 **Total effort:** ~7 hours of focused refactoring. Each phase = 1 commit.
 
@@ -142,7 +184,8 @@ common.mustSucceed(fn, exact = 1);       // (err, ...args) wrapper + assert.ifEr
 common.expectsError(validator, exact = 1); // throws N errors matching validator
 
 // Process warnings
-common.expectWarning(name, expected, code); // asserts warning fires with shape
+common.expectWarning(name, expected, code); // asserts warning fires with shape (process-wide)
+common.awaitWarning(name, expectedMessage, timeoutMs); // async, scoped to test (preferred for per-test)
 
 // Platform
 common.isWindows, common.isLinux, common.isMacOS; // process.platform constants
