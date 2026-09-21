@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict';
 import { inspect } from 'node:util';
-import { isMainThread, Worker } from 'node:worker_threads';
+import { isMainThread } from 'node:worker_threads';
 
 // ─── Platform constants ──────────────────────────────────────────────────────
 //
@@ -356,56 +356,212 @@ export function getBufferSources(buf) {
 
 export { isMainThread };
 
-// ─── allowGlobals / leakedGlobals (skeleton) ─────────────────────────────────
+// ─── allowGlobals / getLeakedGlobals ──────────────────────────────────────────
 //
-// Node tests fail if a test pollutes `globalThis` with unexpected symbols.
-// We don't enforce this yet (would need a base set of known globals for our
-// project), but the helper is here for future adoption.
+// Phase 6: leaked-globals enforcement. Node tests fail on `process.exit` if
+// any unexpected global appears in `globalThis`. Catches: leaked listeners,
+// unclosed handles, accidental globals.
+//
+// Detection is KEY-based (not value-based): `expectedGlobalKeys` is a Set of
+// property names. Any `Object.getOwnPropertyNames(globalThis)` entry NOT in
+// the set is a leak. Using keys instead of values avoids the `globalThis.X`
+// being `undefined` problem — what matters is the NAME the test created on
+// globalThis, not whether it's bound to a known value.
+//
+// Allow Globals via PWR_ALLOW_GLOBALS=foo,bar env var (CI escape hatch) or
+// `common.allowGlobals('foo', 'bar')` from a test. The exit-time check fires
+// only if `PWR_SKIP_LEAK_CHECK` is unset (default = enforce).
 
-const knownGlobals = new Set([
-  // Node built-ins we expect
-  AbortController,
-  AbortSignal,
-  Buffer,
-  Event,
-  EventTarget,
-  MessageChannel,
-  MessagePort,
-  PerformanceObserver,
-  URL,
-  URLSearchParams,
-  TextEncoder,
-  TextDecoder,
-  WebAssembly,
-  Worker,
-  atob,
-  btoa,
-  clearImmediate,
-  clearInterval,
-  clearTimeout,
-  console,
-  crypto,
-  fetch,
-  global,
-  globalThis,
-  process,
-  queueMicrotask,
-  setImmediate,
-  setInterval,
-  setTimeout,
-  structuredClone,
+const expectedGlobalKeys = new Set([
+  // JS primitives + intrinsic constructors (always present)
+  'Array',
+  'ArrayBuffer',
+  'AsyncDisposableStack',
+  'Atomics',
+  'BigInt',
+  'BigInt64Array',
+  'BigUint64Array',
+  'Boolean',
+  'DataView',
+  'Date',
+  'Error',
+  'EvalError',
+  'FinalizationRegistry',
+  'Float16Array',
+  'Float32Array',
+  'Float64Array',
+  'Function',
+  'Infinity',
+  'Int16Array',
+  'Int32Array',
+  'Int8Array',
+  'Iterator',
+  'JSON',
+  'Map',
+  'Math',
+  'NaN',
+  'Number',
+  'Object',
+  'Promise',
+  'Proxy',
+  'RangeError',
+  'ReferenceError',
+  'Reflect',
+  'RegExp',
+  'Set',
+  'SharedArrayBuffer',
+  'String',
+  'SubtleCrypto',
+  'Symbol',
+  'SyntaxError',
+  'TypeError',
+  'URIError',
+  'Uint16Array',
+  'Uint32Array',
+  'Uint8Array',
+  'Uint8ClampedArray',
+  'WeakMap',
+  'WeakRef',
+  'WeakSet',
+  'WebAssembly',
+  'decodeURI',
+  'decodeURIComponent',
+  'encodeURI',
+  'encodeURIComponent',
+  'escape',
+  'eval',
+  'global',
+  'globalThis',
+  'isFinite',
+  'isNaN',
+  'parseFloat',
+  'parseInt',
+  'undefined',
+  'unescape',
+
+  // Node.js globals
+  'AbortController',
+  'AbortSignal',
+  'AggregateError',
+  'Buffer',
+  'ByteLengthQueuingStrategy',
+  'CloseEvent',
+  'CompressionStream',
+  'CountQueuingStrategy',
+  'Crypto',
+  'CryptoKey',
+  'CustomEvent',
+  'DOMException',
+  'DecompressionStream',
+  'DisposableStack',
+  'Event',
+  'EventTarget',
+  'File',
+  'FormData',
+  'Headers',
+  'Intl',
+  'MessageChannel',
+  'MessageEvent',
+  'MessagePort',
+  'Navigator',
+  'Performance',
+  'PerformanceEntry',
+  'PerformanceMark',
+  'PerformanceMeasure',
+  'PerformanceObserver',
+  'PerformanceObserverEntryList',
+  'PerformanceResourceTiming',
+  'ReadableByteStreamController',
+  'ReadableStream',
+  'ReadableStreamBYOBReader',
+  'ReadableStreamBYOBRequest',
+  'ReadableStreamDefaultController',
+  'ReadableStreamDefaultReader',
+  'Request',
+  'Response',
+  'SuppressedError',
+  'TextDecoder',
+  'TextDecoderStream',
+  'TextEncoder',
+  'TextEncoderStream',
+  'TransformStream',
+  'TransformStreamDefaultController',
+  'URL',
+  'URLPattern',
+  'URLSearchParams',
+  'WebSocket',
+  'WritableStream',
+  'WritableStreamDefaultController',
+  'WritableStreamDefaultWriter',
+  'atob',
+  'btoa',
+  'clearImmediate',
+  'clearInterval',
+  'clearTimeout',
+  'console',
+  'crypto',
+  'fetch',
+  'navigator',
+  'performance',
+  'process',
+  'queueMicrotask',
+  'setImmediate',
+  'setInterval',
+  'setTimeout',
+  'structuredClone',
+
+  // Web platform blobs
+  'Blob',
+  'BroadcastChannel',
 ]);
 
-export function allowGlobals(...allowlist) {
-  for (const val of allowlist) knownGlobals.add(val);
+export function allowGlobals(...keys) {
+  for (const key of keys) expectedGlobalKeys.add(key);
 }
 
 export function getLeakedGlobals() {
   const leaked = [];
   for (const name of Object.getOwnPropertyNames(globalThis)) {
-    if (!knownGlobals.has(globalThis[name])) leaked.push(name);
+    if (!expectedGlobalKeys.has(name)) leaked.push(name);
   }
   return leaked;
+}
+
+// Env-var escape hatch: `PWR_ALLOW_GLOBALS=foo,bar` adds names at startup.
+// Use for tests that legitimately need to add a temporary global (rare).
+if (process.env.PWR_ALLOW_GLOBALS) {
+  for (const name of process.env.PWR_ALLOW_GLOBALS.split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)) {
+    expectedGlobalKeys.add(name);
+  }
+}
+
+// Phase 6 enforcement: at process.exit, fail if any global was added during
+// the test run that we didn't whitelist. Hook is installed on FIRST import
+// of test/common.js. Disable via `PWR_SKIP_LEAK_CHECK=1`.
+if (!process.env.PWR_SKIP_LEAK_CHECK) {
+  let leakCheckInstalled = false;
+  const installLeakCheck = () => {
+    if (leakCheckInstalled) return;
+    leakCheckInstalled = true;
+    process.on('exit', (exitCode) => {
+      if (exitCode !== 0) return; // skip on test failure (avoid noise)
+      const leaked = getLeakedGlobals();
+      if (leaked.length > 0) {
+        console.error(`\n[leaked-globals] ${leaked.length} unexpected global(s):`);
+        for (const name of leaked) {
+          console.error(`  - ${name} (${typeof globalThis[name]})`);
+        }
+        console.error(
+          "\nFix: call `common.allowGlobals('...')` in the test, or set `PWR_ALLOW_GLOBALS=name1,name2`, or remove the global pollution.",
+        );
+        // process.exit overrides the (0) of clean exit so CI fails on leaks.
+        process.exit(1);
+      }
+    });
+  };
+  installLeakCheck();
 }
 
 // ─── expectsError (skeleton) ─────────────────────────────────────────────────
