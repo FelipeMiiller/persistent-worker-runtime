@@ -7,6 +7,11 @@ import { WorkerHandle } from './worker-handle.js';
 export class Supervisor extends EventEmitter {
   #workers = new Map(); // workerId -> WorkerHandle
   #isShuttingDown = false;
+  // PWR-001 fix: idempotent start(). The second call is a no-op so the
+  // pool doesn't double. Reset in shutdown() so post-shutdown restart
+  // still works (consistent with the existing #isShuttingDown reset in
+  // start()).
+  #isStarted = false;
   #workerOptions;
   #targetWorkers;
   #maxTasksPerWorker;
@@ -106,9 +111,16 @@ export class Supervisor extends EventEmitter {
 
   /**
    * Initializes the pool up to the target worker count and waits for them to be ready.
+   *
+   * Idempotent (PWR-001 fix): if the supervisor is already started and
+   * not shutting down, this is a no-op. Calling start() twice does NOT
+   * duplicate the pool. Reset `#isStarted` in shutdown() so a post-
+   * shutdown restart still works.
    */
   async start() {
+    if (this.#isStarted) return;
     this.#isShuttingDown = false;
+    this.#isStarted = true;
     const spawnPromises = [];
 
     for (let i = 0; i < this.#targetWorkers; i++) {
@@ -379,6 +391,7 @@ export class Supervisor extends EventEmitter {
    */
   async shutdown() {
     this.#isShuttingDown = true;
+    this.#isStarted = false; // PWR-001: allow post-shutdown restart
     const terminations = Array.from(this.#workers.values()).map((w) => w.terminate());
     await Promise.all(terminations);
     this.#workers.clear();

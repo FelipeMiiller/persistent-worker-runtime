@@ -52,6 +52,30 @@ describe('Supervisor — unit-level coverage', () => {
     });
   });
 
+  describe('start() idempotency (regression for PWR-001)', () => {
+    it('start() called twice does NOT double the pool size', async () => {
+      // BUG-001 (PWR-001): before the fix, calling start() twice on
+      // the same Supervisor spawned a second batch of workers — the
+      // pool doubled (2 → 4). The fix added an `#isStarted` short-
+      // circuit so the second call is a no-op. After the fix, the
+      // second start() leaves the pool at its original size.
+      const sup = new Supervisor({ workers: 2 });
+      await sup.start();
+      const firstCount = sup.totalWorkers;
+      assert.equal(firstCount, 2);
+
+      await sup.start();
+      const secondCount = sup.totalWorkers;
+
+      assert.equal(
+        secondCount,
+        firstCount,
+        `start() must be idempotent; pool doubled: ${firstCount} → ${secondCount}`,
+      );
+      await sup.shutdown();
+    });
+  });
+
   describe('findWorkerForTask', () => {
     it('returns null when shutting down', async () => {
       const sup = new Supervisor({ workers: 1 });
