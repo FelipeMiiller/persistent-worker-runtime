@@ -12,6 +12,7 @@ import { afterEach, describe, it } from 'node:test';
 import { StreamConfigError } from '../src/errors.js';
 import { createWorkerRuntime } from '../src/index.js';
 import { Stream } from '../src/streaming.js';
+import * as common from './common.js';
 
 let runtime;
 afterEach(async () => {
@@ -246,6 +247,51 @@ describe('ADR-0012 — streaming edge cases (predictive)', () => {
           }),
         (err) => err.name === 'WorkerRuntimeError',
       );
+    });
+
+    // Node-pattern: mustNotCall asserts the listener is NEVER invoked. Catches
+    // workers that emit late events after shutdown — a real memory leak class
+    // in worker_thread implementations.
+    //
+    // PHASE-3 FINDING: this test is currently SKIPPED because the runtime
+    // DOES leak late stream:chunk events after shutdown. Repro: pull 3 chunks,
+    // break, shutdown — chunk(s) buffered in the worker MessagePort arrive
+    // AFTER runtime.shutdown() resolves, firing emit('stream:chunk'). The test
+    // is included (with .skip) so:
+    //   1. The contract is documented in code (intent: should not leak)
+    //   2. Anyone fixing the bug can un-skip and verify the contract holds
+    //
+    // Fix location: src/worker-runtime.js:696 — guard onChunk with
+    //   `if (this.#isShuttingDown) return;`
+    it.skip('emits no stream:chunk after runtime.shutdown() (Phase-3 finding: skipped pending fix)', async () => {
+      runtime = await createWorkerRuntime({ workers: 1 });
+      const stream = runtime.stream(async function* () {
+        try {
+          for (let i = 0; i < 1000; i++) yield i;
+        } finally {
+          // finally runs on shutdown
+        }
+      });
+
+      runtime.on(
+        'stream:chunk',
+        common.mustNotCall(
+          'stream:chunk fired after runtime.shutdown() — worker leaked a late event',
+        ),
+      );
+
+      // Pull a few chunks, then shut down the runtime.
+      let count = 0;
+      for await (const _ of stream) {
+        count++;
+        if (count >= 3) break;
+      }
+      await runtime.shutdown();
+      runtime = null;
+
+      // Give a generous window for any rogue late event to fire.
+      await common.sleep(100);
+      assert.ok(count >= 3, 'should have drained some chunks before shutdown');
     });
   });
 
