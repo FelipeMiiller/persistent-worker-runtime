@@ -58,6 +58,14 @@ export class Supervisor extends EventEmitter {
   // Hard-coded 1000 ms for T6; T10 (HARDEN-10 / Wave 4) exposes this as
   // `workerPollIntervalMs` and decouples it from `timeoutMs`.
   #accumulationPollIntervalMs = 1000;
+  // HARDEN-09 (ADR-0024 D1): dispatch strategy + LRU cycle state. Default
+  // `'lru'` round-robins through idle workers in spawn order; `'fifo'`
+  // preserves pre-HARDEN-09 "first idle wins" behavior; `'random'` picks
+  // uniformly among idle workers. Per ADR-0024 D1, recycled-fresh
+  // workers (`tasksCompleted === 0`) get priority regardless of strategy
+  // — they're either brand-new or just-recycled, the cheapest slot to fill.
+  #dispatchStrategy = 'lru';
+  #lastDispatchedWorkerId = null;
 
   constructor(options = {}) {
     super();
@@ -137,6 +145,22 @@ export class Supervisor extends EventEmitter {
       }
       this.#recycleOnTasksExhausted = options.recycleOnTasksExhausted;
     }
+    // HARDEN-09 (ADR-0024 D1): dispatch strategy validation. Default `'lru'`
+    // (round-robin). Accepts `'lru' | 'fifo' | 'random'`. Anything else throws
+    // so a typo (e.g. uppercase `'LRU'`) doesn't silently fall back to a
+    // different behavior — the runtime default is the new uniform-distribution
+    // contract per ADR-0024 D1.
+    if (options.dispatchStrategy !== undefined) {
+      if (
+        typeof options.dispatchStrategy !== 'string' ||
+        !['lru', 'fifo', 'random'].includes(options.dispatchStrategy)
+      ) {
+        throw new TypeError(
+          `Supervisor: options.dispatchStrategy must be one of 'lru'|'fifo'|'random', got ${options.dispatchStrategy}`,
+        );
+      }
+      this.#dispatchStrategy = options.dispatchStrategy;
+    }
     this.#workerOptions = {
       workerScript: options.workerScript,
       handlerPath: options.handlerPath,
@@ -181,6 +205,15 @@ export class Supervisor extends EventEmitter {
   // instead — user controls recycling externally.
   get recycleOnTasksExhausted() {
     return this.#recycleOnTasksExhausted;
+  }
+
+  // HARDEN-09 (ADR-0024 D1): exposes the configured dispatch strategy.
+  // `'lru'` (default) round-robins through idle workers in spawn order;
+  // `'fifo'` preserves the pre-HARDEN-09 first-idle-wins behavior;
+  // `'random'` picks uniformly among idle workers. Recycled-fresh
+  // workers (`tasksCompleted === 0`) get priority in ALL strategies.
+  get dispatchStrategy() {
+    return this.#dispatchStrategy;
   }
 
   /**
@@ -285,8 +318,83 @@ export class Supervisor extends EventEmitter {
       if (unpinned) return unpinned;
     }
 
-    // Default: return first available idle general worker (not dedicated)
-    return idle.find((w) => !w.isDedicated) || null;
+    // General-purpose dispatch path. Filter to non-dedicated idle workers
+    // then apply the configured strategy (HARDEN-09 / ADR-0024 D1).
+    // `'lru'` (default) round-robins; `'fifo'` preserves the previous
+    // "first idle wins" behavior; `'random'` picks uniformly. Recycled-
+    // fresh workers (`tasksCompleted === 0`) always get priority — see
+    // `#pickByStrategy`.
+    const candidates = idle.filter((w) => !w.isDedicated);
+    if (candidates.length === 0) return null;
+
+    return this.#pickByStrategy(candidates);
+  }
+
+  /**
+   * HARDEN-09 (ADR-0024 D1): picks a worker from `candidates` (already
+   * filtered to non-dedicated idle workers) using the configured
+   * dispatch strategy. Recycled-fresh workers (`tasksCompleted === 0`)
+   * always get priority regardless of strategy — they're the cheapest
+   * slot to fill (fresh V8 isolate cache, no in-flight context) AND
+   * giving them priority maximizes the chance their warm-up work
+   * actually pays off before the LRU cycle rotates away from them.
+   *
+   * Side effect: records the picked worker's id in
+   * `#lastDispatchedWorkerId` so subsequent LRU calls can cycle from it.
+   *
+   * @param {WorkerHandle[]} candidates
+   * @returns {WorkerHandle}
+   */
+  #pickByStrategy(candidates) {
+    // 1. Fresh workers (`tasksCompleted === 0` + already-idle) get priority
+    //    in ALL strategies. `candidates` is already filtered to idle, so
+    //    checking only `tasksCompleted === 0` is sufficient.
+    const fresh = candidates.find((w) => w.tasksCompleted === 0);
+    if (fresh) {
+      this.#lastDispatchedWorkerId = fresh.id;
+      return fresh;
+    }
+
+    // 2. No fresh workers — apply the configured strategy.
+    let picked;
+    switch (this.#dispatchStrategy) {
+      case 'fifo':
+        picked = candidates[0];
+        break;
+      case 'random':
+        picked = candidates[Math.floor(Math.random() * candidates.length)];
+        break;
+      default:
+        picked = this.#pickLru(candidates);
+        break;
+    }
+    this.#lastDispatchedWorkerId = picked.id;
+    return picked;
+  }
+
+  /**
+   * HARDEN-09 (ADR-0024 D1): LRU strategy — return the worker at position
+   * `(lastDispatchedWorkerIndex + 1) % length`. If the previously-
+   * dispatched worker is gone (recycled, terminated, or never existed
+   * because this is the first dispatch), restart at position 0.
+   *
+   * Uses workerId tracking instead of an integer index so the cycle
+   * stays correct across dynamic worker additions/removals — the pool
+   * grows and shrinks, but the "next after the last one we touched"
+   * semantic survives any map mutation.
+   *
+   * @param {WorkerHandle[]} candidates
+   * @returns {WorkerHandle}
+   */
+  #pickLru(candidates) {
+    if (!this.#lastDispatchedWorkerId) {
+      return candidates[0]; // First dispatch — start at position 0.
+    }
+    const idx = candidates.findIndex((w) => w.id === this.#lastDispatchedWorkerId);
+    if (idx < 0) {
+      return candidates[0]; // Last-dispatched worker was removed; restart.
+    }
+    return candidates[(idx + 1) % candidates.length];
   }
 
   /**
@@ -611,6 +719,12 @@ export class Supervisor extends EventEmitter {
   async shutdown() {
     this.#isShuttingDown = true;
     this.#isStarted = false; // PWR-001: allow post-shutdown restart
+    // HARDEN-09 (ADR-0024 D1): reset the LRU cycle cursor on shutdown.
+    // The previous pool's worker ids are gone; a post-shutdown restart
+    // would otherwise dispatch into a stale id whose `findIndex` returns
+    // -1 in `#pickLru`, falling back to position 0 anyway — but resetting
+    // here makes the contract explicit and avoids relying on the fallback.
+    this.#lastDispatchedWorkerId = null;
     this.#stopAccumulationPoll();
     // HARDEN-06 (ADR-0024 C1): clear per-worker accumulation state so a
     // post-shutdown restart doesn't inherit stale EWMA rates from the

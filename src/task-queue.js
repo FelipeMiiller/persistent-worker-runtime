@@ -20,6 +20,24 @@ export class TaskQueue {
     return this.#queue.length;
   }
 
+  /**
+   * Returns the highest-priority task in the queue WITHOUT removing it.
+   * Used by `WorkerRuntime.#scheduleNext()` (HARDEN-09 / ADR-0024 D1)
+   * to peek the next task before asking the supervisor for the right
+   * worker under the configured dispatch strategy (LRU/FIFO/random).
+   *
+   * The queue is internally sorted by priority descending (see
+   * `#insert`), so index 0 is always the next task the queue WOULD
+   * return — but `dequeue` may still prefer an affinity-matching task
+   * at a different index for dedicated workers.
+   *
+   * @returns {TaskHandle|null}
+   */
+  peek() {
+    if (this.#queue.length === 0) return null;
+    return this.#queue[0];
+  }
+
   get waitingCount() {
     return this.#waiters.length;
   }

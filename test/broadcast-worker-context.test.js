@@ -95,24 +95,37 @@ describe('Worker-context channel() integration', () => {
   });
 
   it('backwards compatibility: existing fnCode with (payload, state) signature still works', async () => {
-    await runtime.execute({
-      type: '__set_state__',
-      payload: { key: 'counter', value: 10 },
-    });
+    // HARDEN-09 (ADR-0024 D1) regression: the default LRU round-robin
+    // strategy distributes sequential tasks across the pool, so the
+    // `__set_state__` and `legacy_two_args` tasks below would land on
+    // different workers and `stateValue` would be undefined. The state-
+    // continuity contract is intentionally scoped to single-worker pools;
+    // multi-worker pools must use affinityKey or dedicated workers.
+    // This sub-runtime uses `workers: 1` to isolate the back-compat
+    // assertion from LRU cycling.
+    const singleRuntime = await createWorkerRuntime({ workers: 1 });
+    try {
+      await singleRuntime.execute({
+        type: '__set_state__',
+        payload: { key: 'counter', value: 10 },
+      });
 
-    const result = await runtime.execute({
-      type: 'legacy_two_args',
-      fn: (payload, state) => ({
-        payload,
-        stateValue: state.get('counter'),
-      }),
-      payload: { tag: 'two-arg' },
-    });
+      const result = await singleRuntime.execute({
+        type: 'legacy_two_args',
+        fn: (payload, state) => ({
+          payload,
+          stateValue: state.get('counter'),
+        }),
+        payload: { tag: 'two-arg' },
+      });
 
-    assert.deepEqual(result, {
-      payload: { tag: 'two-arg' },
-      stateValue: 10,
-    });
+      assert.deepEqual(result, {
+        payload: { tag: 'two-arg' },
+        stateValue: 10,
+      });
+    } finally {
+      await singleRuntime.shutdown();
+    }
   });
 
   it('propagates invalid channel name errors from inside a task', async () => {

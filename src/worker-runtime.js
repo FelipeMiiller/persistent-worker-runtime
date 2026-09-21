@@ -45,6 +45,12 @@ export class WorkerRuntime extends EventEmitter {
   // (default) recycles on `maxTasksPerWorker`; `false` emits a one-time
   // warning instead.
   #recycleOnTasksExhausted = true;
+  // HARDEN-09 (ADR-0024 D1): dispatch strategy. Default `'lru'` —
+  // round-robin through idle workers in spawn order. `'fifo'` preserves
+  // the pre-HARDEN-09 "first idle wins" behavior; `'random'` picks
+  // uniformly among idle workers. Recycled-fresh workers always get
+  // priority regardless of strategy (cheapest slot to fill).
+  #dispatchStrategy = 'lru';
   #adaptiveEnabled;
   /**
    * Adaptive concurrency controller (ADR-0014 T7). `null` when the
@@ -183,6 +189,22 @@ export class WorkerRuntime extends EventEmitter {
       this.#recycleOnTasksExhausted = options.recycleOnTasksExhausted;
     }
 
+    // HARDEN-09 (ADR-0024 D1): dispatch strategy validation. Default
+    // `'lru'` — round-robin. Accepts `'lru' | 'fifo' | 'random'`.
+    // Anything else throws so a typo (e.g. uppercase `'LRU'`) doesn't
+    // silently fall back to a different behavior.
+    if (options.dispatchStrategy !== undefined) {
+      if (
+        typeof options.dispatchStrategy !== 'string' ||
+        !['lru', 'fifo', 'random'].includes(options.dispatchStrategy)
+      ) {
+        throw new TypeError(
+          `createWorkerRuntime: options.dispatchStrategy must be one of 'lru'|'fifo'|'random', got ${options.dispatchStrategy}`,
+        );
+      }
+      this.#dispatchStrategy = options.dispatchStrategy;
+    }
+
     // Validate resourceLimits before any worker spawn. See ADR-0019 §2.
     if (options.resourceLimits !== undefined) {
       const rl = options.resourceLimits;
@@ -264,6 +286,9 @@ export class WorkerRuntime extends EventEmitter {
       // HARDEN-08 (ADR-0024 C3): tasks-exhausted recycle opt. Defaults
       // to `true` (pre-HARDEN-08 behavior).
       recycleOnTasksExhausted: this.#recycleOnTasksExhausted,
+      // HARDEN-09 (ADR-0024 D1): dispatch strategy propagation.
+      // Default `'lru'` — round-robin.
+      dispatchStrategy: this.#dispatchStrategy,
     });
 
     // Wire supervisor events to runtime events
@@ -615,6 +640,15 @@ export class WorkerRuntime extends EventEmitter {
   // `true` (default) recycles on `maxTasksPerWorker`.
   get recycleOnTasksExhausted() {
     return this.#recycleOnTasksExhausted;
+  }
+
+  // HARDEN-09 (ADR-0024 D1): exposes the configured dispatch strategy.
+  // `'lru'` (default) round-robins through idle workers; `'fifo'`
+  // preserves the pre-HARDEN-09 "first idle wins" behavior; `'random'`
+  // picks uniformly. Recycled-fresh workers (`tasksCompleted === 0`) get
+  // priority in ALL strategies.
+  get dispatchStrategy() {
+    return this.#dispatchStrategy;
   }
 
   get forceKillOnTimeout() {
@@ -1017,14 +1051,35 @@ export class WorkerRuntime extends EventEmitter {
 
     if (this.#queue.size === 0) return;
 
-    const idleWorkers = this.#supervisor.idleWorkers;
-    if (idleWorkers.length === 0) return;
+    // HARDEN-09 (ADR-0024 D1): dispatch each queued task via
+    // `findWorkerForTask` so the configured strategy (LRU/FIFO/random)
+    // and affinity logic apply. The previous "iterate `idleWorkers` in
+    // insertion order" loop always picked `idleWorkers[0]`, defeating
+    // any distribution strategy. Now: for each task, ask the supervisor
+    // which worker should run it.
+    //
+    // Snapshot the dispatch budget at entry — `queue.size` and
+    // `idleWorkers.length` may change as we dequeue, and we want a
+    // fixed upper bound so the loop terminates even if dispatch fails
+    // to consume a task for any reason.
+    const maxDispatches = Math.min(this.#queue.size, this.#supervisor.idleWorkers.length);
 
-    for (const worker of idleWorkers) {
-      const task = this.#queue.dequeue(worker);
+    for (let i = 0; i < maxDispatches; i++) {
+      const task = this.#queue.peek();
       if (!task) break;
 
-      worker.executeTask(task).catch(() => {
+      const worker = this.#supervisor.findWorkerForTask(task);
+      if (!worker) break;
+
+      // Dequeue using the chosen worker so the queue's affinity lookup
+      // can short-circuit when worker.affinityKey matches task.affinityKey
+      // (preserves the pre-HARDEN-09 affinity behavior). For general
+      // workers without affinity, dequeue returns the highest-priority
+      // task — same as `task` we just peeked.
+      const dequeued = this.#queue.dequeue(worker);
+      if (!dequeued) break;
+
+      worker.executeTask(dequeued).catch(() => {
         // Handled via worker events
       });
     }
