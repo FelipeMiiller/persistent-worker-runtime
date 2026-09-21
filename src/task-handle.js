@@ -4,6 +4,45 @@ import { TaskAbortedError, TaskTimeoutError } from './errors.js';
 let taskIdSequence = 1;
 
 /**
+ * HARDEN-01 (ADR-0024): warn at most once per process when a TaskHandle is
+ * built with `forceKillOnTimeout: true` and `timeoutMs === 0`. The symbol is
+ * stored on globalThis so the guard survives across module re-imports inside
+ * the same process (workers + main thread each get their own globalThis).
+ */
+const __hardenTimeoutWarningEmitted = Symbol.for(
+  'persistent-worker-runtime.__hardenTimeoutWarningEmitted',
+);
+if (globalThis[__hardenTimeoutWarningEmitted] === undefined) {
+  globalThis[__hardenTimeoutWarningEmitted] = false;
+}
+
+/**
+ * HARDEN-01 default. Five seconds covers 99% of CPU-bound runaway tasks per
+ * the ADR-0024 sizing research; users who want long-running tasks set
+ * `timeoutMs` explicitly. `0` is preserved as the explicit opt-in to disable
+ * preemption.
+ */
+const DEFAULT_TIMEOUT_MS = 5000;
+
+function warnTimeoutMisconfig() {
+  if (globalThis[__hardenTimeoutWarningEmitted]) return;
+  globalThis[__hardenTimeoutWarningEmitted] = true;
+  process.emitWarning(
+    '[hardening] TaskHandle created with forceKillOnTimeout=true but timeoutMs=0 — preemption will NOT fire. Set timeoutMs > 0 or pass silentTimeoutDefaultWarning: true to createWorkerRuntime() to suppress.',
+    'PersistentWorkerRuntimeHardeningTimeoutMisconfig',
+  );
+}
+
+/**
+ * Resets the once-per-process HARDEN-01 warning guard. Test-only helper —
+ * never called from production code. Use sparingly: callers are responsible
+ * for not asserting on warnings emitted by other test cases.
+ */
+export function __resetHardenTimeoutWarningGuardForTests() {
+  globalThis[__hardenTimeoutWarningEmitted] = false;
+}
+
+/**
  * Represents a single executable task managed by the Persistent Worker Runtime.
  * Integrated with AsyncResource for APM/OpenTelemetry context propagation.
  */
@@ -19,10 +58,24 @@ export class TaskHandle {
     this.payload = options.payload ?? null;
     this.affinityKey = options.affinityKey || null;
     this.priority = options.priority || 0;
-    this.timeoutMs = options.timeoutMs || 0;
+    // HARDEN-01 (ADR-0024 A1): default `timeoutMs` to 5000 ms instead of 0.
+    // Use explicit `=== undefined` check so the value `0` is preserved as
+    // the documented opt-in to disable preemption. The previous `|| 0`
+    // pattern silently coerced any falsy value (NaN, '', false) to 0,
+    // which masked misconfiguration when forceKillOnTimeout was true.
+    this.timeoutMs = options.timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : options.timeoutMs;
     this.queueTimeoutMs = options.queueTimeoutMs || 30000;
     this.signal = options.signal || null;
     this.forceKillOnTimeout = Boolean(options.forceKillOnTimeout);
+    this.silentTimeoutDefaultWarning = Boolean(options.silentTimeoutDefaultWarning);
+
+    // HARDEN-01: emit one-time warning when preemption is configured but the
+    // timeout would never fire. The guard on `silentTimeoutDefaultWarning`
+    // is the documented opt-out (set per-TaskHandle here, also propagated
+    // from createWorkerRuntime options so users rarely have to set it).
+    if (this.forceKillOnTimeout && this.timeoutMs === 0 && !this.silentTimeoutDefaultWarning) {
+      warnTimeoutMisconfig();
+    }
 
     const killGracePeriodMs =
       options.killGracePeriodMs === undefined ? 500 : options.killGracePeriodMs;

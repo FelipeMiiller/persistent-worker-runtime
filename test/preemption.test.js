@@ -623,3 +623,64 @@ describe('Hard Preemption - Concurrency & ReDoS Integration Tests (T5)', () => {
     }
   });
 });
+
+describe('Hard Preemption - HARDEN-01 default timeoutMs end-to-end (ADR-0024)', () => {
+  // HARDEN-01 (ADR-0024 A1): the new default `timeoutMs = 5000` closes the
+  // silent-failure bug where `forceKillOnTimeout: true && timeoutMs: 0`
+  // armed a watchdog that never fired. Before HARDEN-01, a user who set
+  // `forceKillOnTimeout: true` and forgot to also set `timeoutMs` got NO
+  // preemption — the watchdog arming branch (`task.timeoutMs > 0 && forceKillOnTimeout`)
+  // silently skipped. After HARDEN-01, the 5000 ms default means preemption
+  // fires within ~5 s of dispatch. This integration test boots a runtime
+  // with NO overrides and asserts the watchdog actually kills the worker.
+  //
+  // `silentTimeoutDefaultWarning: true` is set on the runtime so the
+  // once-per-process HARDEN-01 warning doesn't pollute the test output of
+  // any test that runs after this one.
+
+  it('preempts a runaway task within ~5 s using the new 5000 ms default timeout', async () => {
+    const timeout = common.platformTimeout(7000, { minimum: 7000 });
+    const runtime = await createWorkerRuntime({
+      workers: 1,
+      forceKillOnTimeout: true,
+      silentTimeoutDefaultWarning: true,
+    });
+
+    try {
+      const preemptedPromise = common.waitForEvent(runtime, 'worker:preempted', 1, timeout);
+
+      const startMs = Date.now();
+
+      // No `timeoutMs` override — TaskHandle defaults to 5000 ms.
+      await assert.rejects(
+        runtime.execute({
+          fn: () => {
+            while (true) {}
+          },
+        }),
+        (err) => {
+          assert.equal(err.name, 'TaskTimeoutError');
+          assert.equal(err.preempted, true);
+          // The error carries the EFFECTIVE timeoutMs that was actually
+          // used by the watchdog — must be the new 5000 ms default.
+          assert.equal(err.timeoutMs, 5000, 'error carries the 5000 ms default');
+          return true;
+        },
+      );
+
+      const preemptedEvent = await preemptedPromise;
+      const elapsedMs = Date.now() - startMs;
+
+      assert.ok(preemptedEvent, 'worker:preempted event was emitted');
+      assert.equal(preemptedEvent.workerId.length > 0, true);
+      // Preemption must happen within `default timeoutMs + watchdog latency`.
+      // We use `timeout` (7 s) as the upper bound to absorb Windows CI flake.
+      assert.ok(
+        elapsedMs < timeout,
+        `preemption took ${elapsedMs}ms, expected < ${timeout}ms (default 5000 + watchdog latency)`,
+      );
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+});

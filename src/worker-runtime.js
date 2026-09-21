@@ -29,6 +29,7 @@ export class WorkerRuntime extends EventEmitter {
   #maxMemoryMb;
   #forceKillOnTimeout;
   #killGracePeriodMs;
+  #silentTimeoutDefaultWarning;
   #adaptiveEnabled;
   /**
    * Adaptive concurrency controller (ADR-0014 T7). `null` when the
@@ -85,6 +86,12 @@ export class WorkerRuntime extends EventEmitter {
       throw new RangeError('killGracePeriodMs must be a non-negative number');
     }
 
+    // HARDEN-01 (ADR-0024 A1): suppress the once-per-process warning that
+    // fires when a TaskHandle is built with `forceKillOnTimeout: true` AND
+    // `timeoutMs === 0`. Per-TaskHandle override is still available via the
+    // `silentTimeoutDefaultWarning` task option.
+    const silentTimeoutDefaultWarning = Boolean(options.silentTimeoutDefaultWarning);
+
     // Validate resourceLimits before any worker spawn. See ADR-0019 §2.
     if (options.resourceLimits !== undefined) {
       const rl = options.resourceLimits;
@@ -107,6 +114,7 @@ export class WorkerRuntime extends EventEmitter {
     this.#maxMemoryMb = maxMemoryMb;
     this.#forceKillOnTimeout = forceKillOnTimeout;
     this.#killGracePeriodMs = killGracePeriodMs;
+    this.#silentTimeoutDefaultWarning = silentTimeoutDefaultWarning;
     // Set below after `resolveAdaptiveEnabled` resolves; placeholder so
     // the field always has a defined value (matches the other
     // primitive private fields above).
@@ -507,6 +515,9 @@ export class WorkerRuntime extends EventEmitter {
     }
     if (taskOptions.killGracePeriodMs === undefined) {
       taskOptions.killGracePeriodMs = this.#killGracePeriodMs;
+    }
+    if (taskOptions.silentTimeoutDefaultWarning === undefined) {
+      taskOptions.silentTimeoutDefaultWarning = this.#silentTimeoutDefaultWarning;
     }
 
     const task = new TaskHandle(taskOptions);
