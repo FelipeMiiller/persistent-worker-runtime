@@ -20,6 +20,16 @@ export class WorkerHandle extends EventEmitter {
   #status = 'starting';
   #tasksCompleted = 0;
   #lastMemoryUsageBytes = 0;
+  // HARDEN-03 (ADR-0024 B1): wall-clock timestamp of the last task
+  // completion/failure on this worker. Used by `snapshot()` so dashboards
+  // can answer "when was this worker last active?" without an extra IPC.
+  // 0 = worker has never completed a task.
+  #lastTaskAt = 0;
+  // HARDEN-03 (ADR-0024 B1): in-worker recycle count. Workers aren't
+  // recycled in-place today (recycle = terminate + replace, see
+  // supervisor.js), so this stays 0 for live workers. The field is wired
+  // here so a future in-place recycler can increment without an API break.
+  #recycledCount = 0;
   #watchdogTimer = null;
   #graceTimer = null;
   #isPreempted = false;
@@ -73,6 +83,51 @@ export class WorkerHandle extends EventEmitter {
 
   get lastMemoryUsage() {
     return this.#lastMemoryUsageBytes;
+  }
+
+  get lastTaskAt() {
+    return this.#lastTaskAt;
+  }
+
+  get recycledCount() {
+    return this.#recycledCount;
+  }
+
+  /**
+   * HARDEN-03 (ADR-0024 B1): returns an in-memory snapshot of this worker's
+   * observable state. Sync, zero-IPC, suitable for `runtime.getWorkers()`
+   * which returns an array of these. The returned object is a plain shape
+   * (no class identity) — callers may mutate it freely without affecting
+   * runtime state.
+   *
+   * Shape per ADR-0024 §B1:
+   *   { id, memoryUsageBytes, tasksCompleted, tasksActive, status,
+   *     recycledCount, lastTaskAt }
+   *
+   * @returns {{
+   *   id: string,
+   *   memoryUsageBytes: number,
+   *   tasksCompleted: number,
+   *   tasksActive: 0 | 1,
+   *   status: string,
+   *   recycledCount: number,
+   *   lastTaskAt: number
+   * }}
+   */
+  snapshot() {
+    return {
+      id: this.id,
+      memoryUsageBytes: this.#lastMemoryUsageBytes,
+      tasksCompleted: this.#tasksCompleted,
+      // Streams are 1:1 with workers for their full lifetime, so
+      // `tasksActive` is binary: 1 if a regular task or stream is in
+      // flight, 0 otherwise. We check both slots because either could
+      // hold work.
+      tasksActive: this.#currentTask !== null || this.#streamTask !== null ? 1 : 0,
+      status: this.#status,
+      recycledCount: this.#recycledCount,
+      lastTaskAt: this.#lastTaskAt,
+    };
   }
 
   /**
@@ -139,6 +194,9 @@ export class WorkerHandle extends EventEmitter {
           this.#status = 'idle';
         }
         this.#tasksCompleted++;
+        // HARDEN-03 (ADR-0024 B1): record wall-clock time of last task
+        // settlement so `snapshot().lastTaskAt` reflects fresh data.
+        this.#lastTaskAt = Date.now();
 
         if (message.success) {
           task.resolve(message.result);

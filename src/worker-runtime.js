@@ -399,6 +399,18 @@ export class WorkerRuntime extends EventEmitter {
     };
   }
 
+  /**
+   * HARDEN-03 (ADR-0024 B1): returns an array of per-worker snapshots. Sync,
+   * zero-IPC — reads supervisor's in-memory worker map. Returns `[]` while
+   * shutting down (callers shouldn't see half-torn-down state).
+   *
+   * @returns {Array<import('./worker-handle.js').WorkerHandle.prototype.snapshot extends ...>}
+   */
+  getWorkers() {
+    if (this.#isShuttingDown) return [];
+    return this.#supervisor.getWorkerSnapshots();
+  }
+
   get maxTasksPerWorker() {
     return this.#maxTasksPerWorker;
   }

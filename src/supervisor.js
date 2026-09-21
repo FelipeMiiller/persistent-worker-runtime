@@ -85,6 +85,18 @@ export class Supervisor extends EventEmitter {
   }
 
   /**
+   * HARDEN-03 (ADR-0024 B1): returns an in-memory snapshot of every worker
+   * the supervisor currently tracks. Sync, zero-IPC — each entry is built
+   * from `worker.snapshot()` which reads private fields. Returned array is
+   * fresh per call (callers may mutate elements without affecting state).
+   *
+   * @returns {Array<ReturnType<import('./worker-handle.js').WorkerHandle['prototype']['snapshot']>>}
+   */
+  getWorkerSnapshots() {
+    return Array.from(this.#workers.values()).map((w) => w.snapshot());
+  }
+
+  /**
    * Initializes the pool up to the target worker count and waits for them to be ready.
    */
   async start() {
