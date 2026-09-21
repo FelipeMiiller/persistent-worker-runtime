@@ -18,8 +18,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/**/*.test.js",
-    "test:coverage": "node --test --test-concurrency=1 --experimental-test-coverage test/**/*.test.js",
+    "test": "node --test --test-concurrency=4 test/**/*.test.js",
+    "test:coverage": "node --test --test-concurrency=4 --experimental-test-coverage test/**/*.test.js",
     "lint": "biome check src/ test/ examples/ benchmarks/",
     "lint:ci": "biome ci src/ test/ examples/ benchmarks/",
     "lint:fix": "biome check --write --unsafe src/ test/ examples/ benchmarks/",
