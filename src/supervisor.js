@@ -44,6 +44,19 @@ export class Supervisor extends EventEmitter {
   // recycle every poll tick.
   #minRecycleIntervalMs = 30000;
   #lastRecycledAt = new Map(); // workerId -> ms timestamp
+  // HARDEN-11 (ADR-0024 D3): drain grace period (ms) before a recycled
+  // worker is physically terminated. `0` (default) preserves the
+  // pre-HARDEN-11 behavior — terminate immediately after the replacement
+  // is ready. A positive value holds the old worker in `runtime.getWorkers()`
+  // (status: 'recycling') for that long, giving the operator a window
+  // to drain in-flight traffic, inspect final stats, or coordinate a
+  // hand-off with downstream systems. The new replacement is already
+  // serving tasks during the grace period; the pool capacity is
+  // temporarily N+1 then drops back to N when the timer fires.
+  #recycleBackoffMs = 0;
+  // Tracks pending backoff timers per workerId so shutdown() can clear
+  // them and prevent dangling `setTimeout`s from firing post-shutdown.
+  #recycleBackoffTimers = new Map(); // workerId -> Timeout
   // HARDEN-08 (ADR-0024 C3): opt-out from recycling on
   // `maxTasksPerWorker` exhaustion. When `false`, the worker exceeding
   // the task limit emits `worker_tasks:exhausted` warning event instead
@@ -132,6 +145,29 @@ export class Supervisor extends EventEmitter {
       );
     } else {
       this.#minRecycleIntervalMs = options.minRecycleIntervalMs;
+    }
+
+    // HARDEN-11 (ADR-0024 D3): recycle backoff drain-grace (ms). Default
+    // `0` — preserves pre-HARDEN-11 behavior (terminate immediately
+    // after the replacement is ready). A non-negative finite number
+    // extends the window the old worker stays in `runtime.getWorkers()`
+    // (status: 'recycling') before physical termination. The replacement
+    // is already serving tasks during the grace period.
+    if (options.recycleBackoffMs !== undefined) {
+      if (
+        typeof options.recycleBackoffMs !== 'number' ||
+        !Number.isFinite(options.recycleBackoffMs)
+      ) {
+        throw new TypeError(
+          `Supervisor: options.recycleBackoffMs must be a finite number, got ${options.recycleBackoffMs}`,
+        );
+      }
+      if (options.recycleBackoffMs < 0) {
+        throw new RangeError(
+          `Supervisor: options.recycleBackoffMs must be >= 0, got ${options.recycleBackoffMs}`,
+        );
+      }
+      this.#recycleBackoffMs = options.recycleBackoffMs;
     }
     // HARDEN-08 (ADR-0024 C3): opt-out from recycling on tasks-exhausted.
     // `true` (default) preserves the pre-HARDEN-08 behavior. `false`
@@ -223,6 +259,17 @@ export class Supervisor extends EventEmitter {
   // the SAME worker.
   get minRecycleIntervalMs() {
     return this.#minRecycleIntervalMs;
+  }
+
+  // HARDEN-11 (ADR-0024 D3): exposes the configured recycle drain-grace
+  // window (ms). `0` (default) terminates the old worker immediately
+  // after the replacement is ready (pre-HARDEN-11 behavior). A positive
+  // value holds the old worker in `runtime.getWorkers()` (status:
+  // 'recycling') for that long before physical termination — gives the
+  // operator a window to drain in-flight traffic or inspect final
+  // stats. The replacement is already serving tasks during the grace.
+  get recycleBackoffMs() {
+    return this.#recycleBackoffMs;
   }
 
   // HARDEN-08 (ADR-0024 C3): exposes the tasks-exhausted recycle opt.
@@ -616,12 +663,35 @@ export class Supervisor extends EventEmitter {
 
     this.#spawnWorker()
       .then(async (replacement) => {
-        if (!replacement) return;
+        if (!replacement) {
+          // Spawn failed — terminate the old worker immediately so it
+          // doesn't leak in 'recycling' state forever.
+          await worker.terminate();
+          return;
+        }
 
         if (this.#isShuttingDown) {
           await replacement.terminate();
           await worker.terminate();
           return;
+        }
+
+        // HARDEN-11 (ADR-0024 D3): drain-grace window. With
+        // `recycleBackoffMs > 0`, the old worker stays in
+        // `runtime.getWorkers()` (status: 'recycling') for that long
+        // before physical termination. The replacement is already
+        // serving tasks during the grace — pool capacity is
+        // temporarily N+1, drops back to N when the timer fires.
+        if (this.#recycleBackoffMs > 0) {
+          await new Promise((resolve) => {
+            const timer = setTimeout(resolve, this.#recycleBackoffMs);
+            this.#recycleBackoffTimers.set(worker.id, timer);
+          });
+          this.#recycleBackoffTimers.delete(worker.id);
+
+          // Bail out if shutdown started during the backoff — the
+          // shutdown path handles termination.
+          if (this.#isShuttingDown) return;
         }
 
         await worker.terminate();
@@ -773,6 +843,15 @@ export class Supervisor extends EventEmitter {
     // HARDEN-08 (ADR-0024 C3): same reasoning for the tasks-exhausted
     // notification set — a post-shutdown restart starts fresh.
     this.#tasksExhaustedNotified.clear();
+    // HARDEN-11 (ADR-0024 D3): clear any pending recycle-backoff timers
+    // so they don't fire post-shutdown and try to terminate workers
+    // that have already been torn down by this shutdown. The timers
+    // are no-ops once the worker is terminated, but cleaning them up
+    // prevents stray `setTimeout` callbacks from running.
+    for (const timer of this.#recycleBackoffTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.#recycleBackoffTimers.clear();
     const terminations = Array.from(this.#workers.values()).map((w) => w.terminate());
     await Promise.all(terminations);
     this.#workers.clear();

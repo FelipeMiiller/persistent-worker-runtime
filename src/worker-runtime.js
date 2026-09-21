@@ -45,6 +45,12 @@ export class WorkerRuntime extends EventEmitter {
   // (default) recycles on `maxTasksPerWorker`; `false` emits a one-time
   // warning instead.
   #recycleOnTasksExhausted = true;
+  // HARDEN-11 (ADR-0024 D3): recycle drain-grace window (ms). `0` (default)
+  // preserves the pre-HARDEN-11 behavior — terminate the old worker
+  // immediately after the replacement is ready. A positive value holds
+  // the old worker in `runtime.getWorkers()` (status: 'recycling') for
+  // that long before physical termination.
+  #recycleBackoffMs = 0;
   // HARDEN-09 (ADR-0024 D1): dispatch strategy. Default `'lru'` —
   // round-robin through idle workers in spawn order. `'fifo'` preserves
   // the pre-HARDEN-09 "first idle wins" behavior; `'random'` picks
@@ -196,6 +202,29 @@ export class WorkerRuntime extends EventEmitter {
       this.#recycleOnTasksExhausted = options.recycleOnTasksExhausted;
     }
 
+    // HARDEN-11 (ADR-0024 D3): recycle drain-grace window (ms). Default
+    // `0`. A non-negative finite number extends the time the old worker
+    // stays in `runtime.getWorkers()` (status: 'recycling') before
+    // physical termination — gives the operator a window to drain
+    // in-flight traffic or inspect final stats. The replacement is
+    // already serving tasks during the grace period.
+    if (options.recycleBackoffMs !== undefined) {
+      if (
+        typeof options.recycleBackoffMs !== 'number' ||
+        !Number.isFinite(options.recycleBackoffMs)
+      ) {
+        throw new TypeError(
+          `createWorkerRuntime: options.recycleBackoffMs must be a finite number, got ${options.recycleBackoffMs}`,
+        );
+      }
+      if (options.recycleBackoffMs < 0) {
+        throw new RangeError(
+          `createWorkerRuntime: options.recycleBackoffMs must be >= 0, got ${options.recycleBackoffMs}`,
+        );
+      }
+      this.#recycleBackoffMs = options.recycleBackoffMs;
+    }
+
     // HARDEN-09 (ADR-0024 D1): dispatch strategy validation. Default
     // `'lru'` — round-robin. Accepts `'lru' | 'fifo' | 'random'`.
     // Anything else throws so a typo (e.g. uppercase `'LRU'`) doesn't
@@ -317,6 +346,9 @@ export class WorkerRuntime extends EventEmitter {
       // HARDEN-08 (ADR-0024 C3): tasks-exhausted recycle opt. Defaults
       // to `true` (pre-HARDEN-08 behavior).
       recycleOnTasksExhausted: this.#recycleOnTasksExhausted,
+      // HARDEN-11 (ADR-0024 D3): recycle drain-grace window propagation.
+      // Default `0` — preserves pre-HARDEN-11 immediate-termination.
+      recycleBackoffMs: this.#recycleBackoffMs,
       // HARDEN-09 (ADR-0024 D1): dispatch strategy propagation.
       // Default `'lru'` — round-robin.
       dispatchStrategy: this.#dispatchStrategy,
@@ -676,6 +708,15 @@ export class WorkerRuntime extends EventEmitter {
   // `true` (default) recycles on `maxTasksPerWorker`.
   get recycleOnTasksExhausted() {
     return this.#recycleOnTasksExhausted;
+  }
+
+  // HARDEN-11 (ADR-0024 D3): exposes the configured recycle drain-grace
+  // window (ms). `0` (default) terminates the old worker immediately
+  // after the replacement is ready (pre-HARDEN-11 behavior). A positive
+  // value holds the old worker in `runtime.getWorkers()` (status:
+  // 'recycling') for that long before physical termination.
+  get recycleBackoffMs() {
+    return this.#recycleBackoffMs;
   }
 
   // HARDEN-09 (ADR-0024 D1): exposes the configured dispatch strategy.
