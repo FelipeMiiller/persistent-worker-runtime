@@ -34,6 +34,16 @@ export class Supervisor extends EventEmitter {
   #accumulationHistory = new Map(); // workerId -> Array<{atMs, bytes}>
   #accumulationEwma = new Map(); // workerId -> MB/s (smoothed)
   #accumulationPollTimer = null;
+  // HARDEN-07 (ADR-0024 C2): per-worker recycle hysteresis. Records the
+  // wall-clock timestamp of each worker's LAST ACTUAL recycle. Subsequent
+  // `#checkRecycling` decisions for the same worker within
+  // `minRecycleIntervalMs` are throttled — emit `worker_recycle:skipped`
+  // instead of triggering another `markRecycling` + spawn cycle. Prevents
+  // pool thrashing when a worker's memory is leaking fast (e.g. user code
+  // bug that persists across isolates) and the rate would otherwise
+  // recycle every poll tick.
+  #minRecycleIntervalMs = 30000;
+  #lastRecycledAt = new Map(); // workerId -> ms timestamp
   // Hard-coded 1000 ms for T6; T10 (HARDEN-10 / Wave 4) exposes this as
   // `workerPollIntervalMs` and decouples it from `timeoutMs`.
   #accumulationPollIntervalMs = 1000;
@@ -83,6 +93,27 @@ export class Supervisor extends EventEmitter {
     } else {
       this.#accumulationRateMbPerSec = options.accumulationRateMbPerSec;
     }
+    // HARDEN-07 (ADR-0024 C2): recycle hysteresis. `0` (default) disables
+    // the throttle — back-compat with the pre-HARDEN-07 behavior. A
+    // positive number is the minimum ms between consecutive recycles of
+    // the SAME worker. Negative values throw so a typo doesn't silently
+    // pin the pool (always throttled = no recycle ever).
+    if (options.minRecycleIntervalMs === undefined) {
+      this.#minRecycleIntervalMs = 30000;
+    } else if (
+      typeof options.minRecycleIntervalMs !== 'number' ||
+      Number.isNaN(options.minRecycleIntervalMs)
+    ) {
+      throw new TypeError(
+        `Supervisor: options.minRecycleIntervalMs must be a non-negative number, got ${options.minRecycleIntervalMs}`,
+      );
+    } else if (options.minRecycleIntervalMs < 0) {
+      throw new RangeError(
+        `Supervisor: options.minRecycleIntervalMs must be non-negative, got ${options.minRecycleIntervalMs}`,
+      );
+    } else {
+      this.#minRecycleIntervalMs = options.minRecycleIntervalMs;
+    }
     this.#workerOptions = {
       workerScript: options.workerScript,
       handlerPath: options.handlerPath,
@@ -111,6 +142,27 @@ export class Supervisor extends EventEmitter {
   // guard is disabled (default).
   get accumulationRateMbPerSec() {
     return this.#accumulationRateMbPerSec;
+  }
+
+  // HARDEN-07 (ADR-0024 C2): exposes the configured recycle hysteresis
+  // window. `0` means no throttle (back-compat default per ADR-0010);
+  // positive number is the minimum ms between consecutive recycles of
+  // the SAME worker.
+  get minRecycleIntervalMs() {
+    return this.#minRecycleIntervalMs;
+  }
+
+  /**
+   * HARDEN-07 (ADR-0024 C2): returns the wall-clock ms timestamp of the
+   * worker's last ACTUAL recycle, or `null` if the worker has never been
+   * recycled. Useful for tests and dashboards that want to display
+   * "time since last recycle" per worker.
+   *
+   * @param {string} workerId
+   * @returns {number | null}
+   */
+  getLastRecycledAt(workerId) {
+    return this.#lastRecycledAt.get(workerId) ?? null;
   }
 
   get forceKillOnTimeout() {
@@ -287,12 +339,18 @@ export class Supervisor extends EventEmitter {
 
   /**
    * Checks whether a worker has exceeded task or memory limits and initiates recycling.
+   *
+   * HARDEN-07 (ADR-0024 C2): hysteresis is checked AFTER reason
+   * determination but BEFORE the recycling guard, so the skipped event
+   * fires for any would-recycle decision within the window — even when
+   * the worker is already in `recycling` state from a prior decision.
+   * Without this ordering, the recycling guard would mask the skipped
+   * event and the hysteresis would never be observable for workers that
+   * were flagged multiple times before their replacement was ready.
    */
   #checkRecycling(worker) {
     if (this.#isShuttingDown) return;
     if (worker.isDedicated) return;
-    if (worker.isRecycling || worker.status === 'terminating' || worker.status === 'terminated')
-      return;
 
     let reason = null;
     if (worker.tasksCompleted >= this.#maxTasksPerWorker) {
@@ -315,7 +373,46 @@ export class Supervisor extends EventEmitter {
 
     if (!reason) return;
 
+    // HARDEN-07 (ADR-0024 C2): throttle when the same worker was
+    // recycled less than `minRecycleIntervalMs` ago. The skipped event
+    // payload carries `lastRecycledAt` so dashboards can render the
+    // "throttled until" time. Runs BEFORE the recycling guard so an
+    // already-recycling worker still emits the skipped event for the
+    // would-recycle reason (otherwise the guard would silently no-op).
+    if (this.#minRecycleIntervalMs > 0) {
+      const lastAt = this.#lastRecycledAt.get(worker.id);
+      if (lastAt !== undefined && Date.now() - lastAt < this.#minRecycleIntervalMs) {
+        this.emit('worker_recycle:skipped', {
+          workerId: worker.id,
+          reason: 'hysteresis',
+          lastRecycledAt: lastAt,
+        });
+        return;
+      }
+    }
+
+    // Recycling guard: prevents double-recycling. With hysteresis
+    // checked above, a second decision for the SAME worker within the
+    // window emits a skipped event instead — so the guard is only
+    // relevant for the rare case of `minRecycleIntervalMs === 0` (no
+    // throttle, e.g. pre-HARDEN-07 behavior) where the same worker
+    // could otherwise be marked recycling twice.
+    if (worker.isRecycling || worker.status === 'terminating' || worker.status === 'terminated')
+      return;
+
     worker.markRecycling();
+    // HARDEN-07 (ADR-0024 C2): record `lastRecycledAt` at decision time
+    // (right after markRecycling, BEFORE the spawn). This means a
+    // subsequent `#checkRecycling` for the same worker — fired while
+    // it's still in the pool in 'recycling' state, awaiting its
+    // replacement — sees the timestamp and emits `worker_recycle:skipped`
+    // immediately. If we recorded it AFTER `worker.terminate()` (the
+    // current `worker_recycled` site), the worker would already be
+    // removed from the pool by then and follow-up `forceRecycleCheck`
+    // calls would no-op. Trade-off: if the spawn later fails, the
+    // timestamp is stale — but a failed spawn is fatal anyway, and the
+    // supervisor rebuilds from scratch on next start.
+    this.#lastRecycledAt.set(worker.id, Date.now());
 
     this.emit('worker_recycling', {
       workerId: worker.id,
@@ -368,6 +465,10 @@ export class Supervisor extends EventEmitter {
       // the rate of the replacement worker.
       this.#accumulationHistory.delete(worker.id);
       this.#accumulationEwma.delete(worker.id);
+      // HARDEN-07 (ADR-0024 C2): drop the recycle timestamp too — same
+      // reasoning. A recycled-out worker is gone; its hysteresis state
+      // must not survive into a restart that reuses the worker id.
+      this.#lastRecycledAt.delete(worker.id);
       this.emit('worker_exit', { workerId: worker.id, exitCode, prevStatus, isPreempted });
 
       // If worker was preempted and we are not shutting down, immediately spawn a replacement
@@ -462,9 +563,38 @@ export class Supervisor extends EventEmitter {
     // previous pool (workerIds collide across restarts).
     this.#accumulationHistory.clear();
     this.#accumulationEwma.clear();
+    // HARDEN-07 (ADR-0024 C2): same reasoning for the hysteresis map —
+    // a post-shutdown restart must NOT inherit stale `lastRecycledAt`
+    // entries from the previous pool.
+    this.#lastRecycledAt.clear();
     const terminations = Array.from(this.#workers.values()).map((w) => w.terminate());
     await Promise.all(terminations);
     this.#workers.clear();
+  }
+
+  /**
+   * HARDEN-07 (ADR-0024 C2): forces an immediate `#checkRecycling` for the
+   * given worker. Useful for operators who want to drain a specific
+   * worker (e.g. before a rolling deploy) without waiting for the next
+   * `task_completed` or poll tick. Returns `false` if the worker is not
+   * in the pool (already recycled, dedicated, or shutting down).
+   *
+   * Side effects:
+   *   - Emits `worker_recycle:skipped` when hysteresis blocks the decision.
+   *   - Emits `worker_recycling` + spawns a replacement when the decision
+   *     is committed (existing `#checkRecycling` behavior).
+   *
+   * @param {string} workerId
+   * @returns {boolean} `true` if the worker was found and a check ran;
+   *   `false` if the worker is no longer in the pool.
+   */
+  forceRecycleCheck(workerId) {
+    if (this.#isShuttingDown) return false;
+    const worker = this.#workers.get(workerId);
+    if (!worker) return false;
+    if (worker.isDedicated) return false;
+    this.#checkRecycling(worker);
+    return true;
   }
 
   /**

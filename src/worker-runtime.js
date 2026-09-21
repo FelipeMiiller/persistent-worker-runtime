@@ -37,6 +37,10 @@ export class WorkerRuntime extends EventEmitter {
   // the value passed to the supervisor; exposed via `runtime.accumulationRateMbPerSec`
   // for tests / dashboards. `Infinity` = disabled (back-compat default).
   #accumulationRateMbPerSec = Infinity;
+  // HARDEN-07 (ADR-0024 C2): recycle hysteresis window (ms). Mirrors the
+  // value passed to the supervisor; exposed via `runtime.minRecycleIntervalMs`.
+  // Runtime default is `0` (back-compat); supervisor default is `30000`.
+  #minRecycleIntervalMs = 0;
   #adaptiveEnabled;
   /**
    * Adaptive concurrency controller (ADR-0014 T7). `null` when the
@@ -134,6 +138,33 @@ export class WorkerRuntime extends EventEmitter {
     }
     this.#accumulationRateMbPerSec = accumulationRateMbPerSec;
 
+    // HARDEN-07 (ADR-0024 C2): recycle hysteresis — minimum ms between
+    // consecutive recycles of the SAME worker. `0` (default per spec)
+    // disables the throttle — back-compat with the pre-HARDEN-07
+    // behavior. `30000` (the spec's recommended default) is the value
+    // users should pass when they want hysteresis.
+    let minRecycleIntervalMs;
+    if (options.minRecycleIntervalMs === undefined) {
+      // Use 0 as the runtime-level default to preserve pre-HARDEN-07
+      // behavior. The supervisor-level default of 30000 applies only
+      // when constructed directly (test paths).
+      minRecycleIntervalMs = 0;
+    } else if (
+      typeof options.minRecycleIntervalMs !== 'number' ||
+      Number.isNaN(options.minRecycleIntervalMs)
+    ) {
+      throw new TypeError(
+        `createWorkerRuntime: options.minRecycleIntervalMs must be a non-negative number, got ${options.minRecycleIntervalMs}`,
+      );
+    } else if (options.minRecycleIntervalMs < 0) {
+      throw new RangeError(
+        `createWorkerRuntime: options.minRecycleIntervalMs must be non-negative, got ${options.minRecycleIntervalMs}`,
+      );
+    } else {
+      minRecycleIntervalMs = options.minRecycleIntervalMs;
+    }
+    this.#minRecycleIntervalMs = minRecycleIntervalMs;
+
     // Validate resourceLimits before any worker spawn. See ADR-0019 §2.
     if (options.resourceLimits !== undefined) {
       const rl = options.resourceLimits;
@@ -208,6 +239,10 @@ export class WorkerRuntime extends EventEmitter {
       // (Infinity) by default — back-compat with the absolute-threshold
       // behavior the runtime had pre-HARDEN-06.
       accumulationRateMbPerSec: this.#accumulationRateMbPerSec,
+      // HARDEN-07 (ADR-0024 C2): recycle hysteresis window. `0`
+      // (runtime default) disables the throttle; users opt in by
+      // passing `minRecycleIntervalMs: 30000` or similar.
+      minRecycleIntervalMs: this.#minRecycleIntervalMs,
     });
 
     // Wire supervisor events to runtime events
@@ -226,6 +261,16 @@ export class WorkerRuntime extends EventEmitter {
     this.#supervisor.on('worker_recycling', (data) => {
       this.emit('worker_recycling', data);
       this.emit('worker:recycling', data);
+    });
+
+    // HARDEN-07 (ADR-0024 C2): forward hysteresis-throttled recycle
+    // decisions. Mirrors the `worker_recycling` re-emit above: the
+    // colon form (`worker:recycle:skipped`) is the public surface;
+    // the underscore form (`worker_recycle:skipped`) is kept for
+    // back-compat with internal listeners.
+    this.#supervisor.on('worker_recycle:skipped', (data) => {
+      this.emit('worker_recycle:skipped', data);
+      this.emit('worker:recycle:skipped', data);
     });
 
     this.#supervisor.on('worker_recycled', (data) => {
@@ -496,6 +541,25 @@ export class WorkerRuntime extends EventEmitter {
     return this.#supervisor.getWorkerSnapshots();
   }
 
+  /**
+   * HARDEN-07 (ADR-0024 C2): forces an immediate recycle check for the
+   * given worker. Operators use this to drain a specific worker before
+   * a rolling deploy, or to trigger a recycle right after a manual
+   * memory-pressure observation. Returns `false` when the worker is
+   * not in the pool (already recycled, dedicated, or shutting down).
+   *
+   * Side effects (emitted by the runtime):
+   *   - `worker:recycle:skipped` — hysteresis blocked the decision.
+   *   - `worker:recycling` + spawn of a replacement — decision committed.
+   *
+   * @param {string} workerId
+   * @returns {boolean}
+   */
+  recycleWorker(workerId) {
+    if (this.#isShuttingDown) return false;
+    return this.#supervisor.forceRecycleCheck(workerId);
+  }
+
   get maxTasksPerWorker() {
     return this.#maxTasksPerWorker;
   }
@@ -509,6 +573,12 @@ export class WorkerRuntime extends EventEmitter {
   // (default).
   get accumulationRateMbPerSec() {
     return this.#accumulationRateMbPerSec;
+  }
+
+  // HARDEN-07 (ADR-0024 C2): exposes the configured recycle hysteresis
+  // window (ms). `0` (runtime default) disables the throttle.
+  get minRecycleIntervalMs() {
+    return this.#minRecycleIntervalMs;
   }
 
   get forceKillOnTimeout() {
