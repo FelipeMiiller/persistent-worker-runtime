@@ -253,17 +253,17 @@ describe('ADR-0012 — streaming edge cases (predictive)', () => {
     // workers that emit late events after shutdown — a real memory leak class
     // in worker_thread implementations.
     //
-    // PHASE-3 FINDING: this test is currently SKIPPED because the runtime
-    // DOES leak late stream:chunk events after shutdown. Repro: pull 3 chunks,
-    // break, shutdown — chunk(s) buffered in the worker MessagePort arrive
-    // AFTER runtime.shutdown() resolves, firing emit('stream:chunk'). The test
-    // is included (with .skip) so:
-    //   1. The contract is documented in code (intent: should not leak)
-    //   2. Anyone fixing the bug can un-skip and verify the contract holds
+    // Phase-3 fix landed: `src/worker-runtime.js#onChunk` now guards with
+    // `if (this.#isShuttingDown) return;` before emitting `stream:chunk`,
+    // so late-arriving chunks from the worker MessagePort (after shutdown)
+    // are silently dropped instead of leaking.
     //
-    // Fix location: src/worker-runtime.js:696 — guard onChunk with
-    //   `if (this.#isShuttingDown) return;`
-    it.skip('emits no stream:chunk after runtime.shutdown() (Phase-3 finding: skipped pending fix)', async () => {
+    // Note on test design: we cannot use `mustNotCall` directly because
+    // the listener is registered before any chunks are pulled (chunks
+    // pulled by the for-await fire `stream:chunk` events normally, before
+    // shutdown). Instead we track a `shutdownStarted` flag and count any
+    // events that fire AFTER it — those are the late/leaked events.
+    it('emits no stream:chunk after runtime.shutdown() (Phase-3 finding: fixed)', async () => {
       runtime = await createWorkerRuntime({ workers: 1 });
       const stream = runtime.stream(async function* () {
         try {
@@ -273,24 +273,39 @@ describe('ADR-0012 — streaming edge cases (predictive)', () => {
         }
       });
 
-      runtime.on(
-        'stream:chunk',
-        common.mustNotCall(
-          'stream:chunk fired after runtime.shutdown() — worker leaked a late event',
-        ),
-      );
+      // Track chunk events. Events before `shutdownStarted=true` are
+      // expected (chunks the consumer is pulling). Events after are
+      // late/leaked and should be ZERO.
+      let shutdownStarted = false;
+      const lateChunks = [];
+      runtime.on('stream:chunk', ({ seq }) => {
+        if (shutdownStarted) lateChunks.push(seq);
+      });
 
-      // Pull a few chunks, then shut down the runtime.
+      // Pull a few chunks (these fire stream:chunk events normally,
+      // BEFORE shutdown — not counted as late).
       let count = 0;
       for await (const _ of stream) {
         count++;
         if (count >= 3) break;
       }
+
+      // Mark BEFORE awaiting shutdown. Any chunk event firing after this
+      // point — including during the shutdown() promise resolution —
+      // counts as a leak and is collected in `lateChunks`.
+      shutdownStarted = true;
       await runtime.shutdown();
       runtime = null;
 
-      // Give a generous window for any rogue late event to fire.
+      // Generous window for any rogue late event to fire on the IPC
+      // bus after shutdown has resolved.
       await common.sleep(100);
+
+      assert.equal(
+        lateChunks.length,
+        0,
+        `expected NO stream:chunk events after shutdown started; got ${lateChunks.length} late chunks with seq=${lateChunks.join(',')}`,
+      );
       assert.ok(count >= 3, 'should have drained some chunks before shutdown');
     });
   });

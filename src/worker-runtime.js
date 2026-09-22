@@ -1046,6 +1046,15 @@ export class WorkerRuntime extends EventEmitter {
       fnDeps: scanFnDeps(taskFn.toString()),
       payload,
       onChunk: ({ seq, chunk }) => {
+        // Phase-3 leak fix: chunks buffered in the worker's MessagePort
+        // can arrive AFTER `runtime.shutdown()` resolves. If we let them
+        // through, `stream:chunk` fires on a torn-down runtime (memory
+        // leak / incorrect contract). `stream.pushChunk` is already a
+        // no-op once the stream is settled/aborted, so the only escape
+        // hatch here is the emit below. See
+        // `test/streaming-edge-cases.test.js` "emits no stream:chunk
+        // after runtime.shutdown()" (un-skipped by this change).
+        if (this.#isShuttingDown) return;
         stream.pushChunk(chunk);
         // T6 telemetry: stream:chunk { taskId, seq } fires per delivered
         // chunk. seq is the per-stream monotonic counter from the worker.
