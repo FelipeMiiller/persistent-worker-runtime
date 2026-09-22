@@ -159,6 +159,81 @@ describe('WorkerRuntime — recycleBackoffMs (HARDEN-11)', () => {
     }
   });
 
+  it('shutdown() during a recycle-backoff releases the awaiting Promise (regression for Finding 1 in .agents/issues/002)', async () => {
+    // Issue 002 Finding 1 — when `shutdown()` is called while a
+    // recycle-backoff timer is in flight, the shutdown path must invoke
+    // `resolve()` on the awaiting Promise inside `#checkRecycling` (not
+    // just `clearTimeout` the timer). Without `resolve()`, the Promise
+    // hangs forever and the surrounding closure (`worker` + the
+    // `replacement` worker) is leaked until the runtime is GC'd.
+    //
+    // Observable contract enforced by this test:
+    //   1. shutdown() returns promptly even when interrupting a long backoff.
+    //   2. No `unhandledRejection` events fire during the flow.
+    //   3. Post-shutdown state is clean (no workers remaining).
+    //
+    // Caveat: the closure release itself is not directly observable
+    // without `--expose-gc` (we don't enable it in CI). This test
+    // therefore documents the user-visible contract and acts as a
+    // regression guard — any future change that re-introduces the hang
+    // would either break promptness, surface an unhandled rejection, or
+    // leave stale workers behind.
+
+    const runtime = await createWorkerRuntime({
+      workers: 1,
+      maxTasksPerWorker: 1,
+      // Long enough to interrupt mid-flight.
+      recycleBackoffMs: 5000,
+    });
+
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      // Trigger a recycle by exhausting maxTasksPerWorker on the only worker.
+      await runtime.execute({ fn: () => 42 });
+
+      // Wait briefly for the replacement to spawn and the OLD worker
+      // to enter 'recycling' state — we are now mid-backoff.
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      const midWorkers = runtime.getWorkers();
+      assert.ok(
+        midWorkers.some((w) => w.status === 'recycling'),
+        `expected one worker in 'recycling' status during backoff, got: ${JSON.stringify(
+          midWorkers.map((w) => ({ status: w.status })),
+        )}`,
+      );
+
+      // Shutdown mid-backoff. Pre-fix: leaked the awaiting Promise's
+      // closure (worker + replacement held until GC). Post-fix: shutdown
+      // resolves the Promise so the `.then()` continuation runs to
+      // completion (and bails out via the `isShuttingDown` check).
+      const t0 = Date.now();
+      await runtime.shutdown();
+      const elapsed = Date.now() - t0;
+
+      // Generous bound: 1000 ms is way less than the 5000 ms backoff and
+      // leaves room for CI timer noise on slow runners.
+      assert.ok(
+        elapsed < 1000,
+        `shutdown took ${elapsed}ms — expected < 1000ms; the backoff Promise may still be hanging (Finding 1 unresolved)`,
+      );
+
+      assert.equal(
+        unhandled.length,
+        0,
+        `unexpected unhandledRejection events: ${JSON.stringify(unhandled)}`,
+      );
+
+      // Post-shutdown state is clean — no workers remain.
+      assert.equal(runtime.getWorkers().length, 0);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('rejects negative recycleBackoffMs with RangeError', async () => {
     await assert.rejects(
       () => createWorkerRuntime({ workers: 1, recycleBackoffMs: -1 }),

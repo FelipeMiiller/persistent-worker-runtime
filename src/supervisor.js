@@ -56,7 +56,12 @@ export class Supervisor extends EventEmitter {
   #recycleBackoffMs = 0;
   // Tracks pending backoff timers per workerId so shutdown() can clear
   // them and prevent dangling `setTimeout`s from firing post-shutdown.
-  #recycleBackoffTimers = new Map(); // workerId -> Timeout
+  // Stores `{ timer, resolve }` (not just `timer`) so shutdown() can also
+  // invoke the awaiting Promise's `resolve` callback — otherwise the
+  // `.then()` chain inside `#checkRecycling` hangs forever, leaking the
+  // closure (worker + replacement) until the runtime is GC'd. See
+  // `.agents/issues/002-runtime-hardening-wave4-review.md` Finding 1.
+  #recycleBackoffTimers = new Map(); // workerId -> { timer, resolve }
   // HARDEN-08 (ADR-0024 C3): opt-out from recycling on
   // `maxTasksPerWorker` exhaustion. When `false`, the worker exceeding
   // the task limit emits `worker_tasks:exhausted` warning event instead
@@ -685,7 +690,13 @@ export class Supervisor extends EventEmitter {
         if (this.#recycleBackoffMs > 0) {
           await new Promise((resolve) => {
             const timer = setTimeout(resolve, this.#recycleBackoffMs);
-            this.#recycleBackoffTimers.set(worker.id, timer);
+            // Store `resolve` alongside `timer` so shutdown() can release
+            // this awaiting Promise when it clears the timer. Without
+            // this, the Promise hangs forever and the surrounding
+            // closure (worker + replacement) leaks until GC. See
+            // `.agents/issues/002-runtime-hardening-wave4-review.md`
+            // Finding 1.
+            this.#recycleBackoffTimers.set(worker.id, { timer, resolve });
           });
           this.#recycleBackoffTimers.delete(worker.id);
 
@@ -848,8 +859,15 @@ export class Supervisor extends EventEmitter {
     // that have already been torn down by this shutdown. The timers
     // are no-ops once the worker is terminated, but cleaning them up
     // prevents stray `setTimeout` callbacks from running.
-    for (const timer of this.#recycleBackoffTimers.values()) {
-      clearTimeout(timer);
+    //
+    // We also invoke `entry.resolve()` after `clearTimeout` to release
+    // the awaiting Promise inside `#checkRecycling`. Without this, the
+    // `.then()` chain attached to `#spawnWorker()` hangs forever,
+    // leaking the closure (worker + replacement) until GC. See
+    // `.agents/issues/002-runtime-hardening-wave4-review.md` Finding 1.
+    for (const entry of this.#recycleBackoffTimers.values()) {
+      clearTimeout(entry.timer);
+      entry.resolve();
     }
     this.#recycleBackoffTimers.clear();
     const terminations = Array.from(this.#workers.values()).map((w) => w.terminate());
