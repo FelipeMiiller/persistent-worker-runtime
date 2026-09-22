@@ -91,6 +91,23 @@ const BATCH_INTERVAL_MS = Math.max(1, Math.round((BATCH_SIZE / TARGET_RATE_PER_S
 // Recycling threshold (ADR-0019). With 10 KB per-task accumulation,
 // this fires after ~3 000 tasks per worker.
 const MAX_MEMORY_MB = Number(process.env.BENCH_IO_MAX_MEMORY_MB) || 80;
+// HARDEN-06 (ADR-0024 C1): rate-based recycling guard. Defaults to
+// `Infinity` (disabled) so the benchmark exercises the absolute-cap
+// path that originally surfaced the 242-recyclings finding. Set
+// `BENCH_IO_ACCUMULATION_RATE_MB_PER_SEC` (e.g. `5`) to opt into the
+// Wave-3 rate-based guard and measure its impact.
+const ACCUMULATION_RATE_MB_PER_SEC =
+  process.env.BENCH_IO_ACCUMULATION_RATE_MB_PER_SEC === undefined
+    ? Infinity
+    : Number(process.env.BENCH_IO_ACCUMULATION_RATE_MB_PER_SEC);
+// HARDEN-07 (ADR-0024 C2): per-worker recycle hysteresis. Defaults to
+// `0` (disabled) for back-compat with the pre-HARDEN-07 behavior.
+// Set `BENCH_IO_MIN_RECYCLE_INTERVAL_MS` (e.g. `30000`) to opt into
+// the Wave-3 hysteresis throttle and measure its impact.
+const MIN_RECYCLE_INTERVAL_MS =
+  process.env.BENCH_IO_MIN_RECYCLE_INTERVAL_MS === undefined
+    ? 0
+    : Number(process.env.BENCH_IO_MIN_RECYCLE_INTERVAL_MS);
 // Preemption configuration — aggressive enough to confirm the
 // watchdog works within Phase 1's 33-second window.
 const FORCE_KILL_ON_TIMEOUT = true;
@@ -397,7 +414,7 @@ async function main() {
     `  payload: ${PAYLOAD_MIN_BYTES} B - ${PAYLOAD_MAX_BYTES} B + 10 KB per-task accumulation + ${(FAILURE_RATE * 100).toFixed(0)}% failure injection`,
   );
   logLine(
-    `  recycling threshold: maxMemoryMb=${MAX_MEMORY_MB} | preemption: forceKillOnTimeout=${FORCE_KILL_ON_TIMEOUT}, killGracePeriodMs=${KILL_GRACE_PERIOD_MS}`,
+    `  recycling threshold: maxMemoryMb=${MAX_MEMORY_MB} | accumulationRateMbPerSec=${ACCUMULATION_RATE_MB_PER_SEC === Infinity ? '∞' : ACCUMULATION_RATE_MB_PER_SEC} | minRecycleIntervalMs=${MIN_RECYCLE_INTERVAL_MS} | preemption: forceKillOnTimeout=${FORCE_KILL_ON_TIMEOUT}, killGracePeriodMs=${KILL_GRACE_PERIOD_MS}`,
   );
   logLine(`  bounded concurrency: ${MAX_INFLIGHT} in-flight max`);
   logLine(
@@ -436,6 +453,13 @@ async function main() {
     maxMemoryMb: MAX_MEMORY_MB,
     forceKillOnTimeout: FORCE_KILL_ON_TIMEOUT,
     killGracePeriodMs: KILL_GRACE_PERIOD_MS,
+    // HARDEN-06 (ADR-0024 C1): rate-based recycling guard. With 5 MB/s,
+    // workers are recycled on accumulation rate before the absolute cap.
+    accumulationRateMbPerSec: ACCUMULATION_RATE_MB_PER_SEC,
+    // HARDEN-07 (ADR-0024 C2): recycle hysteresis — 30 s default per
+    // ADR-0024 spec. Reduces the 242-baseline recycle storm toward the
+    // ≤80 Wave-3 target (and toward the Wave-4 LRU-uniform target).
+    minRecycleIntervalMs: MIN_RECYCLE_INTERVAL_MS,
   });
 
   // Event counters + timestamps for forensic reconstruction.
