@@ -1,6 +1,6 @@
 {
   "name": "persistent-worker-runtime",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A persistent worker execution runtime for Node.js to offload CPU-bound tasks and preserve Event Loop responsiveness with stateful workers.",
   "type": "module",
   "main": "src/index.js",
@@ -13,18 +13,44 @@
   },
   "files": [
     "src",
+    "skills",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/**/*.test.js",
-    "test:coverage": "node --test --experimental-test-coverage test/**/*.test.js",
+    "test": "node --test --test-concurrency=4 test/**/*.test.js",
+    "test:coverage": "node --test --test-concurrency=4 --experimental-test-coverage test/**/*.test.js",
+    "lint": "biome check src/ test/ examples/ benchmarks/",
+    "lint:ci": "biome ci src/ test/ examples/ benchmarks/",
+    "lint:fix": "biome check --write --unsafe src/ test/ examples/ benchmarks/",
+    "format": "biome format --write src/ test/ examples/ benchmarks/",
+    "format:check": "biome format src/ test/ examples/ benchmarks/",
+    "validate": "npm run lint && npm test",
     "benchmark": "node benchmarks/event-loop-lag.benchmark.js",
     "benchmark:stateful": "node benchmarks/stateful-vs-stateless.benchmark.js",
     "benchmark:concurrency": "node benchmarks/batch-concurrency.benchmark.js",
     "benchmark:outbox": "node benchmarks/outbox-throughput.benchmark.js",
-    "benchmark:all": "node benchmarks/event-loop-lag.benchmark.js && node benchmarks/stateful-vs-stateless.benchmark.js && node benchmarks/batch-concurrency.benchmark.js && node benchmarks/outbox-throughput.benchmark.js",
-    "prepublishOnly": "npm test"
+    "benchmark:zero-copy": "node benchmarks/zero-copy-transfer.benchmark.js",
+    "benchmark:preemption": "node benchmarks/preemption-recovery.benchmark.js",
+    "benchmark:recycling": "node benchmarks/worker-recycling.benchmark.js",
+    "benchmark:priority": "node benchmarks/priority-routing.benchmark.js",
+    "benchmark:cancel": "node benchmarks/abort-cancellation.benchmark.js",
+    "benchmark:scaling": "node benchmarks/throughput-scaling.benchmark.js",
+    "benchmark:cpu-saturation": "node benchmarks/cpu-saturation.benchmark.js",
+    "benchmark:broadcast": "node benchmarks/broadcast-fanout.benchmark.js",
+    "benchmark:streaming-throughput": "node benchmarks/streaming-throughput.benchmark.js",
+    "benchmark:streaming-memory": "node benchmarks/streaming-memory.benchmark.js",
+    "benchmark:streaming-stress": "node benchmarks/streaming-stress.benchmark.js",
+    "benchmark:default-sizing-memory": "node benchmarks/default-sizing-memory.benchmark.js",
+    "benchmark:streaming-queue-dispatch": "node benchmarks/streaming-queue-dispatch.benchmark.js",
+    "benchmark:streaming-abort-latency": "node benchmarks/streaming-abort-latency.benchmark.js",
+    "benchmark:adaptive-controller": "node --expose-gc benchmarks/adaptive-controller-tick.benchmark.js",
+    "benchmark:adaptive-controller-opt-out": "node benchmarks/adaptive-controller-opt-out.benchmark.js",
+    "benchmark:adaptive-concurrency": "node benchmarks/adaptive-concurrency.benchmark.js",
+    "benchmark:io-throughput": "node benchmarks/io-throughput.benchmark.js",
+    "benchmark:all": "node benchmarks/event-loop-lag.benchmark.js && node benchmarks/stateful-vs-stateless.benchmark.js && node benchmarks/batch-concurrency.benchmark.js && node benchmarks/outbox-throughput.benchmark.js && node benchmarks/zero-copy-transfer.benchmark.js && node benchmarks/priority-routing.benchmark.js && node benchmarks/abort-cancellation.benchmark.js && node benchmarks/throughput-scaling.benchmark.js && node benchmarks/cpu-saturation.benchmark.js && node benchmarks/preemption-recovery.benchmark.js && node benchmarks/worker-recycling.benchmark.js && node benchmarks/broadcast-fanout.benchmark.js && node benchmarks/streaming-throughput.benchmark.js && node benchmarks/streaming-memory.benchmark.js && node benchmarks/streaming-stress.benchmark.js && node benchmarks/default-sizing-memory.benchmark.js && node benchmarks/streaming-queue-dispatch.benchmark.js && node benchmarks/streaming-abort-latency.benchmark.js && node --expose-gc benchmarks/adaptive-controller-tick.benchmark.js && node benchmarks/adaptive-controller-opt-out.benchmark.js && node benchmarks/adaptive-concurrency.benchmark.js && node benchmarks/io-throughput.benchmark.js",
+    "prepare": "husky || true",
+    "prepublishOnly": "npm run validate"
   },
   "repository": {
     "type": "git",
@@ -46,5 +72,15 @@
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.5.1"
+  },
+  "lint-staged": {
+    "*.{js,mjs,cjs,json}": [
+      "biome check --write"
+    ]
   }
 }

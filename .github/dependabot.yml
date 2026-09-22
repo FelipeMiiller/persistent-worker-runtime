@@ -1,0 +1,35 @@
+# Set update schedule for GitHub Actions and npm dependencies.
+# Weekly for the application ecosystem, monthly for tooling.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      semver-major-days: 7
+      semver-minor-days: 4
+      semver-patch-days: 2
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 10
+    groups:
+      dev-deps:
+        applies-to: version-updates
+        patterns:
+          - '*'
+    ignore:
+      # Zero-deps rule: only accept patch-level updates for transitive
+      # tooling so the project never grows a runtime dependency tree
+      # without an explicit ADR.
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major', 'version-update:semver-minor']

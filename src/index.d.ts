@@ -1,4 +1,5 @@
 import { ResourceLimits } from 'node:worker_threads';
+import { EventEmitter } from 'node:events';
 
 /**
  * Configuration options for initializing a WorkerRuntime.
@@ -11,12 +12,29 @@ export interface WorkerRuntimeOptions {
   workers?: number;
 
   /**
-   * Minimum number of worker threads kept alive in the elastic pool.
+   * Maximum number of tasks a worker thread executes before graceful recycling.
+   * Defaults to Infinity.
+   */
+  maxTasksPerWorker?: number;
+
+  /**
+   * Maximum V8 heap memory (MB) allowed before graceful worker recycling is triggered.
+   * Defaults to Infinity.
+   */
+  maxMemoryMb?: number;
+
+  /**
+   * Lower bound for the adaptive concurrency controller's resize band.
+   * Defaults to `1`. Honoured only when adaptive is enabled (no explicit
+   * `workers: N` and no `concurrency: 'fixed'`); otherwise the pool stays
+   * pinned to the explicit size.
    */
   minWorkers?: number;
 
   /**
-   * Maximum number of worker threads allowed during burst periods.
+   * Upper bound for the adaptive concurrency controller's resize band.
+   * Defaults to `availableParallelism()`. Honoured only when adaptive is
+   * enabled (no explicit `workers: N` and no `concurrency: 'fixed'`).
    */
   maxWorkers?: number;
 
@@ -47,6 +65,54 @@ export interface WorkerRuntimeOptions {
    * Defaults to 30000ms.
    */
   queueTimeoutMs?: number;
+
+  /**
+   * Whether to forcibly terminate the worker thread on execution timeout via worker.terminate().
+   * Defaults to false.
+   */
+  forceKillOnTimeout?: boolean;
+
+  /**
+   * Override for the adaptive controller's shrink ELU threshold.
+   * Pass-through to the controller (ADR-0014). Leave unset for production.
+   */
+  shrinkEluThreshold?: number;
+
+  /**
+   * Override for the adaptive controller's shrink latency p99 threshold (ms).
+   * Pass-through to the controller. Leave unset for production.
+   */
+  shrinkLatencyP99Ms?: number;
+
+  /**
+   * Override for the adaptive controller's grow ELU threshold.
+   * Pass-through to the controller. Leave unset for production.
+   */
+  growEluThreshold?: number;
+
+  /**
+   * Override for the adaptive controller's grow latency p99 threshold (ms).
+   * Pass-through to the controller. Leave unset for production.
+   */
+  growLatencyP99Ms?: number;
+
+  /**
+   * Override for the adaptive controller's EWMA smoothing factor.
+   * Pass-through to the controller. Leave unset for production.
+   */
+  ewmaAlpha?: number;
+
+  /**
+   * Override for the adaptive controller's debounce window (consecutive ticks).
+   * Pass-through to the controller. Leave unset for production.
+   */
+  debounceTicks?: number;
+
+  /**
+   * Grace period (ms) to allow cooperative cancellation before hard thread termination.
+   * Defaults to 500ms.
+   */
+  killGracePeriodMs?: number;
 
   /**
    * V8 memory and stack resource limits applied to each worker isolate.
@@ -89,6 +155,18 @@ export interface TaskOptions<TPayload = any, TResult = any> {
    * 0 means unlimited. Defaults to 0.
    */
   timeoutMs?: number;
+
+  /**
+   * Whether to forcibly terminate the worker thread on execution timeout.
+   * Defaults to the runtime-level configuration (false).
+   */
+  forceKillOnTimeout?: boolean;
+
+  /**
+   * Grace period (ms) before hard kill is executed.
+   * Defaults to the runtime-level configuration (500ms).
+   */
+  killGracePeriodMs?: number;
 
   /**
    * Maximum queue wait duration (ms) before rejecting with TaskQueueTimeoutError.
@@ -146,6 +224,44 @@ export interface RuntimeStats {
   submittedTasks: number;
   completedTasks: number;
   failedTasks: number;
+  recycledWorkersCount: number;
+  preemptedTasksCount: number;
+}
+
+/**
+ * Event payload emitted when a persistent worker begins graceful recycling.
+ */
+export interface WorkerRecyclingEvent {
+  workerId: string;
+  reason: 'tasks_exceeded' | 'memory_exceeded' | string;
+  tasksCompleted: number;
+  memoryUsage: number;
+}
+
+/**
+ * Event payload emitted when a retired worker terminates and its replacement is active.
+ */
+export interface WorkerRecycledEvent {
+  oldWorkerId: string;
+  newWorkerId: string;
+}
+
+/**
+ * Event payload emitted when a task is forcibly preempted due to timeout.
+ */
+export interface TaskPreemptedEvent {
+  workerId: string;
+  taskId: string;
+  timeoutMs: number;
+  preempted: boolean;
+}
+
+/**
+ * Event payload emitted when a preempted worker terminates.
+ */
+export interface WorkerPreemptedEvent {
+  workerId: string;
+  exitCode?: number;
 }
 
 /**
@@ -190,9 +306,18 @@ export class WorkerHandle {
   readonly id: string;
   readonly name: string | null;
   readonly affinityKey: string | null;
-  readonly status: 'starting' | 'idle' | 'busy' | 'terminating' | 'terminated';
+  readonly status: 'starting' | 'idle' | 'busy' | 'recycling' | 'preempting' | 'terminating' | 'terminated';
   readonly isIdle: boolean;
+  readonly isRecycling: boolean;
+  readonly isPreempted: boolean;
   readonly tasksCompleted: number;
+  readonly lastMemoryUsageBytes: number;
+  readonly lastMemoryUsage: number;
+
+  /**
+   * Marks this worker as recycling to prevent new task assignments.
+   */
+  markRecycling(): void;
 
   /**
    * Gets a value from the worker's private L1 in-memory heap.
@@ -228,13 +353,29 @@ export class WorkerHandle {
 /**
  * Persistent Worker Runtime orchestrator.
  */
-export class WorkerRuntime {
+export class WorkerRuntime extends EventEmitter {
   constructor(options?: WorkerRuntimeOptions);
+
+  get maxTasksPerWorker(): number;
+  get maxMemoryMb(): number;
+  get forceKillOnTimeout(): boolean;
+  get killGracePeriodMs(): number;
 
   /**
    * Current real-time metrics of the worker pool and task queue.
    */
   get stats(): RuntimeStats;
+
+  on(event: 'worker_recycling' | 'worker:recycling', listener: (data: WorkerRecyclingEvent) => void): this;
+  on(event: 'worker_recycled' | 'worker:recycled', listener: (data: WorkerRecycledEvent) => void): this;
+  on(event: 'worker_preempted' | 'worker:preempted', listener: (data: WorkerPreemptedEvent) => void): this;
+  on(event: 'worker:ready', listener: (data: { workerId: string }) => void): this;
+  on(event: 'worker:replaced', listener: (data: { oldId: string; newId: string }) => void): this;
+  on(event: 'task_preempted' | 'task:preempted', listener: (data: TaskPreemptedEvent) => void): this;
+  on(event: 'task:completed', listener: (data: { taskId: string; type: string; durationMs: number; result: any }) => void): this;
+  on(event: 'task:failed', listener: (data: { taskId: string; type: string; durationMs: number; attempts: number; error: Error }) => void): this;
+  on(event: 'task:retrying', listener: (data: { taskId: string; attempt: number; maxRetries: number; delayMs: number; error: Error }) => void): this;
+  on(event: string | symbol, listener: (...args: any[]) => void): this;
 
   /**
    * Starts the runtime and warms up persistent worker threads.
@@ -322,6 +463,37 @@ export class WorkerRuntime {
  */
 export function createWorkerRuntime(options?: WorkerRuntimeOptions): Promise<WorkerRuntime>;
 
+/**
+ * Supervisor monitors worker lifecycles, detects crashes, and maintains pool capacity automatically.
+ */
+export class Supervisor extends EventEmitter {
+  constructor(options?: {
+    workers?: number;
+    workerScript?: string;
+    handlerPath?: string;
+    resourceLimits?: ResourceLimits;
+    maxTasksPerWorker?: number;
+    maxMemoryMb?: number;
+    forceKillOnTimeout?: boolean;
+    killGracePeriodMs?: number;
+  });
+
+  get maxTasksPerWorker(): number;
+  get maxMemoryMb(): number;
+  get forceKillOnTimeout(): boolean;
+  get killGracePeriodMs(): number;
+  get recycledCount(): number;
+  get preemptedCount(): number;
+  get totalWorkers(): number;
+  get idleWorkers(): WorkerHandle[];
+  get allWorkers(): WorkerHandle[];
+
+  start(): Promise<void>;
+  findWorkerForTask(task: any): WorkerHandle | null;
+  createDedicatedWorker(options?: any): Promise<WorkerHandle>;
+  shutdown(): Promise<void>;
+}
+
 // Error Hierarchy
 export class WorkerRuntimeError extends Error {
   code: string;
@@ -338,6 +510,8 @@ export class TaskQueueTimeoutError extends WorkerRuntimeError {
 export class TaskTimeoutError extends WorkerRuntimeError {
   taskId: string;
   timeoutMs: number;
+  preempted: boolean;
+  workerId: string | null;
 }
 export class TaskAbortedError extends WorkerRuntimeError {
   taskId: string;

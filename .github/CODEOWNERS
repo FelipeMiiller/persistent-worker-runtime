@@ -1,0 +1,27 @@
+# Persistent Worker Runtime — Codeowners
+#
+# This file does not define any requirements for landing PRs. Its
+# purpose is to allow automation of courtesy pings to the relevant
+# maintainer(s) when any of the paths listed here are modified.
+#
+# Codeowners must always be teams or maintainers, never individuals
+# without their consent. For a single-maintainer JS library the
+# pattern collapses to one owner — listed here for the future when
+# the project gains collaborators.
+
+# Core runtime
+/src/                          @FelipeMiiller
+/test/                         @FelipeMiiller
+/benchmarks/                   @FelipeMiiller
+/examples/                     @FelipeMiiller
+
+# Specs and operational docs
+/.specs/                       @FelipeMiiller
+/.agents/                      @FelipeMiiller
+/docs/                         @FelipeMiiller
+/README.md                     @FelipeMiiller
+/CONTRIBUTING.md               @FelipeMiiller
+
+# CI and GitHub metadata
+/.github/                      @FelipeMiiller
+/package.json                  @FelipeMiiller

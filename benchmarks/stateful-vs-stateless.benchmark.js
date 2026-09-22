@@ -9,7 +9,9 @@ async function runBenchmark() {
   const iterations = 50;
 
   // 1. STATELESS MODE: Every task has to re-generate / re-parse heavy state
-  console.log(`[1/2] STATELESS: Executing ${iterations} tasks that RE-ALLOCATE a 200,000-item dictionary each time...`);
+  console.log(
+    `[1/2] STATELESS: Executing ${iterations} tasks that RE-ALLOCATE a 200,000-item dictionary each time...`,
+  );
   const statelessStart = performance.now();
 
   for (let i = 0; i < iterations; i++) {
@@ -32,7 +34,9 @@ async function runBenchmark() {
   console.log(`  -> Average Latency per task: ${(statelessDuration / iterations).toFixed(2)}ms\n`);
 
   // 2. STATEFUL MODE: Worker allocates state ONCE in L1 memory, subsequent tasks are instant
-  console.log(`[2/2] STATEFUL (L1 Memory): Initializing state ONCE, then executing ${iterations} queries...`);
+  console.log(
+    `[2/2] STATEFUL (L1 Memory): Initializing state ONCE, then executing ${iterations} queries...`,
+  );
   const statefulWorker = await runtime.createWorker({ name: 'warm-cache-worker' });
   const statefulStart = performance.now();
 
@@ -74,7 +78,9 @@ async function runBenchmark() {
 
   console.log('=====================================================================');
   console.log('CONCLUSION:');
-  console.log(`- Persistent L1 memory provides a ${(statelessDuration / statefulDuration).toFixed(1)}x latency improvement.`);
+  console.log(
+    `- Persistent L1 memory provides a ${(statelessDuration / statefulDuration).toFixed(1)}x latency improvement.`,
+  );
   console.log('- Zero re-parsing / re-allocation overhead across tasks!');
   console.log('=====================================================================');
 }

@@ -1,5 +1,5 @@
-import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { after, before, describe, it } from 'node:test';
 import { createWorkerRuntime } from '../src/index.js';
 
 describe('Concurrency & Pool Saturation Stress Tests', () => {
@@ -23,18 +23,74 @@ describe('Concurrency & Pool Saturation Stress Tests', () => {
   it('handles multiple overlapping executeAll batches concurrently without deadlocks', async () => {
     // Simulate Request 1 submitting 4 tasks
     const request1 = runtime.executeAll([
-      { type: 'r1_t1', payload: { id: 1 }, fn: async (p) => { await new Promise((r) => setTimeout(r, 20)); return p.id * 10; } },
-      { type: 'r1_t2', payload: { id: 2 }, fn: async (p) => { await new Promise((r) => setTimeout(r, 20)); return p.id * 10; } },
-      { type: 'r1_t3', payload: { id: 3 }, fn: async (p) => { await new Promise((r) => setTimeout(r, 20)); return p.id * 10; } },
-      { type: 'r1_t4', payload: { id: 4 }, fn: async (p) => { await new Promise((r) => setTimeout(r, 20)); return p.id * 10; } },
+      {
+        type: 'r1_t1',
+        payload: { id: 1 },
+        fn: async (p) => {
+          await new Promise((r) => setTimeout(r, 20));
+          return p.id * 10;
+        },
+      },
+      {
+        type: 'r1_t2',
+        payload: { id: 2 },
+        fn: async (p) => {
+          await new Promise((r) => setTimeout(r, 20));
+          return p.id * 10;
+        },
+      },
+      {
+        type: 'r1_t3',
+        payload: { id: 3 },
+        fn: async (p) => {
+          await new Promise((r) => setTimeout(r, 20));
+          return p.id * 10;
+        },
+      },
+      {
+        type: 'r1_t4',
+        payload: { id: 4 },
+        fn: async (p) => {
+          await new Promise((r) => setTimeout(r, 20));
+          return p.id * 10;
+        },
+      },
     ]);
 
     // Simultaneously, Request 2 submits 4 tasks
     const request2 = runtime.executeAll([
-      { type: 'r2_t1', payload: { id: 10 }, fn: async (p) => { await new Promise((r) => setTimeout(r, 20)); return p.id * 2; } },
-      { type: 'r2_t2', payload: { id: 20 }, fn: async (p) => { await new Promise((r) => setTimeout(r, 20)); return p.id * 2; } },
-      { type: 'r2_t3', payload: { id: 30 }, fn: async (p) => { await new Promise((r) => setTimeout(r, 20)); return p.id * 2; } },
-      { type: 'r2_t4', payload: { id: 40 }, fn: async (p) => { await new Promise((r) => setTimeout(r, 20)); return p.id * 2; } },
+      {
+        type: 'r2_t1',
+        payload: { id: 10 },
+        fn: async (p) => {
+          await new Promise((r) => setTimeout(r, 20));
+          return p.id * 2;
+        },
+      },
+      {
+        type: 'r2_t2',
+        payload: { id: 20 },
+        fn: async (p) => {
+          await new Promise((r) => setTimeout(r, 20));
+          return p.id * 2;
+        },
+      },
+      {
+        type: 'r2_t3',
+        payload: { id: 30 },
+        fn: async (p) => {
+          await new Promise((r) => setTimeout(r, 20));
+          return p.id * 2;
+        },
+      },
+      {
+        type: 'r2_t4',
+        payload: { id: 40 },
+        fn: async (p) => {
+          await new Promise((r) => setTimeout(r, 20));
+          return p.id * 2;
+        },
+      },
     ]);
 
     // Simultaneously, Request 3 submits 2 tasks
@@ -102,7 +158,7 @@ describe('Concurrency & Pool Saturation Stress Tests', () => {
           type: 'interactive',
           payload: { idx: i },
           fn: (p) => p.idx * 100,
-        })
+        }),
       );
     }
 

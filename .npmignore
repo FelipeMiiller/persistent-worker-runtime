@@ -1,0 +1,63 @@
+# .npmignore — exclusions for the published tarball
+#
+# This file is the documentation of what is intentionally NOT published
+# when someone runs `npm install persistent-worker-runtime` (or yarn,
+# pnpm, bun). The authoritative source is the `files` whitelist in
+# package.json; this file is defense-in-depth and human-readable intent.
+#
+# To preview what gets published: `npm pack --dry-run`
+
+# === Project planning & docs (internal to maintainers) ===
+/.specs/
+/docs/
+/AGENTS.md
+/HANDOVER.md
+/CONTEXT.md
+/NODEJS_RFC_PROPOSAL_DRAFT.md
+
+# === Tests, benchmarks, examples (not needed by consumers) ===
+/test/
+/benchmarks/
+/examples/
+
+# === Build / CI / tooling metadata ===
+/.github/
+/.gitignore
+/.npmignore
+/.editorconfig
+/.prettierrc*
+/.eslintrc*
+/.agents/
+
+# === OS / editor noise ===
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+*.swo
+
+# === Node / package-manager artifacts ===
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.npm/
+.yarn/
+
+# === Test coverage / build output ===
+/coverage/
+/.nyc_output/
+/dist/
+/build/
+/lib/
+
+# === Environment / secrets ===
+.env
+.env.local
+.env.*.local
+
+# === TypeScript build artifacts (if ever added) ===
+*.tsbuildinfo
+*.d.ts.map

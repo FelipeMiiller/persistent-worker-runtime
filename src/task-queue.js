@@ -20,6 +20,24 @@ export class TaskQueue {
     return this.#queue.length;
   }
 
+  /**
+   * Returns the highest-priority task in the queue WITHOUT removing it.
+   * Used by `WorkerRuntime.#scheduleNext()` (HARDEN-09 / ADR-0024 D1)
+   * to peek the next task before asking the supervisor for the right
+   * worker under the configured dispatch strategy (LRU/FIFO/random).
+   *
+   * The queue is internally sorted by priority descending (see
+   * `#insert`), so index 0 is always the next task the queue WOULD
+   * return — but `dequeue` may still prefer an affinity-matching task
+   * at a different index for dedicated workers.
+   *
+   * @returns {TaskHandle|null}
+   */
+  peek() {
+    if (this.#queue.length === 0) return null;
+    return this.#queue[0];
+  }
+
   get waitingCount() {
     return this.#waiters.length;
   }
@@ -49,6 +67,10 @@ export class TaskQueue {
           this.#insert(task);
           resolve();
         },
+        reject: (err) => {
+          if (waitEntry.timer) clearTimeout(waitEntry.timer);
+          reject(err);
+        },
       };
 
       waitEntry.timer = setTimeout(() => {
@@ -62,7 +84,7 @@ export class TaskQueue {
             taskId: task.id,
             waitedMs: timeoutMs,
             queueDepth: this.#queue.length,
-          }
+          },
         );
         task.reject(err);
         reject(err);
@@ -87,14 +109,14 @@ export class TaskQueue {
     if (worker && (worker.affinityKey || worker.name)) {
       const targetKey = worker.affinityKey || worker.name;
       selectedIndex = this.#queue.findIndex(
-        (task) => !task.isSettled && task.affinityKey === targetKey
+        (task) => !task.isSettled && task.affinityKey === targetKey,
       );
     }
 
     // 2. Otherwise, check for any unpinned task (affinityKey is null)
     if (selectedIndex === -1) {
       selectedIndex = this.#queue.findIndex(
-        (task) => !task.isSettled && (!task.affinityKey || !worker?.isDedicated)
+        (task) => !task.isSettled && (!task.affinityKey || !worker?.isDedicated),
       );
     }
 
@@ -140,10 +162,15 @@ export class TaskQueue {
   #drainWaiters() {
     while (this.#waiters.length > 0 && this.#queue.length < this.#maxQueueSize) {
       const nextWaiter = this.#waiters.shift();
-      if (!nextWaiter.task.isSettled) {
-        nextWaiter.resolve();
-        break;
+      if (nextWaiter.task.isSettled) {
+        // Abandoned waiter: clear its timer and reject the enqueue promise
+        // so callers awaiting enqueue() don't leak unhandled rejections.
+        if (nextWaiter.timer) clearTimeout(nextWaiter.timer);
+        nextWaiter.reject(new Error('Task was settled before queue capacity was available'));
+        continue;
       }
+      nextWaiter.resolve();
+      break;
     }
   }
 
@@ -154,6 +181,7 @@ export class TaskQueue {
     for (const waiter of this.#waiters) {
       if (waiter.timer) clearTimeout(waiter.timer);
       waiter.task.reject(reason);
+      waiter.reject(reason);
     }
     this.#waiters = [];
 

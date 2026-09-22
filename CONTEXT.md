@@ -606,9 +606,22 @@ Core Metrics:
 
 1. Keep the entire codebase in **idiomatic, modern pure JavaScript (ESM)**.
 2. Target **Node.js >= 24.0.0** (using built-in `node:test`, `node:worker_threads`, `node:async_hooks`, `node:perf_hooks`).
-3. Zero external runtime dependencies (essential for Node.js Core submission).
+3. Zero external runtime dependencies (keeps the install surface and supply-chain risk at zero).
 4. Prove the core execution pipeline first:
    ```text
    submit → queue → worker → execute → result
    ```
    while keeping the main Event Loop responsive.
+
+---
+
+# 29. Advanced Architectural Roadmap (ADR-0010 to ADR-0014)
+
+The runtime roadmap incorporates five enterprise-grade architectural pillars:
+
+1. **Automatic Worker Recycling (ADR-0010)**: Prevents V8 heap fragmentation and gradual closure leaks via graceful worker retirement after `maxTasksPerWorker` or `maxMemoryMb`.
+2. **Hard Preemption Watchdog (ADR-0011)**: Protects the system against synchronous runaway loops (`while(true)`) and ReDoS via main-thread orchestrator termination (`forceKillOnTimeout`).
+3. **Streaming Results via AsyncGenerator (ADR-0012)**: Constant $O(1)$ memory consumption for multi-gigabyte outputs and LLM token streaming via `runtime.stream()` and `for await...of`.
+4. **Inter-Worker Broadcast Bus (ADR-0013)**: Direct worker-to-worker and orchestrator-to-all-worker pub/sub coordination using native `BroadcastChannel` with zero main-thread routing.
+5. **Adaptive Concurrency via ELU (ADR-0014)**: Dynamic worker scaling and queue throttling driven by `performance.eventLoopUtilization()` (ELU) to protect HTTP/I/O latency under peak load.
+

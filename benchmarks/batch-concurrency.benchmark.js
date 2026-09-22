@@ -19,7 +19,7 @@ async function runBenchmark() {
       fn: (p) => {
         let sum = 0;
         for (let i = 0; i < p.iterations; i++) {
-          sum += (i % 7);
+          sum += i % 7;
         }
         return { req: p.req, task: p.task, sum };
       },
@@ -41,7 +41,9 @@ async function runBenchmark() {
 
   console.log('=====================================================================');
   console.log('CONCLUSION:');
-  console.log('- Overlapping executeAll batches drain through the 4-worker pool in perfect FIFO order.');
+  console.log(
+    '- Overlapping executeAll batches drain through the 4-worker pool in perfect FIFO order.',
+  );
   console.log('- Hardware concurrency is strictly bounded: no process overload.');
   console.log('=====================================================================');
 }

@@ -51,13 +51,15 @@ async function runBenchmark() {
   await new Promise((r) => setTimeout(r, 50));
 
   // 2. RUNTIME: Running identical workloads concurrently via Persistent Worker Runtime
-  console.log('[2/2] Executing 8 CPU-heavy Fibonacci(36) tasks via Persistent Worker Runtime (4 workers)...');
+  console.log(
+    '[2/2] Executing 8 CPU-heavy Fibonacci(36) tasks via Persistent Worker Runtime (4 workers)...',
+  );
   const runtime = await createWorkerRuntime({ workers: 4 });
 
   const workerHeartbeat = startHeartbeatMonitor();
   const workerStart = performance.now();
 
-  const tasks = Array.from({ length: 8 }, (_, i) => ({
+  const tasks = Array.from({ length: 8 }, (_, _i) => ({
     type: 'fibonacci',
     payload: { n: 36 },
     fn: (p) => {
@@ -69,21 +71,27 @@ async function runBenchmark() {
     },
   }));
 
-  const results = await runtime.executeAll(tasks);
+  const _results = await runtime.executeAll(tasks);
   const workerDuration = performance.now() - workerStart;
   const workerMaxLag = workerHeartbeat.stop();
 
   console.log(`  -> Completed in: ${workerDuration.toFixed(2)}ms`);
   console.log(`  -> Main Thread Event Loop Max Lag: ${workerMaxLag.toFixed(2)}ms`);
-  console.log(`  -> Worker Runtime Throughput: ${(8 / (workerDuration / 1000)).toFixed(2)} ops/sec`);
-  console.log(`  -> Wall-clock execution speedup: ${(syncDuration / workerDuration).toFixed(1)}x faster!\n`);
+  console.log(
+    `  -> Worker Runtime Throughput: ${(8 / (workerDuration / 1000)).toFixed(2)} ops/sec`,
+  );
+  console.log(
+    `  -> Wall-clock execution speedup: ${(syncDuration / workerDuration).toFixed(1)}x faster!\n`,
+  );
 
   await runtime.shutdown();
 
   console.log('=====================================================================');
   console.log('VERDICT:');
   console.log(`- Synchronous execution froze the Event Loop for ${syncMaxLag.toFixed(0)}ms.`);
-  console.log(`- Worker Runtime kept Event Loop lag at ~${workerMaxLag.toFixed(1)}ms (${(syncDuration / workerDuration).toFixed(1)}x faster).`);
+  console.log(
+    `- Worker Runtime kept Event Loop lag at ~${workerMaxLag.toFixed(1)}ms (${(syncDuration / workerDuration).toFixed(1)}x faster).`,
+  );
   console.log('- The Main Event Loop was 100% available for incoming I/O during computation!');
   console.log('=====================================================================');
 }

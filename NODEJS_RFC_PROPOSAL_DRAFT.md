@@ -2,7 +2,6 @@
 
 **Author:** Felipe Miiller / Contributors  
 **Status:** Draft / Proposed for Discussion  
-**Target Repository:** `nodejs/node`  
 **Target Subsystem:** `worker_threads` / `lib/internal/worker/` / `node:worker_runtime`  
 
 ---
@@ -42,9 +41,9 @@ Main Event Loop  ◄─── BLOCKED by synchronous CPU task (e.g., 80ms)
 
 ---
 
-## 3. Why This Belongs in Node.js Core ("Small Core" Justification)
+## 3. Why This Belongs as a Built-in Concurrency Primitive
 
-In accordance with Node.js TSC principles, any addition to core must justify why it should not merely remain in userland. The justification for a native Persistent Worker Runtime is:
+A native Persistent Worker Runtime answers a question that has no canonical answer today: how should an application offload CPU-bound work from the Event Loop without sacrificing observability, error propagation, or warm in-memory worker state? The justification for a native API is:
 
 1. **Standardizing the Missing Concurrency Primitive:**
    Just as `node:test` standardized testing and `node:sqlite` provided friction-free embedded persistence, a built-in execution runtime provides a batteries-included answer to the most persistent complaint about Node.js ("Node cannot handle CPU work").
@@ -155,6 +154,48 @@ try {
 }
 ```
 
+### 5.4 Streaming Task Results (Async Generators + IPC Backpressure)
+
+For workloads whose output is too large or too progressive to materialize as a single Promise — LLM token streams, multi-gigabyte CSV/JSON exports, paginated DB cursors, SSE feeds — the runtime exposes a `runtime.stream()` API returning an `AsyncIterable`. The worker function must be an `AsyncGeneratorFunction` or `GeneratorFunction`. Each `yield` becomes an IPC chunk; the consumer iterates via `for await`. Backpressure flows from the bounded consumer buffer back to the worker via `MSG_STREAM_PAUSE` / `MSG_STREAM_RESUME`. Cancellation — consumer `break` or external `AbortSignal` — propagates as `MSG_STREAM_ABORT`, calls `gen.return()`, and runs generator `finally` blocks.
+
+```javascript
+import { createWorkerRuntime } from 'node:worker_runtime';
+
+const runtime = createWorkerRuntime({ maxWorkers: 1 });
+const ac = new AbortController();
+setTimeout(() => ac.abort('user-cancel'), 5_000);
+
+const stream = runtime.stream(
+  // Worker function. Closure variables are NOT transported — pass
+  // everything via payload. See ADR-0012 §"Implementation Notes".
+  async function* chat({ tokens }, { signal }) {
+    for (const token of tokens) {
+      if (signal?.aborted) return;
+      await new Promise((r) => setTimeout(r, 20));
+      yield { delta: token };
+    }
+  },
+  { tokens: ['Once', ' upon', ' a', ' time'] },
+  { signal: ac.signal, highWaterMark: 1024 },
+);
+
+for await (const chunk of stream) {
+  process.stdout.write(chunk.delta);
+}
+```
+
+**Wire protocol** (six IPC frame types, all carry `taskId`):
+
+| Frame | Direction | Purpose |
+|---|---|---|
+| `MSG_STREAM_CHUNK` | worker → main | `{ taskId, seq, chunk }` per yield |
+| `MSG_STREAM_END` | worker → main | `{ taskId, returnValue, aborted, reason }` on natural completion or abort |
+| `MSG_STREAM_ERROR` | worker → main | `{ taskId, error }` on generator throw |
+| `MSG_STREAM_ABORT` | main → worker | `{ taskId, reason }` to cancel |
+| `MSG_STREAM_PAUSE` / `RESUME` | main → worker | `{ taskId }` for backpressure |
+
+See **[ADR-0012](docs/adr/0012-streaming-task-results-via-async-generators.md)** for the full design rationale, the implementation traps (closure-scope loss, WorkerHandle ordering, emit-before-push), and the validation artifacts (323 tests, 3 dedicated benchmarks, 2 examples).
+
 ---
 
 ## 6. Worker Lifecycle & Fault Isolation (Supervisor)
@@ -175,15 +216,17 @@ try {
 To demonstrate viability to the Node.js community, a standalone Reference Implementation is being developed with:
 - **Pure Modern JavaScript (ESM)**: Directly compatible with Node.js core coding conventions.
 - **Zero External Runtime Dependencies**: Utilizing only `node:worker_threads`, `node:async_hooks`, `node:events`, and `node:os`.
-- **Rigorous Benchmarking Suite**:
-  - Baseline 1: Synchronous execution on the Event Loop (proving latency degradation on HTTP health checks).
-  - Baseline 2: Spawning `new Worker()` per request.
-  - Baseline 3: Benchmark comparison with `piscina`.
-  - Prototype: Persistent Worker Runtime (measuring throughput, p99 latency, and Event Loop lag via `perf_hooks.monitorEventLoopDelay`).
+- **Status (as of 2026-09-17)**: All RFC sections above have working code paths in the standalone repo (`FelipeMiiller/persistent-worker-runtime`):
+  - **Basic tasks** (`runtime.execute()`): 11 unit tests; 6 benchmarks (concurrency, outbox, zero-copy, priority, cancel, scaling, preemption, recycling).
+  - **Stateful workers** (`runtime.createStatefulWorker()`): 4 unit tests; warm L1 vs stateless benchmark (30.7× faster).
+  - **BroadcastChannel** (`runtime.broadcast()` / `subscribe()`): 25 unit tests; benchmark 18.3× faster than per-worker dispatch.
+  - **Streaming** (`runtime.stream()`): 36 unit tests across 4 files; 3 dedicated benchmarks (`streaming-throughput` ~210k chunks/s, `streaming-memory`, `streaming-stress`); 2 runnable examples (`streaming-llm.js` with TTFT ~70 ms, `streaming-csv-export.js` with observable backpressure).
+  - **Default pool sizing** (ADR-0019): benchmark proves `workers=1` default is 6.45× more memory-efficient than legacy `os.availableParallelism()` on multi-core hosts.
+- **CI matrix** covers Node 22.x and 24.x on ubuntu, macOS, and Windows, with separate lint, coverage, and test workflows plus `commit-lint.yml` using `core-validate-commit@6.0.0`.
 
 ---
 
-## 8. Questions for Discussion with the Node.js TSC
+## 8. Open Questions for Community Discussion
 
 1. Should this capability be introduced as a new top-level built-in module (e.g., `node:worker_runtime` / `node:worker_pool`) or as an extension to `node:worker_threads` (e.g., `worker_threads.createPool()`)?
 2. What are the community's preferences regarding functional serialization (`execute(() => { ... })` using stringified closures vs script-based tasks)?
