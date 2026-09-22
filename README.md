@@ -115,6 +115,7 @@ We do not fight the Event Loop; we protect it:
 | **Streaming API** (ADR-0012) | `runtime.stream()` for async-generator tasks with native backpressure, queued dispatch, and 5 runtime events (`stream:created` / `chunk` / `end` / `aborted` / `backpressure`). |
 | **Zero External Dependencies** | Written strictly using Node.js built-in modules (`node:worker_threads`, `node:async_hooks`, `node:events`, `node:perf_hooks`, `node:os`, `node:broadcast_channel`). |
 | **Inter-Worker BroadcastChannel** | Named-channel pub/sub between main thread and workers via Node's native `BroadcastChannel` — bus-style O(1) fan-out with no main-thread Event Loop routing. Canonical use case: L1 cache invalidation across workers. |
+| **Pure ESM, Zero Dependencies** | `"type": "module"` with explicit `exports` map. Works with `import` on Node 22.0+; `require()` of the package works on Node 22.12+ (stable `require(esm)`) without any CJS shim. |
 
 ---
 
@@ -185,10 +186,18 @@ Install via npm:
 ```bash
 npm install persistent-worker-runtime
 ```
-Or via Yarn:
+Or via Yarn (Berry / v3+ recommended; v1 classic is unsupported):
 ```bash
 yarn add persistent-worker-runtime
 ```
+
+> **Pure ESM.** This package is published as ES modules (`"type": "module"`) with no CJS shim. Use `import { ... } from 'persistent-worker-runtime'`. If your consumer code needs `require()`, run it on Node 22.12+ where stable `require(esm)` makes that work directly; earlier Node 22.x versions need `--experimental-require-module` or `await import()`.
+
+---
+
+#### Contributing — line endings
+
+The repo ships a top-level `.gitattributes` that forces LF for every text file (JS, MD, JSON, YAML, etc.), regardless of `core.autocrlf`. No manual setup is needed on Windows — `git checkout` will produce LF files directly, so pre-push lint hooks stay green without `--no-verify`.
 
 ---
 

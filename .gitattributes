@@ -1,0 +1,29 @@
+# Force LF line endings for all text files (cross-OS portability, npm-safe).
+# The `* text=auto` line tells git to auto-detect text vs binary based on content
+# heuristics; `eol=lf` normalizes line endings to LF on commit regardless of the
+# author's `core.autocrlf` setting. Files flagged as binary by `text=auto` are left
+# untouched.
+#
+# This file was added to stop recurring CRLF false-positives on Windows hosts where
+# `core.autocrlf=true` was re-introducing CRLF into JS/MD files that had been
+# authored on macOS/Linux. See PR description for the full rationale.
+* text=auto eol=lf
+
+# Explicit LF enforcement for known text formats (overrides any autodetection miss).
+*.js       text eol=lf
+*.cjs      text eol=lf
+*.mjs      text eol=lf
+*.json     text eol=lf
+*.md       text eol=lf
+*.markdown text eol=lf
+*.mdx      text eol=lf
+*.ts       text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.html     text eol=lf
+*.css      text eol=lf
+*.sh       text eol=lf
+*.txt      text eol=lf
+*.xml      text eol=lf
+*.adoc     text eol=lf
+LICENSE    text eol=lf

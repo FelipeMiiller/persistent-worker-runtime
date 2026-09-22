@@ -5,7 +5,7 @@ name: First commit message adheres to guidelines
 # the strictest public Conventional Commits linter we can wire up.
 
 on:
-  pull_request_target:
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
@@ -13,6 +13,7 @@ env:
   NODE_VERSION: lts/*
 
 permissions:
+  contents: read
   pull-requests: read
 
 concurrency:
@@ -31,10 +32,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Validate first commit message
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799c794 # v7.0.1
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
-            const { exec } = require('@actions/exec');
             const { data: commits } = await github.rest.pulls.listCommits({
               ...context.repo,
               pull_number: context.issue.number,
