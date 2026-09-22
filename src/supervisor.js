@@ -930,19 +930,15 @@ export class Supervisor extends EventEmitter {
       // spawns replacements; the watchdog terminates preempted workers).
       const accumulationEnabled = this.#accumulationRateMbPerSec !== Infinity;
       for (const worker of this.#workers.values()) {
-        if (accumulationEnabled) {
-          this.#sampleAccumulation(worker);
-          // Re-check recycling against the now-fresh EWMA rate. Cheap
-          // when no rate is exceeded (existing `if (!reason) return;`
-          // guard in #checkRecycling).
-          this.#checkRecycling(worker);
-        } else {
-          // Always re-check recycling — even without accumulation, the
-          // supervisor poll gives us periodic re-evaluation instead of
-          // only on `task_completed`. This costs one cheap function call
-          // per worker per tick (the early-return guard short-circuits).
-          this.#checkRecycling(worker);
-        }
+        // Sample accumulation first when rate-based recycling is enabled
+        // — otherwise we'd push samples into the EWMA history that the
+        // recycling check will never consult (wasted work).
+        if (accumulationEnabled) this.#sampleAccumulation(worker);
+        // Always re-check recycling — even without accumulation, the
+        // supervisor poll gives us periodic re-evaluation instead of
+        // only on `task_completed`. Costs one cheap function call per
+        // worker per tick (early-return guard short-circuits).
+        this.#checkRecycling(worker);
         // Supervisor-level runaway watchdog (HARDEN-10 D2 / AC4).
         this.#checkWorkerWatchdog(worker);
       }
