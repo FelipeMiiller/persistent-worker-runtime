@@ -265,7 +265,7 @@ poll never blocks event loop shutdown.
 | # | Item | Status |
 |---|------|--------|
 | 1 | Finding 1 — T11 backoff Promise leak fix | ✅ fixed (`714f1e6`) |
-| 2 | Finding 2 — T10 `#startWorkerPoll` simplification | ⏳ cosmetic |
+| 2 | Finding 2 — T10 `#startWorkerPoll` simplification | ✅ fixed (`12f7603`) |
 | 3 | Finding 3 — T9 fresh-priority doc note in getter | ⏳ docs |
 | 4 | Track 2 (chunk leak) — un-skip the `streaming-edge-cases` test, add guard | ✅ fixed (`b5c4bde`) |
 | 5 | Track 5 (hot-path CI gate) — wire `benchmarks/hot-path-micro.benchmark.js` into `npm run validate` or pre-push | ⏳ queue |
@@ -281,6 +281,7 @@ user's standing rule: `bump version + npm publish + git tag`.
 
 - Wave 4 commits: `3882ee8` (T9), `cdb8ce4` (T10), `35cec8f` (T11).
 - Wave 4 post-review fix: `714f1e6` (Finding 1 — recycle-backoff Promise leak).
+- Wave 4 post-review fix: `12f7603` (Finding 2 — `#startWorkerPoll` redundant if/else collapse).
 - Track 2 fix: `b5c4bde` (chunk leak — suppress late `stream:chunk` events after shutdown).
 - Feature spec: `.specs/features/runtime-hardening/spec.md` + `tasks.md`.
 - ADR: `docs/adr/0024-runtime-observability-and-recycling-hardening.md`
