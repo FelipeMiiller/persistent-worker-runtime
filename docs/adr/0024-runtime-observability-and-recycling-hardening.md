@@ -1,9 +1,42 @@
 # ADR-0024: Hardening do Runtime — Telemetria Per-Worker, Task-Fn Dispatch via Deps Manifest, Reciclagem por Taxa de Acumulação
 
 - **Date**: 2026-09-20
-- **Status**: Proposed
+- **Status**: Accepted (2026-09-21)
 - **Deciders**: Mavis (assistant) + Felipe (maintainer)
 - **Tags**: observability, dispatch, memory, recycling, preemption, runtime-api
+
+## Implementation Status (2026-09-21)
+
+All 11 HARDEN tasks (A1-A2, B1-B3, C1-C3, D1-D3) implemented and merged into
+`develop`. Three post-review fixes (`714f1e6`, `b5c4bde`, `12f7603`) landed
+after the Wave 1-4 commits. Pipeline at acceptance: **563/563 tests pass,
+0 fail, 0 skipped**. See `.specs/features/runtime-hardening/tasks.md` for
+the task-level breakdown and `.agents/issues/002-runtime-hardening-wave4-review.md`
+for the post-implementation review.
+
+| Wave | HARDEN | Subject | Commit |
+| --- | --- | --- | --- |
+| 1 | HARDEN-01 | `timeoutMs` default + warning guard | (T1) |
+| 1 | HARDEN-02 | `fnDeps` manifest IPC injection | (T2) |
+| 2 | HARDEN-03 | `runtime.getWorkers()` synchronous snapshot | (T3) |
+| 2 | HARDEN-04 | `runtime.stats.workers` aggregate | (T4) |
+| 2 | HARDEN-05 | `worker:memory` event opt-in | (T5) |
+| 3 | HARDEN-06 | accumulation-rate recycling | (T6) |
+| 3 | HARDEN-07 | recycle hysteresis (`minRecycleIntervalMs`) | (T7) |
+| 3 | HARDEN-08 | `recycleOnTasksExhausted` opt | (T8) |
+| 4 | HARDEN-09 | LRU round-robin dispatch | `3882ee8` |
+| 4 | HARDEN-10 | `workerPollIntervalMs` decoupling | `cdb8ce4` |
+| 4 | HARDEN-11 | `recycleBackoffMs` drain grace | `35cec8f` |
+
+Post-review fixes:
+- `714f1e6` — Finding 1: recycle-backoff Promise leak (`#recycleBackoffTimers` now stores `{ timer, resolve }`; `shutdown()` releases the awaiting Promise).
+- `b5c4bde` — Track 2 chunk leak: guard `onChunk` in `worker-runtime.js` with `if (this.#isShuttingDown) return;` before emitting `stream:chunk`.
+- `12f7603` — Finding 2: collapse redundant if/else in `#startWorkerPoll`.
+
+Behavior changes (BC-1/2/3, all additive — no breaking changes for existing users):
+- BC-1 — HARDEN-09: Default dispatch strategy changed from FIFO to LRU. Tests that depended on determinism can opt back to FIFO via `dispatchStrategy: 'fifo'`.
+- BC-2 — HARDEN-10: Supervisor watchdog now preempts at `workerPollIntervalMs` cadence (default 1000ms, clamp min 100ms), decoupled from `task.timeoutMs`.
+- BC-3 — HARDEN-11: Poll always runs (no longer gated on accumulation rate); cost is one cheap function call per worker per tick.
 
 ## Contexto e Problema
 
@@ -158,28 +191,31 @@ benchmarks/io-throughput.benchmark.js  # adicionar assertions pros novos eventos
 - Benchmark: `benchmarks/io-throughput.benchmark.js` (commit desta sessão) — fonte primária dos dados que motivam este ADR
 - Discussão do ADR: foi motivado por 8 horas de debugging do benchmark acima, com várias iterações até a forma final rodar verde (242 reciclings, 1 preempção, 332 MB reclaimed)
 
-## Implementation Plan (proposto)
+## Implementation Plan (delivered)
 
-### Wave 1 (1 dia) — Bug fixes A1 + A2
+All waves delivered. See "Implementation Status" above for commits and
+the three post-review fixes (`714f1e6`, `b5c4bde`, `12f7603`).
+
+### Wave 1 (delivered) — Bug fixes A1 + A2
 
 1. `task-handle.js:22` — mudar default + adicionar warning
 2. `worker-thread-entry.js:87` — implementar fnDeps manifest IPC + testes
 3. Validar: `npm run validate` (espera-se 474/474 testes ainda passando + 2-3 novos testes)
 
-### Wave 2 (1 dia) — Telemetria B1/B2/B3
+### Wave 2 (delivered) — Telemetria B1/B2/B3
 
 1. `supervisor.js` — adicionar método público `getWorkers()` (snapshot síncrono)
 2. `worker-runtime.js` — estender `runtime.stats` com novos campos
 3. Adicionar evento `worker:memory` com opt-in flag
 4. Testes: `per-worker-telemetry.test.js`
 
-### Wave 3 (½ dia) — Reciclagem C1/C2/C3
+### Wave 3 (delivered) — Reciclagem C1/C2/C3
 
 1. Adicionar opções `accumulationRateMbPerSec`, `minRecycleIntervalMs`, `recycleOnTasksExhausted`
 2. Validar com re-run do `benchmarks/io-throughput.benchmark.js` (deve mostrar ~50% menos reciclings com hysteresis ativo)
 3. Testes
 
-### Wave 4 (½ dia) — Routing + preempção D1/D2/D3
+### Wave 4 (delivered) — Routing + preempção D1/D2/D3
 
 1. `supervisor.js:assignWorkerToTask` — substituir FIFO por LRU
 2. Adicionar opção `workerPollIntervalMs`
