@@ -4,6 +4,34 @@ All notable changes to `persistent-worker-runtime` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Pure-ESM `require()` warning (yarn 1.x)** — `package.json#exports."."` now
+  declares both `import` and `require` conditions pointing at `src/index.js`.
+  Yarn 1.x and other CJS-first resolvers no longer emit
+  *"The package doesn't seem to have a commonjs entry point"*. Requires Node
+  22.12+ for `require(esm)` to resolve the ESM file synchronously; earlier
+  Node 22.x versions need `--experimental-require-module`.
+- **CI flake on macOS Node 24** (`test/adaptive-controller.test.js:762`) —
+  the `start() is idempotent` test slept 100ms with 20ms cadence and asserted
+  `ticks ∈ [2, 8]`. On a loaded macOS CI runner the timer fired only once.
+  Sleep widened to 300ms with bounds `[5, 20]`, justified by the documented
+  macOS/Windows event-loop slowness in `.agents/CROSS-OS-LESSONS.md` §2.
+  Verified locally across 5 consecutive runs (305–315ms each).
+- **`commit-lint` workflow** (`.github/workflows/commit-lint.yml:34`) — the
+  SHA pinned for `actions/github-script@v7.0.1` had a single-character typo
+  (`…794` instead of `…dea`). The workflow errored on every pull request. Now
+  pinned to the verified upstream SHA `60a0d83039c74a4aee543508d2ffcb1c3799cdea`.
+
+### Added
+
+- **`.gitattributes`** — top-level file adopting the `nodejs/node` pattern:
+  every text file is normalized to LF on commit, regardless of the author's
+  `core.autocrlf` setting. Closes the recurring CRLF false-positive cycle that
+  forced `--no-verify` on the v0.2.0 release push.
+
 ## [0.2.0] - 2026-09-21
 
 ### Added — ADR-0014 Adaptive Concurrency

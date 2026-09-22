@@ -3,7 +3,8 @@
 **Severity:** low-to-medium (1 hygiene fix, 1 cosmetic, 3 docs)
 **Found by:** post-implementation review of Wave 4 commits (`3882ee8` T9, `cdb8ce4` T10, `35cec8f` T11)
 **Date:** 2026-09-21
-**Component:** `src/supervisor.js`, `src/worker-handle.js`
+**Closed:** 2026-09-22 (all 3 findings + Track 2 chunk leak fixed and shipped in **v0.2.0**)
+**Component:** `src/supervisor.js`, `src/worker-handle.js`, `src/worker-runtime.js`
 
 > Companion handoff for the "next chat" to pick up before declaring
 > `runtime-hardening` stable. Three real findings (one worth fixing
