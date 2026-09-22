@@ -1,5 +1,7 @@
 # Node.js Persistent Worker Runtime
 
+> **Status (2026-09-22, v0.2.0):** 24 ADRs (ADR-0001..0024) implemented and merged. Pipeline: 563/563 tests pass, 0 fail, 0 skip. Active features include adaptive concurrency, runtime hardening (11 HARDEN tasks), streaming, broadcast, priority, cancellation, default sizing, fire-and-forget hazard guard. See [`CHANGELOG.md`](CHANGELOG.md) for v0.2.0 release notes.
+
 ## 1. Document Objective
 
 This document contains the entire architectural context discussed to date regarding the creation of a concurrent execution engine for Node.js.
@@ -615,13 +617,19 @@ Core Metrics:
 
 ---
 
-# 29. Advanced Architectural Roadmap (ADR-0010 to ADR-0014)
+# 29. Advanced Architectural Roadmap (ADR-0010 to ADR-0024)
 
-The runtime roadmap incorporates five enterprise-grade architectural pillars:
+The runtime roadmap incorporates the following enterprise-grade architectural pillars (status: all Accepted as of v0.2.0, 2026-09-22):
 
 1. **Automatic Worker Recycling (ADR-0010)**: Prevents V8 heap fragmentation and gradual closure leaks via graceful worker retirement after `maxTasksPerWorker` or `maxMemoryMb`.
 2. **Hard Preemption Watchdog (ADR-0011)**: Protects the system against synchronous runaway loops (`while(true)`) and ReDoS via main-thread orchestrator termination (`forceKillOnTimeout`).
 3. **Streaming Results via AsyncGenerator (ADR-0012)**: Constant $O(1)$ memory consumption for multi-gigabyte outputs and LLM token streaming via `runtime.stream()` and `for await...of`.
 4. **Inter-Worker Broadcast Bus (ADR-0013)**: Direct worker-to-worker and orchestrator-to-all-worker pub/sub coordination using native `BroadcastChannel` with zero main-thread routing.
-5. **Adaptive Concurrency via ELU (ADR-0014)**: Dynamic worker scaling and queue throttling driven by `performance.eventLoopUtilization()` (ELU) to protect HTTP/I/O latency under peak load.
+5. **Adaptive Concurrency via ELU (ADR-0014)**: Dynamic worker scaling and queue throttling driven by `performance.eventLoopUtilization()` + `monitorEventLoopDelay` p99 dual signal to protect HTTP/I/O latency under peak load.
+6. **TaskQueue Promise Rejection (ADR-0015)**: `destroy()` rejects in-flight enqueue Promises so abandoned waiters can't strand the queue.
+7. **Priority Routing (ADR-0016)**: Numeric task priority with tier dequeue + FIFO-within-tier.
+8. **Cooperative Cancellation (ADR-0017)**: `AbortSignal` integration; emits `TaskAbortedError`, signal-aware dispatch.
+9. **Fire-and-forget Hazard Guard (ADR-0018)**: Documents and tests the requirement that `runtime.execute()` is always awaited. `dispatch()` is the correct primitive for intentional fire-and-forget.
+10. **Default Pool Sizing (ADR-0019)**: `workers: 1` conservative default + startup warning on >4-core hosts; empirically 6.95× cheaper than legacy `os.availableParallelism()`.
+11. **Runtime Hardening (ADR-0024)**: 11 HARDEN tasks (A1-A2 bug fixes, B1-B3 telemetry, C1-C3 recycling tier, D1-D3 routing + preemption) including rate-based recycling, hysteresis, dispatch strategy, decoupled watchdog cadence, drain grace, observability events.
 
