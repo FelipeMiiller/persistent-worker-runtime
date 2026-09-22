@@ -100,8 +100,19 @@ this.#recycleBackoffTimers.clear();
 
 ### Tracking
 
-- **Status:** ⏳ open — fix before declaring stable.
-- Estimated effort: ~30 min (small refactor + 1-2 tests).
+- **Status:** ✅ fixed — `714f1e6` (2026-09-21). `src/supervisor.js` now stores
+  `{ timer, resolve }` in `#recycleBackoffTimers`; `shutdown()` invokes
+  `entry.resolve()` after `clearTimeout`, releasing the awaiting Promise so
+  the `.then()` chain attached to `#spawnWorker()` runs to completion.
+- Test: `test/recycle-backoff.test.js` adds "shutdown() during a
+  recycle-backoff releases the awaiting Promise (regression for Finding 1
+  in .agents/issues/002)" — verifies prompt shutdown return, no
+  unhandledRejection, clean post-shutdown state.
+- Caveat documented in the test: closure release itself isn't directly
+  observable without `--expose-gc`; the test enforces the user-visible
+  contract (promptness + clean state) and acts as a regression guard.
+- Pipeline after fix: 562/563 passing (was 561/562), 0 fail, 1 skipped
+  (unchanged — same chunk leak from Track 2).
 
 ---
 
@@ -253,7 +264,7 @@ poll never blocks event loop shutdown.
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Finding 1 — T11 backoff Promise leak fix | ⏳ open |
+| 1 | Finding 1 — T11 backoff Promise leak fix | ✅ fixed (`714f1e6`) |
 | 2 | Finding 2 — T10 `#startWorkerPoll` simplification | ⏳ cosmetic |
 | 3 | Finding 3 — T9 fresh-priority doc note in getter | ⏳ docs |
 | 4 | Track 2 (chunk leak) — un-skip the `streaming-edge-cases` test, add guard | ⏳ queue |
@@ -269,6 +280,7 @@ user's standing rule: `bump version + npm publish + git tag`.
 ## Cross-references
 
 - Wave 4 commits: `3882ee8` (T9), `cdb8ce4` (T10), `35cec8f` (T11).
+- Wave 4 post-review fix: `714f1e6` (Finding 1 — recycle-backoff Promise leak).
 - Feature spec: `.specs/features/runtime-hardening/spec.md` + `tasks.md`.
 - ADR: `docs/adr/0024-runtime-observability-and-recycling-hardening.md`
   (currently `Proposed`).
