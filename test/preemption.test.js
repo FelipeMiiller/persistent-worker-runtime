@@ -368,6 +368,27 @@ describe('Hard Preemption - Supervisor Autonomous Pool Healing (T3)', () => {
       assert.ok(replacedEvent, 'worker_replaced event was emitted');
       assert.equal(runtime.stats.totalWorkers, 2, 'Pool size restored to configured concurrency');
 
+      // PREEMPT-06 — explicit field-name assertions on the worker_replaced
+      // event payload. The supervisor emits `{ oldId, newId }` (see
+      // src/supervisor.js:762,783). Locking these names down here means a
+      // future rename in the source would surface as a test failure rather
+      // than as a silent breakage for downstream subscribers.
+      assert.equal(
+        typeof replacedEvent.oldId,
+        'string',
+        'worker_replaced payload MUST include string field `oldId`',
+      );
+      assert.equal(
+        typeof replacedEvent.newId,
+        'string',
+        'worker_replaced payload MUST include string field `newId`',
+      );
+      assert.notEqual(
+        replacedEvent.oldId,
+        replacedEvent.newId,
+        'worker_replaced oldId and newId MUST point to different workers',
+      );
+
       // Dispatch a subsequent task on the healed pool to verify it executes cleanly
       const normalTask2 = await runtime.execute({
         fn: (p) => p * 2,
@@ -681,6 +702,59 @@ describe('Hard Preemption - HARDEN-01 default timeoutMs end-to-end (ADR-0024)', 
       );
     } finally {
       await runtime.shutdown();
+    }
+  });
+
+  // PREEMPT-08 — regression for "shutdown during pending watchdog" path.
+  // Code path structurally prevents `unhandledRejection` (the watchdog's async
+  // teardown resolves cleanly even when `runtime.shutdown()` is called while
+  // the watchdog is mid-flight), but this test pins that contract. See
+  // `.specs/features/hard-preemption/validation.md` PREEMPT-08 row.
+  it('shutdown during pending watchdog does NOT emit unhandledRejection (PREEMPT-08)', async () => {
+    const unhandledRejections = [];
+    const onUnhandled = (reason) => unhandledRejections.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      const runtime = await createWorkerRuntime({
+        workers: 1,
+        forceKillOnTimeout: true,
+        silentTimeoutDefaultWarning: true,
+        workerPollIntervalMs: 100, // minimum allowed; tightens race window
+      });
+
+      // Fire-and-forget a runaway task — the watchdog will preempt it.
+      // We intentionally do NOT await this Promise. Attach an explicit
+      // .catch so the task's own rejection (TaskTimeoutError after the
+      // worker crashes) does NOT pollute the unhandledRejection capture —
+      // PREEMPT-08 only cares about rejections from the watchdog /
+      // shutdown teardown path, not from the task itself.
+      runtime
+        .execute({
+          timeoutMs: 30,
+          fn: () => {
+            while (true) {} // tight infinite loop
+          },
+        })
+        .catch(() => {});
+
+      // Give the watchdog a few ticks to schedule its preemption, but
+      // shutdown BEFORE the preemption completes. This races the watchdog
+      // with shutdown — the structural guarantee is that no
+      // unhandledRejection surfaces from this overlap.
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      await runtime.shutdown();
+
+      // Drain any deferred rejection that might still be in flight.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      assert.equal(
+        unhandledRejections.length,
+        0,
+        'shutdown() during pending watchdog MUST NOT surface an unhandledRejection',
+      );
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
     }
   });
 });
