@@ -402,9 +402,23 @@ File: `benchmarks/io-throughput.benchmark.js`
 
 **What it proves**: The dual-signal ELU + `monitorEventLoopDelay` controller grows the pool under idle load, shrinks from busy load, and stays silent under load when `concurrency: 'fixed'` is opted in.
 
+**Headline numbers** (measured in `benchmarks/adaptive-controller-tick.benchmark.js`, `benchmarks/adaptive-controller.benchmark.js`, `benchmarks/adaptive-concurrency.benchmark.js`, `benchmarks/cpu-saturation.benchmark.js`):
+
+| Metric | Value | Phase |
+| --- | --- | --- |
+| Per-tick overhead, p50 | **0.041 ms** | T7 SLA (D-1) |
+| Per-tick overhead, p99 | **0.064 ms** | T7 SLA (D-1) |
+| `classifyTickDirection` throughput | **65.97 M ops/sec** (~15 ns/call) | D-4 |
+| Listener scaling (10 listeners / 1 listener) | **0.99×** (linear) | D-2 |
+| Per-controller memory footprint | **3.1 KB** | D-3 |
+| Phase A + B + E suite wall time | **~17 s** | E (full end-to-end) |
+| Saturation knee | **16→20 worker ratio = 1.07×** (plateau) | E |
+
+All numbers cited from `Phase A/B/C/D/E` benchmark suite (T10-A, T10-B, T10-C, T10-D/D-4, T10-E). Budget met across the board.
+
 ### 2️⃣0️⃣a — Tick overhead microbenchmark (T7 SLA)
 
-The controller's per-tick overhead is held under **1 ms** average (tested on 1000 ticks with stubbed callbacks). This is the SLA gate that justifies running the controller at 1-second cadence without burning main-thread budget.
+The controller's per-tick overhead is held under **1 ms** average (tested on 1000 ticks with stubbed callbacks). Measured **p50 = 0.041 ms / p99 = 0.064 ms** on a 28-core host. This is the SLA gate that justifies running the controller at 1-second cadence without burning main-thread budget.
 
 Run: `npm run benchmark:adaptive-controller`
 File: `benchmarks/adaptive-controller-tick.benchmark.js`
@@ -417,11 +431,11 @@ Run: `npm run benchmark:adaptive-controller-opt-out` (when CPU pressure is the v
 
 ### 2️⃣0️⃣c — Pool 1 → 8 grow on idle
 
-With main thread idle, the controller grows the pool from `minWorkers: 1` to `maxWorkers: 8` over a deterministic tick window. Verifies the grow path against `runtime.stats.adaptive.lastResizeReason === 'grow'` and `totalGrowEvents ≥ 7`.
+With main thread idle, the controller grows the pool from `minWorkers: 1` to `maxWorkers: 8` over a deterministic tick window. Verifies the grow path against `runtime.stats.adaptive.lastResizeReason === 'grow'` and `totalGrowEvents ≥ 7`. Full A+B+E suite wall time: **~17 s**.
 
 ### 2️⃣0️⃣d — `runtime.stats.adaptive` full 7-field assertions (T10-E)
 
-The complete telemetry block (`enabled`, `effectiveWorkers`, `elu`, `latencyP99Ms`, `lastResizeReason`, `lastResizeAt`, `ticksSinceResize`) is asserted against expected values after a known sequence of grow + shrink cycles. Documents the live-mirroring contract.
+The complete telemetry block (`enabled`, `effectiveWorkers`, `elu`, `latencyP99Ms`, `lastResizeReason`, `lastResizeAt`, `ticksSinceResize`) is asserted against expected values after a known sequence of grow + shrink cycles. Documents the live-mirroring contract — getter returns the live reference, not a snapshot; the benchmark captures fields into local vars before any `await` to avoid the cumulative-counter race.
 
 Run: `npm run benchmark:adaptive-concurrency`
 File: `benchmarks/adaptive-concurrency.benchmark.js`
