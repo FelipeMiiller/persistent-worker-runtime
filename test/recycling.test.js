@@ -457,7 +457,60 @@ describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () =>
       assert.equal(
         nextResult.hasOldState,
         false,
-        'Replacement worker must have fresh clean L1 heap',
+        'Replacement worker must have fresh clean clean L1 heap',
+      );
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  // RECYCLE-08 — negative-case assertion: when memory stays below the threshold,
+  // NO worker_recycling event should fire. Spec-precision gap previously covered
+  // only by the implicit absence of recycling in tests that didn't trip the
+  // threshold. See `.specs/features/worker-recycling/validation.md` for context.
+  it('does NOT recycle when memory stays below maxMemoryMb threshold (RECYCLE-08)', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 1,
+      maxMemoryMb: 1024, // 1 GB threshold — impossible to trip with 1 byte
+    });
+
+    try {
+      const recyclingEvents = [];
+      const recycledEvents = [];
+
+      runtime.on('worker_recycling', (e) => recyclingEvents.push(e));
+      runtime.on('worker_recycled', (e) => recycledEvents.push(e));
+
+      // Execute a task that allocates only a few bytes — well below 1 GB.
+      const result = await runtime.execute({
+        fn: () => ({ allocated: 1 }),
+      });
+
+      assert.equal(result.allocated, 1);
+
+      // Wait long enough that any spurious recycling would have fired.
+      // (Recycle check cadence is ~100 ms; wait 5× that to be safe.)
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      assert.equal(
+        recyclingEvents.length,
+        0,
+        'worker_recycling MUST NOT fire when memory is below maxMemoryMb threshold',
+      );
+      assert.equal(
+        recycledEvents.length,
+        0,
+        'worker_recycled MUST NOT fire when memory is below maxMemoryMb threshold',
+      );
+      assert.equal(
+        runtime.stats.totalWorkers,
+        1,
+        'Pool size MUST stay at the configured value (no spawn needed)',
+      );
+      assert.equal(
+        runtime.stats.recycledWorkersCount,
+        0,
+        'recycledWorkersCount counter MUST stay at 0',
       );
     } finally {
       await runtime.shutdown();

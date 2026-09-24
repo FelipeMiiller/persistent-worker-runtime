@@ -79,7 +79,10 @@ describe('WorkerRuntime — recycleBackoffMs (HARDEN-11)', () => {
 
       // Wait briefly for the replacement to spawn and the OLD worker to
       // enter 'recycling' state. Pool size is now N+1 (old + new).
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Bump to 200 ms to absorb CI timer noise on Windows Node 22
+      // (slower worker startup than Linux/macOS — the 50 ms window was
+      // too tight and caused Windows Node 22 to flake on this test).
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       const midWorkers = runtime.getWorkers();
       assert.equal(

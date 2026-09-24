@@ -29,6 +29,8 @@ A production-grade, concurrent execution layer built atop `node:worker_threads`.
   - [7. Priority Routing](#7-priority-routing)
   - [8. Cancellation via AbortSignal](#8-cancellation-via-abortsignal)
   - [9. Inter-Worker BroadcastChannel (L1 Cache Invalidation)](#9-inter-worker-broadcastchannel-l1-cache-invalidation)
+  - [10. Streaming Task Results (Async Generators + Backpressure)](#10-streaming-task-results-async-generators--backpressure)
+  - [11. Runtime Hardening & Adaptive Concurrency (v0.2.0)](#11-runtime-hardening--adaptive-concurrency-v020)
 - [Architecture & Memory Hierarchy](#-architecture--memory-hierarchy)
 - [Comparison with Existing Solutions](#-comparison-with-existing-solutions)
 - [Architecture Decision Records (ADRs)](#-architecture-decision-records-adrs)
@@ -108,8 +110,12 @@ We do not fight the Event Loop; we protect it:
 | **Native Diagnostics** | Built-in `AsyncResource` (`node:async_hooks`) propagation for transparent OpenTelemetry / APM distributed tracing. |
 | **Non-Blocking Backpressure** | Asynchronous queue wait with `queueTimeoutMs` so the process never runs out of memory or busy-waits. |
 | **Resilient Supervisor** | Detects worker thread crashes and automatically spins up replacements to preserve capacity. |
-| **Zero External Dependencies** | Written strictly using Node.js built-in modules (`node:worker_threads`, `node:async_hooks`, `node:events`, `node:perf_hooks`, `node:os`). |
+| **Adaptive Concurrency Controller** (v0.2.0 / ADR-0014) | Dual-signal ELU + `monitorEventLoopDelay` controller tunes the pool band live; grow + drain-shrink (no terminate); pool band `[minWorkers, maxWorkers]`; first-class `runtime.stats.adaptive` telemetry. |
+| **Runtime Hardening** (v0.2.0 / ADR-0024) | `accumulationRateMbPerSec`, `minRecycleIntervalMs`, `recycleOnTasksExhausted`, `dispatchStrategy`, `workerPollIntervalMs`, `recycleBackoffMs`, `observeWorkerMemory`, `timeoutMs` default 5000ms; `runtime.getWorkers()` snapshot; expanded `runtime.stats` block. |
+| **Streaming API** (ADR-0012) | `runtime.stream()` for async-generator tasks with native backpressure, queued dispatch, and 5 runtime events (`stream:created` / `chunk` / `end` / `aborted` / `backpressure`). |
+| **Zero External Dependencies** | Written strictly using Node.js built-in modules (`node:worker_threads`, `node:async_hooks`, `node:events`, `node:perf_hooks`, `node:os`, `node:broadcast_channel`). |
 | **Inter-Worker BroadcastChannel** | Named-channel pub/sub between main thread and workers via Node's native `BroadcastChannel` — bus-style O(1) fan-out with no main-thread Event Loop routing. Canonical use case: L1 cache invalidation across workers. |
+| **Pure ESM, Zero Dependencies** | `"type": "module"` with explicit `exports` map. Works with `import` on Node 22.0+; `require()` of the package works on Node 22.12+ (stable `require(esm)`) without any CJS shim. |
 
 ---
 
@@ -180,10 +186,18 @@ Install via npm:
 ```bash
 npm install persistent-worker-runtime
 ```
-Or via Yarn:
+Or via Yarn (Berry / v3+ recommended; v1 classic is unsupported):
 ```bash
 yarn add persistent-worker-runtime
 ```
+
+> **Pure ESM.** This package is published as ES modules (`"type": "module"`) with no CJS shim. Use `import { ... } from 'persistent-worker-runtime'`. If your consumer code needs `require()`, run it on Node 22.12+ where stable `require(esm)` makes that work directly; earlier Node 22.x versions need `--experimental-require-module` or `await import()`.
+
+---
+
+#### Contributing — line endings
+
+The repo ships a top-level `.gitattributes` that forces LF for every text file (JS, MD, JSON, YAML, etc.), regardless of `core.autocrlf`. No manual setup is needed on Windows — `git checkout` will produce LF files directly, so pre-push lint hooks stay green without `--no-verify`.
 
 ---
 
@@ -503,6 +517,102 @@ Two runnable examples ship in `examples/`:
 - `node examples/streaming-csv-export.js` — fast producer + slow consumer with `highWaterMark: 8`, prints the backpressure timeline
 
 See **[ADR-0012](docs/adr/0012-streaming-task-results-via-async-generators.md)** for the architectural rationale, IPC frame schemas, and the ordering traps that the implementation handles.
+
+---
+
+### 11. Runtime Hardening & Adaptive Concurrency (v0.2.0)
+
+v0.2.0 ships **two production-grade feature sets** out of the box: an adaptive concurrency controller (ADR-0014) that auto-tunes your worker pool to live traffic, and 11 runtime hardening options (ADR-0024) for recycling, preemption, memory observability, dispatch strategy, and drain grace.
+
+#### 11.1 — Adaptive concurrency controller (ADR-0014)
+
+Dual-signal controller (`Event Loop Utilization` + `monitorEventLoopDelay` p99, EWMA α=0.3, 5-tick debounce) tunes the pool band `[minWorkers, maxWorkers]` based on real load. **Grow** when both signals are below the grow band; **shrink-from-busy** when ELU is high; **shrink-from-idle** when latency is high; **hold** otherwise. Drain path never calls `worker.terminate()` — drained workers finish their current task then are reaped.
+
+```javascript
+const runtime = await createWorkerRuntime({
+  // 'adaptive' is the default on >4-core hosts; explicit for clarity.
+  concurrency: 'adaptive',
+  minWorkers: 1,
+  maxWorkers: 16,
+});
+
+// Live telemetry for dashboards / Prometheus:
+setInterval(() => {
+  const a = runtime.stats.adaptive;
+  if (!a) return; // disabled (fixed-mode)
+  metrics.gauge('runtime.workers', a.effectiveWorkers);
+  metrics.gauge('runtime.elu',      a.elu);
+  metrics.gauge('runtime.p99ms',    a.latencyP99Ms);
+}, 1000);
+
+// Opt out at any time:
+await runtime.createWorker({ name: 'always-on' });   // dedicated workers stay outside the band
+```
+
+**Performance** (measured on 28-core host, full Phase A/B/C/D/E suite):
+
+- Per-tick overhead: **p50 = 0.041 ms**, **p99 = 0.064 ms** (1k ticks with stubbed callbacks, T7 SLA met)
+- `classifyTickDirection` throughput: **65.97 M ops/sec** (~15 ns/call)
+- Listener scaling: 10 listeners / 1 listener = **0.99×** (linear, no superlinear broadcast cost)
+- Per-controller memory footprint: **3.1 KB**
+- Saturation knee: 16→20 worker ratio = **1.07×** (plateau — adding workers past `availableParallelism` returns diminishing throughput)
+- Full A+B+E end-to-end suite wall time: **~17 s**
+
+See `examples/adaptive-concurrency.js` and [ADR-0014](docs/adr/0014-adaptive-concurrency-controller.md).
+
+#### 11.2 — Runtime hardening options (ADR-0024)
+
+```javascript
+const runtime = await createWorkerRuntime({
+  workers: 4,
+
+  // ─── Recycling tier (HARDEN-06/07/08/11) ───────────────────────────
+  accumulationRateMbPerSec: 50,    // recycle when EWMA growth > 50 MB/s
+  minRecycleIntervalMs:     5000,  // hysteresis window after a recycle
+  recycleOnTasksExhausted:  false, // emit worker_tasks:exhausted instead of recycling
+  recycleBackoffMs:          600,  // keep old worker in 'recycling' for 600 ms
+
+  // ─── Dispatch + preemption (HARDEN-09/10) ──────────────────────────
+  dispatchStrategy:       'lru',   // 'fifo' | 'lru' | 'random'; default 'lru'
+  workerPollIntervalMs:   500,     // watchdog cadence (clamp min 100 ms)
+
+  // ─── Observability (HARDEN-05) ──────────────────────────────────────
+  observeWorkerMemory:       true,
+  memoryEmitIntervalMs:     1000,
+  runtime.on('worker:memory', ({ workerId, memoryUsageBytes }) => {
+    metrics.gauge('worker.rss', memoryUsageBytes, { workerId });
+  }),
+
+  // ─── Timeout default (HARDEN-01) ────────────────────────────────────
+  timeoutMs: 5000,                 // per-task default; emits PersistentWorkerRuntimeTimeoutMsDefault once if never overridden
+});
+```
+
+**Live observability** — `runtime.stats` now exposes:
+
+```javascript
+runtime.stats.workers      // { total, idle, busy, recycling, terminating, byStatus, totalMemoryBytes }
+runtime.stats.adaptive    // { enabled, effectiveWorkers, elu, latencyP99Ms, lastResizeReason, ... }
+runtime.stats.activeStreams   // dispatched streams (ADR-0012)
+runtime.stats.pendingStreams  // queued streams waiting for a slot
+```
+
+**Snapshot of the worker pool** — `runtime.getWorkers()` returns a fresh array per call:
+
+```javascript
+const snapshot = runtime.getWorkers();
+// [{ id, status, tasksCompleted, tasksActive, lastMemoryUsageBytes, lastTaskAt, affinityKey, isDedicated }, ...]
+
+const recycling = snapshot.filter((w) => w.status === 'recycling');
+```
+
+#### 11.3 — Behavior changes (all additive)
+
+- **BC-1** Default dispatch changed from FIFO to LRU. Opt back via `dispatchStrategy: 'fifo'`.
+- **BC-2** Watchdog cadence decoupled from `task.timeoutMs` — set `workerPollIntervalMs` independently.
+- **BC-3** Poll always runs (was gated on accumulation rate). Cost: one cheap function call per worker per tick.
+
+Full TypeScript surface at [`src/index.d.ts`](src/index.d.ts). See **[ADR-0024](docs/adr/0024-runtime-observability-and-recycling-hardening.md)** for the rationale and `[CHANGELOG.md](CHANGELOG.md)` for the migration notes.
 
 ---
 

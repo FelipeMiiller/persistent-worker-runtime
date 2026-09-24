@@ -767,12 +767,16 @@ describe('createAdaptiveController — T1-T4 hardening (failure modes + contract
     });
     controller.start();
     controller.start(); // second call must be a no-op, not double-armed
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     controller.stop();
-    // 100ms / 20ms cadence ≈ 5 ticks; if start() had armed two
-    // timers we'd see 10. Allow generous upper bound for jitter.
+    // 300ms / 20ms cadence ≈ 15 ticks for a single-armed timer (~30 for
+    // double-armed). The lower bound distinguishes "actually running" from
+    // "timer never armed"; the upper bound catches the double-arm regression
+    // with generous headroom for jitter on loaded CI runners (see
+    // .agents/CROSS-OS-LESSONS.md §2 — Windows CI and macOS CI are the
+    // slowest event-loop hosts).
     const ticks = controller.getStats().ticksSinceResize;
-    assert.ok(ticks >= 2 && ticks <= 8, `expected 2-8 ticks, got ${ticks}`);
+    assert.ok(ticks >= 5 && ticks <= 20, `expected 5-20 ticks, got ${ticks}`);
   });
 
   test('stop() before start() is a safe no-op (no crash, no leftover state)', () => {

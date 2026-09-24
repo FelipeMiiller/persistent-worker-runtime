@@ -1,8 +1,9 @@
 # Agent Handover Guide: Persistent Worker Runtime
 
 > **Audience**: AI Coding Agents (Antigravity, Claude Code, Cursor, Windsurf, Copilot) or engineers starting a new chat/session on this repository.
-> **Last Updated**: 2026-09-18 (T3 adaptive-concurrency shipped — Phase 1 done; T4-T12 pending)
-> **Active Branch**: `develop`
+> **Last Updated**: 2026-09-22 (v0.2.1 shipped — ADR-0014 T12 docs complete)
+> **Active Branch**: `main`
+> **Released**: `v0.2.0` (2026-09-22 09:59Z) + `v0.2.1` (2026-09-22 21:13Z) on npm with provenance.
 
 ---
 
@@ -10,15 +11,14 @@
 
 - **Repository**: `https://github.com/FelipeMiiller/persistent-worker-runtime`
 - **Local Path**: `c:\repository\persistent-worker-runtime`
-- **NPM Package**: `persistent-worker-runtime` (version `0.1.0`)
+- **NPM Package**: `persistent-worker-runtime` (latest: **`0.2.1`**)
 - **Goal**: Build a high-performance persistent worker runtime for Node.js over native `worker_threads`, keeping the Event Loop 100% dedicated to non-blocking I/O while persistent workers execute CPU-bound tasks and transactional outbox background jobs with warm L1 heaps.
 
 ---
 
 ## 🔒 2. Non-Negotiable Operational Rules
 
-1. **Active Branch**: All work is conducted directly on the **`develop`** branch.
-   - **`main` is protected**: Never commit directly to `main`. Releases are merged via PRs from `develop`.
+1. **Active Branch**: All work is conducted on **`main`** (this project does not use a `develop` branch — PRs target `main` directly). Releases are tagged on `main` and published via the `release.yml` GitHub Actions workflow.
 2. **Zero External Runtime Dependencies**: `package.json` has `dependencies: {}`. Do NOT install external runtime npm packages. Everything must use standard Node.js built-ins (`node:worker_threads`, `node:test`, `node:events`, `node:async_hooks`, `node:perf_hooks`, `node:os`).
 3. **Language**: **100% English** across all code, docstrings, tests, ADRs, specs, and commit messages.
 4. **Quality Gates**: Every task must pass `npm run validate` (= `npm run lint && npm test`) before commit. Lint violations block the commit via the husky pre-commit hook.
@@ -28,89 +28,76 @@
 
 ## 📍 3. Current State Snapshot
 
-### Code Health (as of last commit `35613e0`)
-- **Tests**: 563 passing across 153 suites (`node:test`), 0 failures, **0 skipped**, 0 cancelled. First-time zero-skip pipeline (the Track 2 chunk leak was the long-standing skip; fixed in `b5c4bde`).
+### Code Health (as of commit `99ef885`, 2026-09-23)
+- **Tests**: 563 passing across 153 suites (`node:test`), 0 failures, **0 skipped**, 0 cancelled. First-time zero-skip pipeline.
 - **Lint**: 0 errors, 0 warnings across `src/`, `test/`, `examples/`, `benchmarks/` (Biome 2.x).
-- **Benchmarks**: 18 reproducible scripts (5 streaming + adaptive-concurrency throughput-scaling + io-throughput + 11 others). Full empirical results in `BENCHMARKS.md`.
+- **Benchmarks**: 20+ reproducible scripts (5 streaming + adaptive-concurrency Phase A/B/C/D/E + io-throughput + 11 others). Full empirical results in `BENCHMARKS.md`.
 - **Examples**: 11 runnable scripts demonstrating the public API.
 - **Embedded Skill**: `skills/persistent-worker-runtime/` shipped in npm tarball.
 
-### Completed Features (all implemented and merged into `develop`)
+### Released
+- **v0.2.0** (2026-09-22 09:59Z) — ADR-0014 (adaptive concurrency) + ADR-0024 (runtime hardening). Tag `e098329`. CI run `35713434984`.
+- **v0.2.1** (2026-09-22 21:13Z) — Post-release hygiene bundle: `.gitattributes` (LF enforcement), CI workflow fixes (commit-lint SHA + `pull_request` event switch + `exec` require drop), macOS timing tolerance, ESM `require` condition, docs refresh. Tag `41d9eae`. CI run `35784807442`.
+
+### Completed Features (all merged to `main`)
 1. **`persistent-worker-runtime/`** — Initial implementation (ADR-0001..0009).
 2. **`worker-recycling/`** — Complete (ADR-0010).
 3. **`hard-preemption/`** — Complete (ADR-0011).
 4. **`streaming-results/`** — Complete (ADR-0012).
 5. **`broadcast-channel/`** — Complete (ADR-0013). Inter-worker `BroadcastChannel` for L1 cache invalidation and pub/sub.
-6. **`adaptive-concurrency/`** — Complete (ADR-0014). Dual-signal ELU + `monitorEventLoopDelay` p99 controller with EWMA α=0.3 smoothing and 5-tick debounce; grow + drain-shrink (no `worker.terminate()`); opt-out via `concurrency: 'fixed'`; pool band `[1, maxWorkers]` honoring ADR-0019 default. Implementation complete through T9 (integration tests).
+6. **`adaptive-concurrency/`** — **Complete (ADR-0014) — T12 docs closed**. Dual-signal ELU + `monitorEventLoopDelay` p99 controller with EWMA α=0.3 smoothing and 5-tick debounce; grow + drain-shrink (no `worker.terminate()`); opt-out via `concurrency: 'fixed'`; pool band `[minWorkers, maxWorkers]`; first-class `runtime.stats.adaptive` 7-field telemetry. T1-T11 + T10-A/B/C/D/D-4/E + T12 all done.
 7. **`task-queue-waiters/`** — Complete (ADR-0015).
 8. **`priority-routing/`** — Complete (ADR-0016).
 9. **`cooperative-cancellation/`** — Complete (ADR-0017).
 10. **`fire-and-forget-hazard/`** — Complete (ADR-0018).
 11. **`default-pool-sizing/`** — Complete (ADR-0019).
-12. **`runtime-hardening/`** — Complete (ADR-0024). All 11 HARDEN tasks delivered (T1-T11 across Wave 1-4 commits). Three post-review fixes landed: `714f1e6` (Finding 1: recycle-backoff Promise leak), `b5c4bde` (Track 2 chunk leak), `12f7603` (Finding 2: T10 redundant if/else collapse). ADR status: Proposed → Accepted.
+12. **`durable-queue-rpo/`** — Complete (ADR-0020). Postgres `SELECT FOR UPDATE SKIP LOCKED` first; Kafka/SQS acceptable.
+13. **`multi-az-topology/`** — Complete (ADR-0021). ≥2 instances × ≥2 AZs active-active.
+14. **`node-built-ins-map/`** — Complete (ADR-0022). Authoritative map of "Node built-ins we use" vs "custom code we wrote".
+15. **`sizing-policy/`** — Complete (ADR-0023). `WORKER_CONCURRENCY` env + `concurrency: 'auto'` factory option.
+16. **`runtime-hardening/`** — **Complete (ADR-0024) — Accepted**. All 11 HARDEN tasks delivered (T1-T11 across Wave 1-4 commits). 3 post-review fixes: recycle-backoff Promise leak (`714f1e6`), Track 2 chunk leak (`b5c4bde`), T10 redundant if/else collapse (`12f7603`).
 
-### In-Progress Features (implementation started, not yet feature-complete)
-_None._ All documented ADRs (0010–0024) are feature-complete.
+### Recent Quality Wins (since last handover)
+- **v0.2.0 → v0.2.1 promotion** — npm publish CI via `release.yml` (provenance + `id-token: write`). Fixed `.gitattributes` LF cycle, commit-lint workflow (SHA typo + `pull_request_target` → `pull_request` switch + `actions/github-script` v7 `exec` require drop), macOS test timing tolerance, ESM `require` condition, docs refresh.
+- **Windows Node 22 CI flake fix** (`99ef885`) — `test/recycle-backoff.test.js` HARDEN-11 timing window widened 50ms → 200ms to match the explicit pattern used by sibling test #2 ("Bump to 200 ms to absorb CI timer noise on slow runners").
+- **Dependabot bumps merged** — `actions/setup-node` 4.4.0 → 7.0.0 (`9c2b585`), `actions/checkout` 4.4.0 → 7.0.1 (`d9864ad`). Merged via direct git push (workaround for `gh` OAuth `workflow` scope limitation — see Lessons below).
+- **ADR-0014 T12 docs closed** — README §11.1 cites T10 measured numbers (p50=0.041ms/p99=0.064ms tick overhead, 65.97 M ops/sec `classifyTickDirection` throughput, ~17s wall time for Phase A+B+E suite, 16→20 saturation plateau at 1.07×). BENCHMARKS.md §20 has the headline-numbers table. HANDOVER.md + STATE.md refreshed.
 
-### Recent Quality Wins (since last handover at `7acdfe6`)
-- **T5–T7 streaming delivery** — cancellation refinement (unified `stream:aborted`, `MSG_STREAM_PAUSE`/`RESUME` backpressure, `#pendingStreams` queue), runtime-level telemetry (`stream:created`/`chunk`/`end`/`aborted`/`backpressure` + `activeStreams` stats), two runnable examples, README §Streaming section.
-- **Streaming benchmarks** (`e60c348`) — added `streaming-queue-dispatch` + `streaming-abort-latency`; benchmark count grew to 17 then to 18 with `io-throughput`.
-- **CI layout hardened** (`010b49b`) — split workflows (lint, coverage, commit-lint), SHA-pinned actions, concurrency + cancel-in-progress, paths-ignore, draft PR skip, `core-validate-commit@6.0.0`, dependabot zero-deps block, CODEOWNERS, PR template + DCO 1.1.
-- **CI flake fix** — `runtime.execute()` without await caused `WorkerCrashError` to fire after test exit on slower CI runners (macOS Node 22). Fixed by `await`ing in tests.
-- **Biome 2.x** + **husky 9** + **lint-staged 15** for lint infrastructure.
-- **Docs cleanup** (`77394f6`) — stripped internal Node.js core submission language from the repository (per Felipe's direction). The RFC draft itself (`NODEJS_RFC_PROPOSAL_DRAFT.md`) is preserved as a design proposal without the upstream PR roadmap context.
-- **ADR-0014 complete** (T1 → T9 across `b9966e5` + `9662661` + `e31589d` + later commits) — production-grade dual-signal controller: ELU + `monitorEventLoopDelay` p99, EWMA α=0.3, 5-tick debounce, grow + drain-shrink, first-class telemetry in `runtime.stats.adaptive`, opt-out via `concurrency: 'fixed'`. Full integration test suite passing (T9).
-- **ADR-0024 complete** — runtime hardening (T1-T11 across `3882ee8`, `cdb8ce4`, `35cec8f` + post-review fixes `714f1e6`, `b5c4bde`, `12f7603`). All 11 HARDEN tasks delivered. ADR status moved Proposed → Accepted.
-- **BENCHMARKS.md backfill** (`356b7ae`) — documented orphan benchmarks; reproduction snippet now lists all 18 scripts.
-- **HANDOVER + README state refresh** (`3aa9c60`) — replaced stale state snapshot.
+### Documented but NOT YET Implemented
+- **None blocking.** All documented ADRs (0010–0024) are feature-complete and shipped in v0.2.0/0.2.1.
 
-### Documented but NOT YET Implemented (deferred ADRs)
-- _None._ All documented ADRs (0010–0019) are feature-complete; ADR-0014 is the active in-progress work (see "In-Progress Features" above).
+### Tracked work (`.agents/issues/`)
+- **`001-supervisor-start-not-idempotent.md`** — ✅ FIXED (`5c4069c` + `205c384`).
+- **`002-runtime-hardening-wave4-review.md`** — ✅ CLOSED 2026-09-22 (all 3 findings + Track 2 chunk leak shipped in v0.2.0).
+- **`CI-FAILURE-macos-benchmarks.md`** — 🟡 TRACKED — pre-existing macOS-Latest ARM64 benchmark failure (T13+ portable benchmarks). Not blocking merge/release.
 
 ---
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Your immediate goal**: ship the `v0.2.0` stable release. All feature work is
-complete (ADR-0001 through ADR-0024 delivered). Pipeline is green (563/563
-pass, 0 fail, 0 skip). What's missing is the release artifacts.
+**Current state**: v0.2.1 is shipped. All feature ADRs complete. No urgent release work pending.
 
-### Pre-stable checklist (in priority order)
+### Open follow-ups (in priority order)
 
-1. **Verify pipeline one more time**:
-   ```bash
-   npm run validate        # lint + test — must show 563/563 + 0 skip
-   ```
-2. **README + CHANGELOG refresh** — README.md does not yet mention the
-   HARDEN-06 through HARDEN-11 options (`accumulationRateMbPerSec`,
-   `minRecycleIntervalMs`, `recycleOnTasksExhausted`, `dispatchStrategy`,
-   `workerPollIntervalMs`, `recycleBackoffMs`). CHANGELOG.md does not
-   exist yet — first entry should cover ADR-0014 + ADR-0024.
-3. **Version bump** — `package.json` `0.1.0` → `0.2.0`. Bump `engines.node`
-   if needed.
-4. **Tag + publish** — `git tag v0.2.0 && git push --tags && npm publish`
-   (verify npm registry credentials first).
-5. **Alert Felipe** — message "stable v0.2.0 ready — bumped + tagged +
-   published. Next chat can pick up any follow-up work."
+1. **T13+ portable benchmarks** — fix macOS-Latest ARM64 benchmark calibrations (`.agents/issues/CI-FAILURE-macos-benchmarks.md`). Currently failing `benchmarks/cpu-saturation` step on macOS-Latest / Node 22/24. Use Linux x86_64 / Windows calibrations for `availableParallelism()`-based saturation assertions, or port the assertions to be architecture-agnostic.
+2. **`gh auth refresh --scopes workflow`** — interactive. Adds `workflow` scope permanently to the `gh` CLI auth, so future PRs touching `.github/workflows/*.yml` can be merged with `gh pr merge` instead of the `git fetch + local merge + git push` workaround.
+3. **Spec-precision follow-ups** (cheap, non-blocking, ~25 lines total):
+   - `RECYCLE-08` — negative-case assertion in `test/worker-recycling.test.js`.
+   - `PREEMPT-06` — explicit field-name assertions in `worker_replaced` event payload.
+   - `PREEMPT-08` — shutdown-during-pending-watchdog `unhandledRejection` regression test.
+4. **`tasks.md` template migration** — pre-existing drift in `.specs/features/adaptive-concurrency/tasks.md` and `.specs/features/persistent-worker-runtime/tasks.md`. Both fail `validate_tasks.py` with 4 structural errors each (missing `## Test Coverage Matrix`, `## Gate Check Commands`, `## Execution Plan`, `## Task Breakdown` + per-task `**Tests**:` / `**Gate**:` fields). Dedicated session with human review.
+5. **DR plan §8 open items** — SIGTERM handler, `/healthz` endpoint, OpenTelemetry, durable queue backend (Postgres impl per ADR-0020). Implementation partial in `src/`; doc formalization pending.
 
-### Optional follow-ups (not blockers)
+### Workflow for next release (v0.3.0 — placeholder)
 
-- **Track 5 from issue 002** — hot-path benchmark as pre-push hook
-  (currently only the lint+test pipeline runs in pre-push; the
-  io-throughput benchmark is not gated). Defer until after v0.2.0 ships.
-- **Finding 3 from issue 002** — T9 fresh-priority getter note in
-  `dispatchStrategy` doc comment. Trivial. Defer.
-- **Streaming backlog** — `streaming-abort-latency` Phase 2 (needs design).
-
-### Workflow for v0.2.0 ship
-
-1. Open `package.json` — change `version: "0.1.0"` → `0.2.0"`.
-2. Commit `chore(release): bump version to 0.2.0`.
-3. `git tag v0.2.0`.
-4. `git push origin develop --follow-tags`.
-5. `npm publish --access public` (or scoped accordingly).
-6. Confirm on npmjs.com that v0.2.0 is live.
-7. Reply to Felipe with the alert message above.
+When ready:
+1. `git checkout -b chore/release-v0.3.0`
+2. Land features in conventional-commits commits.
+3. `npm version minor` (0.2.1 → 0.3.0).
+4. `git push origin chore/release-v0.3.0`.
+5. Open PR → merge to `main` (CI runs `lint` + `test` matrix).
+6. Tag triggers `release.yml` workflow → npm publish with provenance.
+7. GitHub release notes.
 
 ---
 
@@ -118,40 +105,47 @@ pass, 0 fail, 0 skip). What's missing is the release artifacts.
 
 ```bash
 # Tests + lint
-npm test                 # 563 tests across 153 suites (post-ADR-0024 + 3 review fixes)
-npm run test:coverage    # >95% line coverage
-npm run lint             # biome check (no auto-fix)
-npm run lint:ci          # biome ci (CI strict mode; used by lint.yml)
-npm run lint:fix         # biome check --write --unsafe
-npm run format           # biome format --write
-npm run format:check     # biome format (no fix)
-npm run validate         # lint + test (used by pre-push, prepublish)
+npm test                     # 563 tests across 153 suites (post-ADR-0024 + 3 review fixes + Windows Node 22 fix)
+npm run lint                 # biome check (no auto-fix)
+npm run lint:ci              # biome ci (CI strict mode; used by lint.yml)
+npm run validate             # lint + test (used by pre-push, prepublish)
 
-# Benchmarks (18 total — full results in BENCHMARKS.md)
+# Benchmarks (20+ scripts — full results in BENCHMARKS.md)
 npm run benchmark:all
-npm run benchmark                  # Event Loop lag under load
-npm run benchmark:stateful         # Warm L1 vs stateless reload (30.7× faster)
-npm run benchmark:concurrency      # Bounded batch concurrency
-npm run benchmark:outbox           # Transactional outbox throughput
-npm run benchmark:zero-copy        # transferList vs clone (6.2× faster)
-npm run benchmark:priority         # Priority routing & fairness
-npm run benchmark:cancel           # AbortController cancellation (0.16 ms pre-aborted)
-npm run benchmark:scaling          # Worker count scaling
-npm run benchmark:preemption       # Hard preemption watchdog + pool healing
-npm run benchmark:recycling        # Automatic recycling
-npm run benchmark:broadcast        # BroadcastChannel fan-out (18.3× faster)
-npm run benchmark:streaming-queue-dispatch   # T5 queued stream dispatch latency
-npm run benchmark:streaming-abort-latency    # Consumer break → worker finally
-npm run benchmark:streaming-throughput  # chunks/sec by stream length × HWM
-npm run benchmark:streaming-memory      # RSS steady-state + queue footprint
-npm run benchmark:streaming-stress      # concurrent streams + 50k chunks + abort latency
-npm run benchmark:default-sizing-memory # ADR-0019 (default workers=1 is 5× to 20× cheaper on multi-core hosts)
-npm run benchmark:io-throughput       # ADR-0024 sustained-rate benchmark (50k TCP round-trips)
+npm run benchmark                              # Event Loop lag under load
+npm run benchmark:stateful                     # Warm L1 vs stateless reload (30.7× faster)
+npm run benchmark:concurrency                  # Bounded batch concurrency
+npm run benchmark:outbox                       # Transactional outbox throughput
+npm run benchmark:zero-copy                    # transferList vs clone (6.2× faster)
+npm run benchmark:priority                     # Priority routing & fairness
+npm run benchmark:cancel                       # AbortController cancellation (0.16 ms pre-aborted)
+npm run benchmark:scaling                      # Worker count scaling
+npm run benchmark:preemption                   # Hard preemption watchdog + pool healing
+npm run benchmark:recycling                    # Automatic recycling
+npm run benchmark:broadcast                    # BroadcastChannel fan-out (18.3× faster)
+npm run benchmark:streaming-queue-dispatch     # T5 queued stream dispatch latency
+npm run benchmark:streaming-abort-latency      # Consumer break → worker finally
+npm run benchmark:streaming-throughput        # chunks/sec by stream length × HWM
+npm run benchmark:streaming-memory             # RSS steady-state + queue footprint
+npm run benchmark:streaming-stress             # concurrent streams + 50k chunks + abort latency
+npm run benchmark:default-sizing-memory       # ADR-0019 (default workers=1 is 5× to 20× cheaper on multi-core hosts)
+npm run benchmark:io-throughput                # ADR-0024 sustained-rate (50k TCP round-trips)
+npm run benchmark:cpu-saturation               # Phase E — CPU saturation knee
+npm run benchmark:adaptive-controller          # ADR-0014 tick overhead < 1ms SLA (p50=0.041ms / p99=0.064ms)
+npm run benchmark:adaptive-controller-opt-out  # ADR-0014 opt-out overhead
+npm run benchmark:adaptive-concurrency         # ADR-0014 end-to-end grow/shrink
 
-# Examples (9 total)
+# Examples
+node examples/adaptive-concurrency.js          # Three sizing modes side-by-side (ADR-0014)
 node examples/broadcast-cache-invalidation.js
-node examples/streaming-llm.js          # TTFT + signal abort + runtime events
-node examples/streaming-csv-export.js   # backpressure with slow consumer
+node examples/streaming-llm.js                 # TTFT + signal abort + runtime events
+node examples/streaming-csv-export.js          # backpressure with slow consumer
+node examples/express-outbox-email.js          # Express + transactional outbox
+node examples/image-resizer-batch.js           # Bounded batch image processing
+node examples/persistent-ai-model.js           # Stateful worker with warm AI model in L1
+node examples/priority-routing.js              # Critical work vs. batch work ordering
+node examples/zero-copy-image.js               # transferList for 30MB image buffer
+node examples/cancel-on-disconnect.js          # Manual + AbortSignal.timeout + pre-aborted patterns
 
 # Verify ESM exports
 node --input-type=module -e "import * as mod from './src/index.js'; console.log(Object.keys(mod));"
@@ -173,11 +167,13 @@ node --input-type=module -e "import * as mod from './src/index.js'; console.log(
 | Priority queue | `src/task-queue.js` |
 | Error hierarchy | `src/errors.js` |
 | BroadcastChannel wrapper | `src/broadcast-channel.js` |
-| Adaptive concurrency controller (ADR-0014) | `src/adaptive-controller.js` (T1-T3 done; T4-T5 pending) |
-| Architectural decisions | `docs/adr/0001..0019-*.md` (see `docs/adr/README.md`) |
+| Adaptive concurrency controller (ADR-0014) | `src/adaptive-controller.js` |
+| Worker-pool sizing helpers (ADR-0023) | `src/worker-pool-sizing.js` |
+| Architectural decisions | `docs/adr/0001..0024-*.md` (see `docs/adr/README.md`) |
+| DR plan | `docs/operations/disaster-recovery.md` |
 | Empirical benchmark results | `BENCHMARKS.md` |
 | Embedded AI-agent skill | `skills/persistent-worker-runtime/` |
-| Local spec/state | `.specs/STATE.md` (gitignored) |
+| Local spec/state | `.specs/STATE.md` (gitignored — local planning only) |
 
 ---
 
@@ -192,4 +188,16 @@ node --input-type=module -e "import * as mod from './src/index.js'; console.log(
 7. **`BroadcastChannel` does not loop back to the sender** — to evict your own cache, do it explicitly in addition to `publish()`.
 8. **`subscribe()` after `runtime.shutdown()`** throws — subscribe BEFORE shutdown if you need to receive late messages.
 9. **In tests, `await runtime.execute(...)` if measuring latency or relying on the result** — fire-and-forget `runtime.execute()` followed by a sync test exit can produce `WorkerCrashError` after the test ends (CI flake on slower runners).
-10. **One task = one commit.** The T1 commit (`b9966e5`) originally bundled T1+T2 content; the fix required a `git reset HEAD~2` + rewrite + restore via backup. Don't repeat. Commit per task; verify the diff scope before push (`git diff origin/develop..HEAD --stat`).
+10. **One task = one commit.** Don't batch. Verify `git diff origin/main..HEAD --stat` before pushing.
+11. **GitHub OAuth `workflow` scope missing** — `gh pr merge` fails with `GraphQL: refusing to allow an OAuth App to create or update workflow ... without 'workflow' scope` on any PR touching `.github/workflows/*.yml`. Workaround: fetch PR head ref + merge locally + push via plain git. Long-term fix: `gh auth refresh --scopes workflow` (interactive).
+12. **GitHub REST API cannot change PR head branch** — `PATCH /repos/{owner}/{repo}/pulls/{number}` ignores `head` field. To rename a branch after PR is open: edit title/body on closed PR + redirect comment + create new PR from renamed branch.
+13. **Windows Node 22 CI flake** — node startup is slower on Windows + Node 22. Use 200ms timing windows (not 50ms) for any "wait briefly then assert pool state" tests.
+
+---
+
+## 📜 8. Release + CI Notes (post-v0.2.1)
+
+- **`release.yml`** triggers automatically on `release: published` → runs `npm ci` + `npm test` + `npm publish --access public --provenance`. Uses `secrets.NPM_TOKEN` via `NODE_AUTH_TOKEN` env var. Permissions include `id-token: write` for npm provenance attestation.
+- **`commit-lint.yml`** uses `pull_request` event (not `pull_request_target`). With `pull_request_target`, the workflow always reads the workflow file from `main`, so PR-branch fixes wouldn't take effect until after merge. The post-merge version of `commit-lint.yml` is the one that validates.
+- **`ci.yml`** matrix: Node 22.x + 24.x × ubuntu/macos/windows. Pre-existing flake: `Test on Node 22.x (macos-latest)` benchmarks step (`benchmarks/cpu-saturation`). Tracked in `.agents/issues/CI-FAILURE-macos-benchmarks.md`. Fixed in v0.2.1: `Test on Node 22.x (windows-latest)` recycle-backoff timing (`99ef885`).
+- **npm registry propagation delay** — variable. v0.2.0 visible in 54s; v0.2.1 took 4min 8s. Don't panic-declare-failure within 1 minute. Check Sigstore provenance (`npm notice publish Provenance statement published to transparency log: https://search.sigstore.dev/?logIndex=<id>`) to confirm publish succeeded even if registry hasn't caught up.

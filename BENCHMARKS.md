@@ -372,6 +372,76 @@ File: `benchmarks/cpu-saturation.benchmark.js`
 
 ---
 
+## 1️⃣9️⃣ I/O Throughput + Memory Recycling + Preemption (ADR-0024 sustained-rate)
+
+**What it proves**: A workload sustained at ~1,500 req/s for 30+ seconds exercises every HARDEN-06/07/08/11/10 option together — recycling decisions, hysteresis windows, drain grace, watchdog preemption, and recovery.
+
+**Setup**: 50,000 TCP round-trip tasks over ~30s at constant ~1,500 req/s. Workers accumulate trade-history state (drives memory growth). 5% of tasks are simulated "trade failures". A mid-stream `while (true) {}` runaway exercises the preemption watchdog. Every 5s the benchmark prints a progress line so you can watch memory + throughput evolve in real time.
+
+**Six hard assertions** (all must pass for the benchmark to exit 0):
+
+1. **Sustained throughput** — 50k tasks complete within the wall budget.
+2. **Memory accumulation drives recycling** — workers cross `maxMemoryMb`, `worker:recycled` events fire at least once.
+3. **Memory reclaims after recycling** — RSS delta between peak and post-drain quantifies what recycle actually freed.
+4. **Runaway tasks trigger preemption** — `worker:preempted` / `worker:recycled` fire within `workerPollIntervalMs`.
+5. **Recovery after recycling/preemption** — fresh workers come back online; Phase 3 dispatch confirms completion on the new pool.
+6. **Per-worker share** — every worker gets ≥ 50 % of its fair share (LRU dispatch sanity check).
+
+The benchmark accepts env-var opt-ins to enable individual gates:
+- `PWR_HARDEN_06=1` — activate `accumulationRateMbPerSec`
+- `PWR_HARDEN_07=1` — activate `minRecycleIntervalMs` hysteresis
+- `PWR_HARDEN_08=1` — flip `recycleOnTasksExhausted` to `false`
+- `PWR_HARDEN_11=1` — activate `recycleBackoffMs` drain grace
+
+Run: `npm run benchmark:io-throughput`
+File: `benchmarks/io-throughput.benchmark.js`
+
+---
+
+## 2️⃣0️⃣ Adaptive Concurrency Controller (ADR-0014)
+
+**What it proves**: The dual-signal ELU + `monitorEventLoopDelay` controller grows the pool under idle load, shrinks from busy load, and stays silent under load when `concurrency: 'fixed'` is opted in.
+
+**Headline numbers** (measured in `benchmarks/adaptive-controller-tick.benchmark.js`, `benchmarks/adaptive-controller.benchmark.js`, `benchmarks/adaptive-concurrency.benchmark.js`, `benchmarks/cpu-saturation.benchmark.js`):
+
+| Metric | Value | Phase |
+| --- | --- | --- |
+| Per-tick overhead, p50 | **0.041 ms** | T7 SLA (D-1) |
+| Per-tick overhead, p99 | **0.064 ms** | T7 SLA (D-1) |
+| `classifyTickDirection` throughput | **65.97 M ops/sec** (~15 ns/call) | D-4 |
+| Listener scaling (10 listeners / 1 listener) | **0.99×** (linear) | D-2 |
+| Per-controller memory footprint | **3.1 KB** | D-3 |
+| Phase A + B + E suite wall time | **~17 s** | E (full end-to-end) |
+| Saturation knee | **16→20 worker ratio = 1.07×** (plateau) | E |
+
+All numbers cited from `Phase A/B/C/D/E` benchmark suite (T10-A, T10-B, T10-C, T10-D/D-4, T10-E). Budget met across the board.
+
+### 2️⃣0️⃣a — Tick overhead microbenchmark (T7 SLA)
+
+The controller's per-tick overhead is held under **1 ms** average (tested on 1000 ticks with stubbed callbacks). Measured **p50 = 0.041 ms / p99 = 0.064 ms** on a 28-core host. This is the SLA gate that justifies running the controller at 1-second cadence without burning main-thread budget.
+
+Run: `npm run benchmark:adaptive-controller`
+File: `benchmarks/adaptive-controller-tick.benchmark.js`
+
+### 2️⃣0️⃣b — Synthetic main-thread pressure triggers shrink
+
+A synthetic event-loop pressure source is applied (CPU-bound work on the main thread). The controller detects ELU > threshold within ~5 ticks and shrinks the pool. Verifies the shrink path end-to-end against `runtime.stats.adaptive.lastResizeReason === 'shrink-from-busy'`.
+
+Run: `npm run benchmark:adaptive-controller-opt-out` (when CPU pressure is the variant)
+
+### 2️⃣0️⃣c — Pool 1 → 8 grow on idle
+
+With main thread idle, the controller grows the pool from `minWorkers: 1` to `maxWorkers: 8` over a deterministic tick window. Verifies the grow path against `runtime.stats.adaptive.lastResizeReason === 'grow'` and `totalGrowEvents ≥ 7`. Full A+B+E suite wall time: **~17 s**.
+
+### 2️⃣0️⃣d — `runtime.stats.adaptive` full 7-field assertions (T10-E)
+
+The complete telemetry block (`enabled`, `effectiveWorkers`, `elu`, `latencyP99Ms`, `lastResizeReason`, `lastResizeAt`, `ticksSinceResize`) is asserted against expected values after a known sequence of grow + shrink cycles. Documents the live-mirroring contract — getter returns the live reference, not a snapshot; the benchmark captures fields into local vars before any `await` to avoid the cumulative-counter race.
+
+Run: `npm run benchmark:adaptive-concurrency`
+File: `benchmarks/adaptive-concurrency.benchmark.js`
+
+---
+
 ## How to Reproduce All Results
 
 ```bash
@@ -397,6 +467,10 @@ npm run benchmark:streaming-memory           # RSS + queue footprint steady-stat
 npm run benchmark:streaming-stress           # Concurrency + size + abort latency
 npm run benchmark:default-sizing-memory      # ADR-0019 default pool RSS comparison
 npm run benchmark:cpu-saturation             # Phase E — CPU saturation knee (T6 prep)
+npm run benchmark:io-throughput              # ADR-0024 sustained-rate (50k tasks, ~30s)
+npm run benchmark:adaptive-controller        # ADR-0014 tick overhead < 1 ms SLA
+npm run benchmark:adaptive-controller-opt-out # ADR-0014 opt-out overhead
+npm run benchmark:adaptive-concurrency       # ADR-0014 end-to-end grow/shrink
 ```
 
 Each benchmark prints a header, the measured numbers, a percent-vs-baseline summary, and a short verdict. Run them individually to isolate platform variance; the `npm run benchmark:all` aggregate gives the integrated picture.
