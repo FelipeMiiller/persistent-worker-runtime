@@ -126,6 +126,94 @@ async function measureWorkload(workers, workloadFn, _isAsync) {
   }
 }
 
+async function probeUnderLoad() {
+  console.log('\n── Phase E-4: Health probes under load ───────────────────────────────');
+  console.log(
+    '  Exercises runtime.isAlive() + runtime.isReady() (DR §8.2) under CPU saturation\n' +
+      '  + queue backpressure. Probes must reflect the actual runtime state.\n',
+  );
+
+  // Scenario A: idle runtime → both probes return { ok: true }.
+  {
+    const runtime = await createWorkerRuntime({ workers: 4 });
+    try {
+      const a = runtime.isAlive();
+      const r = runtime.isReady();
+      console.log(`  [idle]        isAlive=${JSON.stringify(a)}  isReady=${JSON.stringify(r)}`);
+      const ok = a.ok && r.ok;
+      if (!ok) {
+        console.error('  E-4 FAIL: idle runtime must report ok:true on both probes.');
+        process.exit(1);
+      }
+    } finally {
+      await runtime.shutdown();
+    }
+  }
+
+  // Scenario B: 1 worker + tiny queue + blocking tasks → isReady flips
+  // to { ok:false, reason:"queue-full" }. Demonstrates the readiness
+  // gate an external observer (k8s readinessProbe, LB target group)
+  // would use to drain traffic from a saturated instance.
+  {
+    const runtime = await createWorkerRuntime({ workers: 1, maxQueueSize: 2 });
+    try {
+      const blocker = () =>
+        new Promise(() => {
+          // Never resolves — keeps the worker busy so the queue fills.
+        });
+      runtime.dispatch(blocker).promise.catch(() => {
+        // Fire-and-forget — the rejected promise is intentional (test setup).
+      });
+      runtime.dispatch(blocker).promise.catch(() => {
+        // Same — second pending task fills the queue.
+      });
+      runtime.dispatch(blocker).promise.catch(() => {
+        // Same — third task goes to a parked waiter.
+      });
+      // Let the scheduler settle so the first task is busy + two pending.
+      for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+
+      const a = runtime.isAlive();
+      const r = runtime.isReady();
+      console.log(`  [queue-full]  isAlive=${JSON.stringify(a)}  isReady=${JSON.stringify(r)}`);
+      const ok = a.ok === true && r.ok === false && r.reason === 'queue-full';
+      if (!ok) {
+        console.error(
+          '  E-4 FAIL: queue-full scenario — expected isAlive=true, isReady={ok:false,reason:"queue-full"}.',
+        );
+        process.exit(1);
+      }
+    } finally {
+      await runtime.shutdown();
+    }
+  }
+
+  // Scenario C: drain in flight → isAlive stays true (process is alive
+  // while workers finish), isReady flips to { ok:false, reason:
+  // "shutting-down" } (no new work, even mid-drain).
+  {
+    const runtime = await createWorkerRuntime({ workers: 2 });
+    try {
+      const drainPromise = runtime.shutdown();
+      const a = runtime.isAlive();
+      const r = runtime.isReady();
+      console.log(`  [draining]    isAlive=${JSON.stringify(a)}  isReady=${JSON.stringify(r)}`);
+      const ok = a.ok === true && r.ok === false && r.reason === 'shutting-down';
+      if (!ok) {
+        console.error(
+          '  E-4 FAIL: drain scenario — expected isAlive=true, isReady={ok:false,reason:"shutting-down"}.',
+        );
+        process.exit(1);
+      }
+      await drainPromise;
+    } catch {
+      // runtime.shutdown() already resolved — nothing to do.
+    }
+  }
+
+  console.log('  ✓ E-4: probes correctly reflect idle / saturated / draining states.');
+}
+
 async function phaseEDecisionMatrix(cpuResults, ioResults) {
   console.log('\n── Phase E-3: Sizing decision matrix ──────────────────────────────────');
   console.log('  CPU-bound vs I/O-bound scaling for the same worker-count sweep:\n');
@@ -244,6 +332,7 @@ async function runBenchmark() {
   );
 
   await phaseEDecisionMatrix(cpuResults, ioResults);
+  await probeUnderLoad();
 
   console.log('\n=====================================================================');
   console.log('VERDICT: Phase E passed — saturation rule confirmed empirically.');

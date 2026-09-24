@@ -8,6 +8,7 @@ import { TaskHandle } from '../src/task-handle.js';
 //   3. snapshot() — called by getWorkers() / stats.workers
 //   4. stats getter — called by dashboards / Prometheus scrapers
 //   5. findWorkerForTask — called per dispatch (internal)
+//   6. isAlive() / isReady() — called by external probes (k8s, LB, cron)
 //
 // Methodology:
 //   - Burst-then-idle pattern from T10-B lessons (memory: setImmediate
@@ -31,6 +32,8 @@ const REGRESSION_BUDGETS = {
   snapshotOverheadUs: 50, // WorkerHandle.snapshot()
   statsGetterUs: 100, // runtime.stats getter
   findWorkerUs: 100, // supervisor.findWorkerForTask
+  isAliveGetterUs: 5, // runtime.isAlive() (called by k8s livenessProbe)
+  isReadyGetterUs: 5, // runtime.isReady() (called by k8s readinessProbe)
 };
 
 const ITERATIONS = 10_000;
@@ -155,6 +158,38 @@ async function runBenchmark() {
     console.log(line);
     if (stats.p99 > REGRESSION_BUDGETS.findWorkerUs) failures.push(line);
     await supervisor.shutdown();
+  }
+
+  // ─── 6. runtime.isAlive() overhead ─────────────────────────────────────
+  // Called by external observers (k8s livenessProbe, LB target group) at
+  // a fixed cadence. Must stay below 5μs p99 — orchestrator probes run at
+  // 1-10 Hz and budgets the probe call against the Event Loop budget.
+  {
+    const runtime = await createWorkerRuntime({ workers: 4 });
+    try {
+      const stats = measure(() => runtime.isAlive());
+      const line = fmt('runtime.isAlive() (liveness)', stats, REGRESSION_BUDGETS.isAliveGetterUs);
+      console.log(line);
+      if (stats.p99 > REGRESSION_BUDGETS.isAliveGetterUs) failures.push(line);
+    } finally {
+      await runtime.shutdown();
+    }
+  }
+
+  // ─── 7. runtime.isReady() overhead ─────────────────────────────────────
+  // Called by external observers (k8s readinessProbe, deploy gate) at a
+  // fixed cadence. Same budget as isAlive() — both probes are cheap by
+  // design (they read in-memory state only, no IPC).
+  {
+    const runtime = await createWorkerRuntime({ workers: 4 });
+    try {
+      const stats = measure(() => runtime.isReady());
+      const line = fmt('runtime.isReady() (readiness)', stats, REGRESSION_BUDGETS.isReadyGetterUs);
+      console.log(line);
+      if (stats.p99 > REGRESSION_BUDGETS.isReadyGetterUs) failures.push(line);
+    } finally {
+      await runtime.shutdown();
+    }
   }
 
   console.log('\n=====================================================================');
