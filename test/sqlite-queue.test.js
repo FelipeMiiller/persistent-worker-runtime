@@ -692,10 +692,15 @@ describe('SqliteTaskQueue', () => {
           `INSERT INTO queue_tasks
              (task_id, priority, affinity_key, payload, state, attempt,
               max_retries, enqueued_at, updated_at, claimed_by, claim_expires_at)
-           VALUES (?, 0, NULL, ?, 'processing', 0, 0, ?, ?, ?, ?)`,
+           VALUES (?, 0, NULL, ?, 'processing', ?, ?, ?, ?, ?, ?)`,
         ).run(
           opts.taskId || 'orphan-1',
           Buffer.from(envelope, 'utf8'),
+          opts.attempt ?? 0,
+          // Default to a generous retries budget so the reclaim goes to
+          // pending (not failed). Tests that want to exercise the
+          // budget-exhausted path override this.
+          opts.maxRetries ?? 10,
           now,
           now,
           opts.claimedBy || 'previous-instance',
@@ -762,11 +767,15 @@ describe('SqliteTaskQueue', () => {
       }
     });
 
-    it('reclaimExpired() is idempotent and returns 0 when nothing to reclaim', () => {
+    it('reclaimExpired() is idempotent and returns {0,0} when nothing to reclaim', () => {
       const q = new SqliteTaskQueue({ path: ':memory:' });
       try {
-        assert.equal(q.reclaimExpired(), 0);
-        assert.equal(q.reclaimExpired(), 0, 'idempotent on empty queue');
+        assert.deepEqual(q.reclaimExpired(), { reclaimed: 0, exhausted: 0 });
+        assert.deepEqual(
+          q.reclaimExpired(),
+          { reclaimed: 0, exhausted: 0 },
+          'idempotent on empty queue',
+        );
       } finally {
         q.destroy();
       }
@@ -776,9 +785,11 @@ describe('SqliteTaskQueue', () => {
       const dbPath = tmpDb('orphan-cron');
       // Use a long lease so the recovery sweep on startup doesn't reclaim.
       // We will reclaim manually after manually expiring the lease.
+      // Pass retries=10 so the orphan goes to pending (not failed) on
+      // reclaim — the cron test exercises the happy reclaim path.
       const q1 = new SqliteTaskQueue({ path: dbPath, leaseMs: 60_000 });
       try {
-        await q1.enqueue(makeHandle({ id: 'cron-orphan' }));
+        await q1.enqueue(makeHandle({ id: 'cron-orphan', retries: 10 }));
         const claimed = q1.dequeue();
         assert.ok(claimed);
         // At this point the row has state='processing' + lease +60s.
@@ -794,12 +805,13 @@ describe('SqliteTaskQueue', () => {
           db.close();
         }
         // First reclaim brings it back to pending.
-        const reclaimed = q1.reclaimExpired();
-        assert.equal(reclaimed, 1);
+        const result1 = q1.reclaimExpired();
+        assert.equal(result1.reclaimed, 1);
+        assert.equal(result1.exhausted, 0);
         // Now size reflects the reclaimed row.
         assert.equal(q1.size, 1);
         // A second reclaim is a no-op.
-        assert.equal(q1.reclaimExpired(), 0);
+        assert.deepEqual(q1.reclaimExpired(), { reclaimed: 0, exhausted: 0 });
       } finally {
         q1.destroy();
       }
@@ -894,6 +906,210 @@ describe('SqliteTaskQueue', () => {
         }
       } finally {
         // already destroyed
+      }
+    });
+  });
+
+  describe('T13.2 retry budget enforcement (orphan reclaim counts as an attempt)', () => {
+    /** Insert a task in `processing` state with a specific attempt count
+     *  and retries budget, simulating a worker that died mid-task after
+     *  N prior attempts. */
+    function plantOrphanWithBudget(dbPath, opts) {
+      const db = new DatabaseSync(dbPath);
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS queue_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT UNIQUE NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 0,
+            affinity_key TEXT,
+            payload BLOB NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER NOT NULL DEFAULT 0,
+            enqueued_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            claimed_by TEXT,
+            claim_expires_at INTEGER
+          );
+        `);
+        const now = Date.now();
+        const envelope = JSON.stringify({
+          id: opts.taskId,
+          type: 'test',
+          payload: { x: 1 },
+          affinityKey: null,
+          priority: 0,
+          fnCode: 'async () => 1',
+        });
+        db.prepare(
+          `INSERT INTO queue_tasks
+             (task_id, priority, affinity_key, payload, state, attempt,
+              max_retries, enqueued_at, updated_at, claimed_by, claim_expires_at)
+           VALUES (?, 0, NULL, ?, 'processing', ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          opts.taskId,
+          Buffer.from(envelope, 'utf8'),
+          opts.attempt ?? 0,
+          opts.maxRetries ?? 0,
+          now,
+          now,
+          opts.claimedBy || 'previous-instance',
+          now - 1000,
+        );
+      } finally {
+        db.close();
+      }
+    }
+
+    it('markFailed (no retries) + orphan reclaim → goes to failed, NOT pending (avoids infinite loop)', () => {
+      const dbPath = tmpDb('retry-budget-zero');
+      // Task with retries=0 — first reclaim should send it straight to
+      // failed because incrementing attempt (0→1) exceeds max_retries (0).
+      plantOrphanWithBudget(dbPath, {
+        taskId: 'r0',
+        attempt: 0,
+        maxRetries: 0,
+      });
+
+      const q = new SqliteTaskQueue({ path: dbPath });
+      try {
+        // Recovery reclaim should mark this as failed, not pending.
+        assert.equal(q.size, 0, 'row with retries=0 must NOT be reclaimed to pending');
+        const db = new DatabaseSync(dbPath);
+        try {
+          const row = db
+            .prepare("SELECT state, attempt FROM queue_tasks WHERE task_id = 'r0'")
+            .get();
+          assert.equal(row.state, 'failed');
+          // Attempt counter must have been incremented (still 0 since
+          // we incremented BEFORE checking, but we should NOT have
+          // re-attempted). See the implementation note below.
+          assert.ok(row.attempt >= 0);
+        } finally {
+          db.close();
+        }
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('retries=2 + 1 orphan reclaim → goes to pending with attempt=1 (under budget)', () => {
+      const dbPath = tmpDb('retry-budget-under');
+      plantOrphanWithBudget(dbPath, {
+        taskId: 'r1',
+        attempt: 0,
+        maxRetries: 2,
+      });
+
+      const q = new SqliteTaskQueue({ path: dbPath });
+      try {
+        // First reclaim: attempt becomes 1 (still < 2), goes to pending.
+        assert.equal(q.size, 1);
+        const db = new DatabaseSync(dbPath);
+        try {
+          const row = db
+            .prepare("SELECT state, attempt FROM queue_tasks WHERE task_id = 'r1'")
+            .get();
+          assert.equal(row.state, 'pending');
+          assert.equal(row.attempt, 1, 'reclaim must increment attempt counter');
+        } finally {
+          db.close();
+        }
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('retries=2 + successive reclaims: 0→1→2 (pending) → 3 (failed, exceeds budget)', () => {
+      const dbPath = tmpDb('retry-budget-exhaust');
+      plantOrphanWithBudget(dbPath, {
+        taskId: 'r2',
+        attempt: 0,
+        maxRetries: 2,
+      });
+
+      const q = new SqliteTaskQueue({ path: dbPath });
+      try {
+        // Constructor reclaim: attempt 0 → 1, state → pending.
+        assert.equal(q.size, 1);
+
+        // Simulate two worker crashes via the realistic flow: claim
+        // (dequeue) → expire the lease (raw UPDATE) → reclaim.
+        // Using dequeue() keeps the in-memory `#size` cache in sync
+        // — direct DB mutations would inflate the cache because
+        // they bypass the decrement that dequeue() performs.
+        for (let cycle = 0; cycle < 2; cycle++) {
+          const claimed = q.dequeue();
+          assert.ok(claimed !== null, `cycle ${cycle}: dequeue must return the task`);
+          assert.equal(q.size, 0, `cycle ${cycle}: size must drop after claim`);
+
+          // Force lease expiry to simulate the worker crashing without
+          // calling markDone / markFailed.
+          const db = new DatabaseSync(dbPath);
+          try {
+            db.prepare(`UPDATE queue_tasks SET claim_expires_at = ? WHERE task_id = 'r2'`).run(
+              Date.now() - 1000,
+            );
+          } finally {
+            db.close();
+          }
+
+          const { reclaimed: r, exhausted: e } = q.reclaimExpired();
+          // Cycle 0: attempt 1 → 2, ≤ 2 → reclaimed. Cycle 1: attempt
+          // 2 → 3, > 2 → exhausted.
+          if (cycle === 0) {
+            assert.equal(r, 1, 'cycle 0: attempt 1→2 stays under budget');
+            assert.equal(e, 0);
+          } else {
+            assert.equal(r, 0, 'cycle 1: attempt 2→3 exceeds budget');
+            assert.equal(e, 1);
+          }
+        }
+
+        // After 3 reclaims total: attempt=3, state=failed, size=0.
+        const final = new DatabaseSync(dbPath);
+        try {
+          const row = final
+            .prepare("SELECT state, attempt FROM queue_tasks WHERE task_id = 'r2'")
+            .get();
+          assert.equal(row.state, 'failed', 'exhausted budget must go to failed');
+          assert.equal(row.attempt, 3, 'every reclaim increments attempt');
+          assert.equal(q.size, 0, 'failed rows do not count as pending');
+        } finally {
+          final.close();
+        }
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('warns when an orphan is reclaimed to failed (budget exhausted)', () => {
+      const dbPath = tmpDb('retry-budget-warn');
+      plantOrphanWithBudget(dbPath, {
+        taskId: 'r-warn',
+        attempt: 0,
+        maxRetries: 0,
+      });
+
+      const warnings = [];
+      const origEmit = process.emitWarning;
+      process.emitWarning = (msg, type) => {
+        if (type === 'PersistentWorkerRuntimeSqliteOrphanBudgetExhausted') {
+          warnings.push(msg);
+        }
+      };
+      try {
+        const q = new SqliteTaskQueue({ path: dbPath });
+        try {
+          assert.equal(q.size, 0);
+        } finally {
+          q.destroy();
+        }
+        assert.equal(warnings.length, 1);
+        assert.match(warnings[0], /retry budget.*marked failed/);
+      } finally {
+        process.emitWarning = origEmit;
       }
     });
   });

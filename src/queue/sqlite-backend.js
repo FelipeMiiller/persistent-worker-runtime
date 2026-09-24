@@ -191,12 +191,20 @@ export class SqliteTaskQueue {
   #recoverOrphans() {
     // Reset any `processing` row whose lease has expired back to
     // `pending` so the next dequeue can claim it. Idempotent; safe
-    // to call on every constructor invocation.
-    const reclaimed = this.reclaimExpired();
+    // to call on every constructor invocation. `reclaimExpired`
+    // returns `{reclaimed, exhausted}` so we can emit a distinct
+    // warning when the retry budget was consumed.
+    const { reclaimed, exhausted } = this.reclaimExpired();
     if (reclaimed > 0) {
       process.emitWarning(
         `persistent-worker-runtime: SqliteTaskQueue reclaimed ${reclaimed} orphaned claim(s) from previous instance(s).`,
         'PersistentWorkerRuntimeSqliteOrphanReclaim',
+      );
+    }
+    if (exhausted > 0) {
+      process.emitWarning(
+        `persistent-worker-runtime: SqliteTaskQueue exhausted retry budget on ${exhausted} orphaned task(s); marked failed.`,
+        'PersistentWorkerRuntimeSqliteOrphanBudgetExhausted',
       );
     }
   }
@@ -206,25 +214,73 @@ export class SqliteTaskQueue {
    * operators can run it from a cron / scheduler alongside
    * `vacuumCompleted` and `checkpointWal`.
    *
+   * Each reclaim counts as an attempt — the row's `attempt` column
+   * is incremented before the budget check. If `attempt + 1 >
+   * max_retries` the row is marked `failed` instead of reclaimed to
+   * `pending`. This prevents the infinite-reclaim loop that would
+   * otherwise occur when a worker consistently crashes mid-task on
+   * the same task (the task would otherwise oscillate
+   * pending → processing → pending forever, blocking the queue).
+   *
    * @param {number} [now=Date.now()]
-   * @returns {number} rows reclaimed
+   * @returns {{reclaimed: number, exhausted: number}} count of rows
+   *   reclaimed to `pending` and rows that exhausted their retry
+   *   budget (marked `failed`).
    */
   reclaimExpired(now = Date.now()) {
-    if (this.#closed) return 0;
+    if (this.#closed) return { reclaimed: 0, exhausted: 0 };
+
+    // Two-step to preserve clarity and avoid a complex CASE expression:
+    //  1. UPDATE rows whose lease expired. Increment `attempt` so the
+    //     budget check happens against the post-increment value. Set
+    //     state based on whether the new attempt would exceed
+    //     max_retries.
+    //  2. Return both counts so callers can warn appropriately.
+    // Increment `attempt` first (using its pre-UPDATE value on the
+    // RHS, as required by SQLite semantics), then decide state based
+    // on the same pre-UPDATE `attempt + 1`. Crucially, `attempt` is
+    // ALWAYS incremented — including when the budget is exhausted —
+    // so the audit trail reflects every reclaim attempt. Skipping the
+    // increment on exhaustion (the previous design) silently dropped
+    // evidence of the final reclaim.
     const result = this.#stmt(
       'reclaim-expired',
       `UPDATE queue_tasks
-         SET state = 'pending',
-             claimed_by = NULL,
+         SET attempt = attempt + 1,
+             state = CASE
+               WHEN attempt + 1 > max_retries THEN 'failed'
+               ELSE 'pending'
+             END,
+             claimed_by = CASE
+               WHEN attempt + 1 > max_retries THEN claimed_by
+               ELSE NULL
+             END,
              claim_expires_at = NULL,
              updated_at = ?
        WHERE state = 'processing'
          AND claim_expires_at IS NOT NULL
          AND claim_expires_at < ?`,
     ).run(now, now);
-    const reclaimed = Number(result.changes || 0);
+    const changed = Number(result.changes || 0);
+    if (changed === 0) return { reclaimed: 0, exhausted: 0 };
+
+    // Disaggregate by post-update state. Done in a separate query so
+    // each branch is auditable via stderr / logs.
+    const counts = this.#stmt(
+      'reclaim-counts',
+      `SELECT
+         SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS reclaimed,
+         SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) AS exhausted
+       FROM queue_tasks
+       WHERE updated_at = ?`,
+    ).get(now);
+    const reclaimed = Number(counts?.reclaimed || 0);
+    const exhausted = Number(counts?.exhausted || 0);
+    // Cache reconciliation: pending goes up by `reclaimed`, but the
+    // rows that landed in `failed` were not in our local pending cache
+    // (they were `processing`), so no decrement needed.
     if (reclaimed > 0) this.#size += reclaimed;
-    return reclaimed;
+    return { reclaimed, exhausted };
   }
 
   #recoverPending() {
