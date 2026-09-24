@@ -64,7 +64,8 @@
 - **ADR-0014 T12 docs closed** — README §11.1 cites T10 measured numbers (p50=0.041ms/p99=0.064ms tick overhead, 65.97 M ops/sec `classifyTickDirection` throughput, ~17s wall time for Phase A+B+E suite, 16→20 saturation plateau at 1.07×). BENCHMARKS.md §20 has the headline-numbers table. HANDOVER.md + STATE.md refreshed.
 
 ### Documented but NOT YET Implemented
-- **None blocking.** All documented ADRs (0010–0024) are feature-complete and shipped in v0.2.0/0.2.1.
+- **None blocking for single-instance deployments.** All documented ADRs (0010–0024) have shipped **in-scope** features in v0.2.0/0.2.1.
+- **Multi-instance / production deployments still have deferred gaps** tracked in [DR plan §8](docs/operations/disaster-recovery.md#8-open-items-gaps-to-close) — SIGTERM handler, `/healthz`, OpenTelemetry, durable queue backend. Each is `Status = deferred` with a user-side workaround that already works against current `src/`; see that section for per-item effort estimate to close.
 
 ### Tracked work (`.agents/issues/`)
 - **`001-supervisor-start-not-idempotent.md`** — ✅ FIXED (`5c4069c` + `205c384`).
@@ -79,14 +80,19 @@
 
 ### Open follow-ups (in priority order)
 
-1. **T13+ portable benchmarks** — fix macOS-Latest ARM64 benchmark calibrations (`.agents/issues/CI-FAILURE-macos-benchmarks.md`). Currently failing `benchmarks/cpu-saturation` step on macOS-Latest / Node 22/24. Use Linux x86_64 / Windows calibrations for `availableParallelism()`-based saturation assertions, or port the assertions to be architecture-agnostic.
-2. **`gh auth refresh --scopes workflow`** — interactive. Adds `workflow` scope permanently to the `gh` CLI auth, so future PRs touching `.github/workflows/*.yml` can be merged with `gh pr merge` instead of the `git fetch + local merge + git push` workaround.
+1. **T13+ portable benchmarks** — ✅ DONE 2026-09-23 (commit `75deeaf`). `.agents/issues/CI-FAILURE-macos-benchmarks.md` marked RESOLVED; macOS-Latest ARM64 benchmark now uses platform-aware `1.15× darwin / 1.3× others` threshold in `benchmarks/cpu-saturation.benchmark.js`. CI green across 4 consecutive runs.
+2. **`gh auth refresh --scopes workflow`** — ✅ DONE 2026-09-23. Token now has `gist`, `read:org`, `repo`, **`workflow`** (verified via `gh auth status`). Future dependabot PRs that touch `.github/workflows/*.yml` can be merged with `gh pr merge` directly — no more `git fetch + local merge + git push` workaround.
 3. **Spec-precision follow-ups** (cheap, non-blocking, ~25 lines total):
    - `RECYCLE-08` — negative-case assertion in `test/worker-recycling.test.js`.
    - `PREEMPT-06` — explicit field-name assertions in `worker_replaced` event payload.
    - `PREEMPT-08` — shutdown-during-pending-watchdog `unhandledRejection` regression test.
 4. **`tasks.md` template migration** — pre-existing drift in `.specs/features/adaptive-concurrency/tasks.md` and `.specs/features/persistent-worker-runtime/tasks.md`. Both fail `validate_tasks.py` with 4 structural errors each (missing `## Test Coverage Matrix`, `## Gate Check Commands`, `## Execution Plan`, `## Task Breakdown` + per-task `**Tests**:` / `**Gate**:` fields). Dedicated session with human review.
-5. **DR plan §8 open items** — SIGTERM handler, `/healthz` endpoint, OpenTelemetry, durable queue backend (Postgres impl per ADR-0020). Implementation partial in `src/`; doc formalization pending.
+5. **DR plan §8 open items** — SIGTERM handler, `/healthz` endpoint, OpenTelemetry, durable queue backend (Postgres impl per ADR-0020). **All 4 are deferred, not built-in** (corrected 2026-09-23 — earlier text said "Implementation partial in `src/`" which over-stated reality):
+   - **SIGTERM handler** — `runtime.shutdown()` exists and is idempotent, but no built-in `process.on('SIGTERM', ...)` registration in `src/`. Workaround (works today): user wires a 3-line listener; pattern documented in `skills/persistent-worker-runtime/references/observability.md §Lifecycle`.
+   - **/healthz endpoint** — zero HTTP server in `src/`. Workaround (works today): caller-side `http.createServer` reads `runtime.stats()` + `isShuttingDown`.
+   - **OpenTelemetry** — only `AsyncResource` propagation is in place (the OTel Node SDK's transport); no spans emitted by the runtime. Workaround (works today): user installs `@opentelemetry/api` and wraps their own task fns; context flows into workers automatically.
+   - **queueBackend Postgres** — not implemented. ADR-0020 §Implementation Notes: *"Tracked separately as T7-extension or T12 — this ADR records the decision, not the implementation steps."* Workaround: caller fronts the runtime with an external queue (SQS / Kafka / Postgres) per DR §5.2.1.
+   - **§8 doc formalization**: ✅ DONE 2026-09-23 (this session) — 6 detailed subsections (`docs/operations/disaster-recovery.md §8.1–§8.6`). Each entry has Goal / Current state / Why deferred / Workaround today / Estimated effort to close.
 
 ### Workflow for next release (v0.3.0 — placeholder)
 
@@ -189,7 +195,7 @@ node --input-type=module -e "import * as mod from './src/index.js'; console.log(
 8. **`subscribe()` after `runtime.shutdown()`** throws — subscribe BEFORE shutdown if you need to receive late messages.
 9. **In tests, `await runtime.execute(...)` if measuring latency or relying on the result** — fire-and-forget `runtime.execute()` followed by a sync test exit can produce `WorkerCrashError` after the test ends (CI flake on slower runners).
 10. **One task = one commit.** Don't batch. Verify `git diff origin/main..HEAD --stat` before pushing.
-11. **GitHub OAuth `workflow` scope missing** — `gh pr merge` fails with `GraphQL: refusing to allow an OAuth App to create or update workflow ... without 'workflow' scope` on any PR touching `.github/workflows/*.yml`. Workaround: fetch PR head ref + merge locally + push via plain git. Long-term fix: `gh auth refresh --scopes workflow` (interactive).
+11. **GitHub OAuth `workflow` scope** — ~~missing~~ ✅ resolved 2026-09-23 via `gh auth refresh --scopes workflow` (interactive). If a future session hits `GraphQL: refusing to allow an OAuth App to create or update workflow ... without 'workflow' scope` again, it means the scope was lost — re-run the refresh. Workaround until fix: fetch PR head ref + merge locally + push via plain git.
 12. **GitHub REST API cannot change PR head branch** — `PATCH /repos/{owner}/{repo}/pulls/{number}` ignores `head` field. To rename a branch after PR is open: edit title/body on closed PR + redirect comment + create new PR from renamed branch.
 13. **Windows Node 22 CI flake** — node startup is slower on Windows + Node 22. Use 200ms timing windows (not 50ms) for any "wait briefly then assert pool state" tests.
 

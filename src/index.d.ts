@@ -1,5 +1,35 @@
 import { ResourceLimits } from 'node:worker_threads';
-import { EventEmitter } from 'node:events';
+
+/**
+ * Compatibility surface that preserves the Node `EventEmitter` ergonomics
+ * (`.on()` / `.once()` / `.emit()` / `.off()` / `.removeListener()` /
+ * `.removeAllListeners()` / `.listenerCount()`) on top of `EventTarget`.
+ *
+ * The runtime migrated from `EventEmitter` to web-standard `EventTarget`
+ * (see `src/event-target-compat.js`). The compat shim is applied at
+ * construction time so existing consumers keep working without changes.
+ *
+ * Migration plan:
+ *   - v0.2.x: Shim active. Public API still exposes the EventEmitter-like methods below.
+ *   - v0.3.x: Methods above marked `@deprecated`; consumers migrate to
+ *     `addEventListener` / `dispatchEvent` / `removeEventListener`.
+ *   - v0.4.x: Shim dropped; surface narrows to native `EventTarget`.
+ *
+ * Listeners receive a single argument: the original `payload` (for
+ * `EventEmitter`-compatible `.emit(name, payload)` calls). Under the hood
+ * the shim dispatches `new CustomEvent(name, { detail: payload })` and
+ * unwraps `.detail` before invoking the listener.
+ */
+export interface EmitterCompat {
+  on(eventName: string | symbol, listener: (payload: any) => void): this;
+  addListener(eventName: string | symbol, listener: (payload: any) => void): this;
+  once(eventName: string | symbol, listener: (payload: any) => void): this;
+  off(eventName: string | symbol, listener: (payload: any) => void): this;
+  removeListener(eventName: string | symbol, listener: (payload: any) => void): this;
+  emit(eventName: string | symbol, payload?: any): boolean;
+  removeAllListeners(eventName?: string | symbol): this;
+  listenerCount(eventName: string | symbol): number;
+}
 
 /**
  * Snapshot of one worker's state at the time of `runtime.getWorkers()` call.
@@ -59,24 +89,8 @@ export interface AdaptiveControllerStats {
 
 /**
  * Live runtime metrics snapshot.
+ * (declared once — duplicate interface removed 2026-09-23; canonical at the second declaration below)
  */
-export interface RuntimeStats {
-  totalWorkers: number;
-  idleWorkers: number;
-  queueDepth: number;
-  waitingQueueCount: number;
-  submittedTasks: number;
-  completedTasks: number;
-  failedTasks: number;
-  recycledWorkersCount: number;
-  preemptedTasksCount: number;
-  /** Aggregate counter block for the worker pool (HARDEN-04). */
-  workers: WorkersStatsAggregate;
-  /** Adaptive controller telemetry block (ADR-0014). `undefined` when disabled. */
-  adaptive?: AdaptiveControllerStats;
-  activeStreams: number;
-  pendingStreams: number;
-}
 
 /**
  * Configuration options for initializing a WorkerRuntime.
@@ -520,7 +534,7 @@ export class WorkerHandle {
 /**
  * Persistent Worker Runtime orchestrator.
  */
-export class WorkerRuntime extends EventEmitter {
+export class WorkerRuntime extends EventTarget {
   constructor(options?: WorkerRuntimeOptions);
 
   get maxTasksPerWorker(): number;
@@ -702,6 +716,29 @@ export class WorkerRuntime extends EventEmitter {
    * Gracefully drains the queue and terminates all worker threads.
    */
   shutdown(): Promise<void>;
+
+  // ─── EventEmitter-compatible surface (compat shim) ─────────────────────
+  // Provided at runtime by `src/event-target-compat.js` to preserve
+  // backward compatibility with consumers that used the EventEmitter API.
+  // New code should prefer `addEventListener` / `dispatchEvent` /
+  // `removeEventListener` directly on the EventTarget surface.
+
+  /** @deprecated Use `addEventListener()` instead. */
+  on(eventName: string | symbol, listener: (payload: any) => void): this;
+  /** @deprecated Use `addEventListener()` instead. */
+  addListener(eventName: string | symbol, listener: (payload: any) => void): this;
+  /** @deprecated Use `addEventListener(..., { once: true })` instead. */
+  once(eventName: string | symbol, listener: (payload: any) => void): this;
+  /** @deprecated Use `removeEventListener()` instead. */
+  off(eventName: string | symbol, listener: (payload: any) => void): this;
+  /** @deprecated Use `removeEventListener()` instead. */
+  removeListener(eventName: string | symbol, listener: (payload: any) => void): this;
+  /** @deprecated Use `dispatchEvent()` instead. Special case: throws if 'error' has no listener. */
+  emit(eventName: string | symbol, payload?: any): boolean;
+  /** @deprecated Not part of the EventTarget API. Clears all listeners for an event (or all events). */
+  removeAllListeners(eventName?: string | symbol): this;
+  /** @deprecated Not part of the EventTarget API. Returns the listener count for an event. */
+  listenerCount(eventName: string | symbol): number;
 }
 
 /**
@@ -749,7 +786,7 @@ export function createWorkerRuntime(options?: WorkerRuntimeOptions): Promise<Wor
 /**
  * Supervisor monitors worker lifecycles, detects crashes, and maintains pool capacity automatically.
  */
-export class Supervisor extends EventEmitter {
+export class Supervisor extends EventTarget {
   constructor(options?: {
     workers?: number;
     workerScript?: string;
@@ -775,6 +812,27 @@ export class Supervisor extends EventEmitter {
   findWorkerForTask(task: any): WorkerHandle | null;
   createDedicatedWorker(options?: any): Promise<WorkerHandle>;
   shutdown(): Promise<void>;
+
+  // ─── EventEmitter-compatible surface (compat shim) ─────────────────────
+  // Provided at runtime by `src/event-target-compat.js`. See WorkerRuntime
+  // for the full migration plan; same surface applies here.
+
+  /** @deprecated Use `addEventListener()` instead. */
+  on(eventName: string | symbol, listener: (payload: any) => void): this;
+  /** @deprecated Use `addEventListener()` instead. */
+  addListener(eventName: string | symbol, listener: (payload: any) => void): this;
+  /** @deprecated Use `addEventListener(..., { once: true })` instead. */
+  once(eventName: string | symbol, listener: (payload: any) => void): this;
+  /** @deprecated Use `removeEventListener()` instead. */
+  off(eventName: string | symbol, listener: (payload: any) => void): this;
+  /** @deprecated Use `removeEventListener()` instead. */
+  removeListener(eventName: string | symbol, listener: (payload: any) => void): this;
+  /** @deprecated Use `dispatchEvent()` instead. Special case: throws if 'error' has no listener. */
+  emit(eventName: string | symbol, payload?: any): boolean;
+  /** @deprecated Not part of the EventTarget API. */
+  removeAllListeners(eventName?: string | symbol): this;
+  /** @deprecated Not part of the EventTarget API. */
+  listenerCount(eventName: string | symbol): number;
 }
 
 // Error Hierarchy

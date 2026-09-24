@@ -77,6 +77,25 @@ persistent-worker-runtime/
 
 ---
 
+## 📂 Tracked Issues & Known Drift (`.agents/issues/`)
+
+These are the **canonical link targets** for the next session / agent. Each item is a known limitation or drift point — read before assuming a feature is implemented or assuming the docs are current.
+
+| # | File | Title | Status | Why it matters |
+| --- | --- | --- | --- | --- |
+| 001 | [`.agents/issues/001-supervisor-start-not-idempotent.md`](.agents/issues/001-supervisor-start-not-idempotent.md) | `Supervisor.start()` not idempotent (pool doubles on double-call) | ✅ **FIXED** (`5c4069c` + `205c384`) | Regression guard already in `test/supervisor-units.test.js`; `#isStarted` flag added |
+| 002 | [`.agents/issues/002-runtime-hardening-wave4-review.md`](.agents/issues/002-runtime-hardening-wave4-review.md) | Wave 4 review findings (T9-T11 + chunk leak) | ✅ **CLOSED** 2026-09-22 | Findings 1 (backoff Promise leak) + 2 (poll branch collapse) + Track 2 chunk leak all shipped in v0.2.0. Finding 3 (fresh-priority doc note) ⏳ open — docs only |
+| CI | [`.agents/issues/CI-FAILURE-macos-benchmarks.md`](.agents/issues/CI-FAILURE-macos-benchmarks.md) | `npm run benchmark:all` failed on macOS-Latest ARM64 | ✅ **RESOLVED** 2026-09-23 | Dependabot SHA bump + `cpu-saturation.benchmark.js` platform-aware threshold (1.15× darwin / 1.3× others). CI green across 4 consecutive runs |
+
+**Cross-references for related gaps** (not in `.agents/issues/` but worth knowing):
+
+- [DR plan §8](docs/operations/disaster-recovery.md#8-open-items-gaps-to-close) — production-readiness gaps deferred for the reference implementation: SIGTERM handler, `/healthz` endpoint, OpenTelemetry spans, durable queue backend. Each item has a user-side workaround that works today against current `src/`.
+- [`HANDOVER.md`](HANDOVER.md) — current session's pending follow-ups (T13+ portability, `gh auth refresh --scopes workflow`, etc.).
+
+> **Reading rule:** before declaring a feature "implemented" or "shipped" in any downstream doc, verify against `src/` + `STATE.md` + the relevant ADR/spec. See [agent memory `verify-implementation-claims-before-formalizing` (2026-09-23)](D:\.minimax/agents/mavis/memory/MEMORY.md) for the rule + diagnostic.
+
+---
+
 ## 📌 Strict Rules of Conduct for Agents
 
 1. **Pure Vanilla JavaScript (No TypeScript in `src/*.js`):**

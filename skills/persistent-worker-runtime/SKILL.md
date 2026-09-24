@@ -4,7 +4,7 @@ description: Use the persistent-worker-runtime library to offload CPU-bound work
 license: MIT
 metadata:
   author: Felipe Miiller
-  version: 0.2.0
+  version: 0.2.1
   package: persistent-worker-runtime
 ---
 
@@ -98,3 +98,14 @@ The runtime has many features; load the reference that matches the task.
 7. **Don't `subscribe()` after `runtime.shutdown()`** — the underlying BC has been closed; `subscribe()` will throw. Subscribe BEFORE shutdown if you need to receive late messages.
 8. **Don't assume worker affinity is permanent** — recycled workers lose their `affinityKey` mapping; re-dispatch with the same key to re-pin.
 9. **Don't use `runtime.execute()` fire-and-forget** — `execute()` returns a Promise that MUST be awaited or `.catch()`-handled. A discarded Promise becomes a worker crash error after the calling scope returns, surfacing as a CI flake ("async activity after the test ended") on slower runners (macOS Node 22). Use `dispatch()` for intentional fire-and-forget. See ADR-0018.
+
+---
+
+## 5. Production deployment & known gaps
+
+This skill teaches the **shipped API surface**. For production-readiness gaps that are **deliberately deferred** in the reference implementation, see:
+
+- **AGENTS.md → [`.agents/issues/`](../../AGENTS.md#-tracked-issues--known-drift-agentsissues)** — canonical links to tracked issues (supervisor.start idempotency, Wave 4 review findings, macOS benchmark portability).
+- **[`docs/operations/disaster-recovery.md` §8](../../docs/operations/disaster-recovery.md#8-open-items-gaps-to-close)** — production gaps deferred: SIGTERM handler (user wires `process.on('SIGTERM')`), `/healthz` endpoint (user wires `http.createServer` reading `runtime.stats()`), OpenTelemetry spans (user installs `@opentelemetry/api`; runtime provides `AsyncResource` transport only), durable queue backend (ADR-0020 records the decision; user fronts runtime with external queue per §5.2.1). Each item has a workaround that works against current `src/` and an effort estimate to close.
+
+If you're writing a skill or doc that claims a feature is "implemented", verify against `src/` + `STATE.md` + the relevant ADR before stating it as fact — tracked drift has shipped in the past (see `HANDOVER.md` lines 90-95 for the 2026-09-23 correction).

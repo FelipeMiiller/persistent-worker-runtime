@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { EventEmitter } from 'node:events';
 import { availableParallelism } from 'node:os';
 import { createAdaptiveController } from './adaptive-controller.js';
 import { ChannelRegistry } from './broadcast-channel.js';
 import { StreamConfigError, WorkerRuntimeError } from './errors.js';
+import { applyEmitterCompat } from './event-target-compat.js';
 import { scanFnDeps } from './fn-deps-scanner.js';
 import { isGeneratorFunction } from './stream-runner.js';
 import { Stream } from './streaming.js';
@@ -21,7 +21,7 @@ import {
  * WorkerRuntime is the primary concurrency engine.
  * Coordinates execution between the Event Loop and persistent worker threads.
  */
-export class WorkerRuntime extends EventEmitter {
+export class WorkerRuntime extends EventTarget {
   #queue;
   #supervisor;
   #isStarted = false;
@@ -92,6 +92,7 @@ export class WorkerRuntime extends EventEmitter {
 
   constructor(options = {}) {
     super();
+    applyEmitterCompat(this);
 
     const maxTasksPerWorker =
       options.maxTasksPerWorker === undefined ? Infinity : options.maxTasksPerWorker;

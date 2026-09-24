@@ -1,10 +1,10 @@
-import { EventEmitter } from 'node:events';
+import { applyEmitterCompat } from './event-target-compat.js';
 import { WorkerHandle } from './worker-handle.js';
 
 /**
  * Supervisor monitors worker lifecycles, detects crashes, and maintains pool capacity automatically.
  */
-export class Supervisor extends EventEmitter {
+export class Supervisor extends EventTarget {
   #workers = new Map(); // workerId -> WorkerHandle
   #isShuttingDown = false;
   // PWR-001 fix: idempotent start(). The second call is a no-op so the
@@ -87,6 +87,7 @@ export class Supervisor extends EventEmitter {
 
   constructor(options = {}) {
     super();
+    applyEmitterCompat(this);
     // ADR-0023 (T6) — the previous `options.workers || 4` magic-number
     // fallback was unreachable: `WorkerRuntime` always passes a finite
     // integer >= 1 to the Supervisor after running its options through

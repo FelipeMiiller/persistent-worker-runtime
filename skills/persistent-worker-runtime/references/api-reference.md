@@ -1,7 +1,9 @@
-# API Reference (v0.2.0)
+# API Reference (v0.2.1)
 
 Complete reference for the public API. For narrative documentation and patterns, see `SKILL.md` and `references/patterns.md`.
 
+> **v0.2.1 additions** (vs v0.2.0): Pure-ESM `require()` warning fix (yarn 1.x compatibility), CI flake fixes (macOS Node 24 timing widening, commit-lint SHA typo). No new public API surface. See [`CHANGELOG.md`](../../CHANGELOG.md) for details.
+>
 > **v0.2.0 additions** (vs v0.1.0): 11 HARDEN options (`accumulationRateMbPerSec`, `minRecycleIntervalMs`, `recycleOnTasksExhausted`, `dispatchStrategy`, `workerPollIntervalMs`, `recycleBackoffMs`, `observeWorkerMemory`, `memoryEmitIntervalMs`, `concurrency`, `timeoutMs`), `runtime.getWorkers()` snapshot, `runtime.recycleWorker()`, `runtime.stream()`, `runtime.broadcast()` / `subscribe()` / `unsubscribe()` / `hasSubscribers()`, expanded `runtime.stats` block (`workers`, `adaptive`, `activeStreams`, `pendingStreams`), new events (`worker:memory`, `worker_tasks:exhausted`, `worker:retiring`, `stream:*`), new exports (`Stream`).
 
 ---

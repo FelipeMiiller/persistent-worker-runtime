@@ -31,6 +31,7 @@ A production-grade, concurrent execution layer built atop `node:worker_threads`.
   - [9. Inter-Worker BroadcastChannel (L1 Cache Invalidation)](#9-inter-worker-broadcastchannel-l1-cache-invalidation)
   - [10. Streaming Task Results (Async Generators + Backpressure)](#10-streaming-task-results-async-generators--backpressure)
   - [11. Runtime Hardening & Adaptive Concurrency (v0.2.0)](#11-runtime-hardening--adaptive-concurrency-v020)
+  - [12. Node.js Core RFC Proposal](#-nodejs-core-rfc-proposal)
 - [Architecture & Memory Hierarchy](#-architecture--memory-hierarchy)
 - [Comparison with Existing Solutions](#-comparison-with-existing-solutions)
 - [Architecture Decision Records (ADRs)](#-architecture-decision-records-adrs)
@@ -107,7 +108,7 @@ We do not fight the Event Loop; we protect it:
 | **Stateful L1 Memory** | Workers retain warm private heaps (`localState` Map) across consecutive calls with worker affinity (**33.2x faster**). |
 | **Zero-Copy Memory Transfer** | Sub-millisecond transfer of `ArrayBuffer` payloads via native `transferList` without memory copying. |
 | **Resilient Retries** | Automatic retry policies with exponential, linear, or fixed backoff without blocking worker threads. |
-| **Native Diagnostics** | Built-in `AsyncResource` (`node:async_hooks`) propagation for transparent OpenTelemetry / APM distributed tracing. |
+| **Diagnostics Transport** | Built-in `AsyncResource` (`node:async_hooks`) context propagation across the main → worker boundary. OpenTelemetry SDK + APM exporters are user-installed (zero-deps, ADR-0005); spans created on the main thread flow into workers automatically. |
 | **Non-Blocking Backpressure** | Asynchronous queue wait with `queueTimeoutMs` so the process never runs out of memory or busy-waits. |
 | **Resilient Supervisor** | Detects worker thread crashes and automatically spins up replacements to preserve capacity. |
 | **Adaptive Concurrency Controller** (v0.2.0 / ADR-0014) | Dual-signal ELU + `monitorEventLoopDelay` controller tunes the pool band live; grow + drain-shrink (no terminate); pool band `[minWorkers, maxWorkers]`; first-class `runtime.stats.adaptive` telemetry. |
@@ -613,6 +614,18 @@ const recycling = snapshot.filter((w) => w.status === 'recycling');
 - **BC-3** Poll always runs (was gated on accumulation rate). Cost: one cheap function call per worker per tick.
 
 Full TypeScript surface at [`src/index.d.ts`](src/index.d.ts). See **[ADR-0024](docs/adr/0024-runtime-observability-and-recycling-hardening.md)** for the rationale and `[CHANGELOG.md](CHANGELOG.md)` for the migration notes.
+
+---
+
+## 📜 Node.js Core RFC Proposal
+
+This package is also the **reference implementation** for an open RFC proposing `node:worker_runtime` as a **native built-in** in Node.js core — standardizing *"offload CPU-bound work from the Event Loop without losing observability, error propagation, or warm worker-local state"* the same way `node:test` standardized testing and `node:sqlite` provided friction-free embedded persistence.
+
+📄 **[Read the RFC draft →](NODEJS_RFC_PROPOSAL_DRAFT.md)**
+
+The RFC draft §7 enumerates the **current coverage of the reference implementation** (basic tasks, stateful workers, BroadcastChannel, streaming, default pool sizing, adaptive concurrency) and §8 lists the open questions for community discussion (top-level `node:worker_runtime` vs. extension to `node:worker_threads`; functional serialization shape; `AsyncLocalStorage` snapshotting across worker boundaries).
+
+> 📦 **Production deployment guidance** (SIGTERM handler, `/healthz`, OpenTelemetry spans, durable queue backend) is tracked in [`docs/operations/disaster-recovery.md §8`](docs/operations/disaster-recovery.md#8-open-items-gaps-to-close). All four are deferred for the reference implementation today — every item has a user-side workaround that works against current `src/`, plus an effort estimate to close. See §8.1–§8.6 for the per-item detail.
 
 ---
 

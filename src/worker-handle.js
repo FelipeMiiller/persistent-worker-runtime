@@ -1,8 +1,8 @@
-import { EventEmitter } from 'node:events';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { TaskTimeoutError, WorkerCrashError, WorkerRuntimeError } from './errors.js';
+import { applyEmitterCompat } from './event-target-compat.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -13,7 +13,7 @@ let workerSequence = 1;
 /**
  * WorkerHandle manages a single Worker thread instance, its IPC lifecycle, and task execution.
  */
-export class WorkerHandle extends EventEmitter {
+export class WorkerHandle extends EventTarget {
   #worker = null;
   #currentTask = null;
   #streamTask = null;
@@ -46,6 +46,7 @@ export class WorkerHandle extends EventEmitter {
 
   constructor(options = {}) {
     super();
+    applyEmitterCompat(this);
     this.id = options.id || `worker_${Date.now()}_${workerSequence++}`;
     this.name = options.name || null;
     this.affinityKey = options.affinityKey || null;
