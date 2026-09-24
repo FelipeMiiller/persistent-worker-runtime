@@ -14,6 +14,8 @@ Last verified: 2026-09-24.
 | `durable-task-queue.js` | `[perf-tested]` | tasksPreserved (memory=0, sqlite=N) across simulated crash | 2026-09-24 | 200/200 preserved with SQLite, 0/200 with memory |
 | `durable-task-priority.js` | `[perf-tested]` | recoveredSize + firstPriorityDequeued + affinityMatchesFirst after restart | 2026-09-24 | 10/10 preserved with priority + affinity intact |
 | `durable-task-vacuum.js` | `[perf-tested]` | failedRowsPending (no-GC=2000, with-GC=0) + checkpointWalMs | 2026-09-24 | Queue-only (no workers); failed rows are GC-eligible |
+| `durable-task-multi-instance.js` | `[perf-tested]` | capacityRespected under 2-instance concurrent enqueue (cap < 2× per-instance) | 2026-09-24 | Regression guard for T13.1 atomic check (BEGIN IMMEDIATE) |
+| `durable-task-recovery-runtime.js` | `[perf-tested]` | tasksCompletedByRestart (memory=0, sqlite>0) + recoveryTimeMs | 2026-09-24 | End-to-end via createWorkerRuntime; documents orphaned-processing limitation |
 | `event-target-pattern.js` | `[perf-tested]` | cleanup wall-clock + apiCalls (1 vs N) | 2026-09-24 | LISTENER_COUNT capped at 10 (Node EventTarget hard limit) |
 | `express-outbox-email.js` | `[perf-tested]` | httpDurationMs (dispatch vs sequential) | 2026-09-23 | 76× speedup measured |
 | `image-resizer-batch.js` | `[perf-tested]` | setInterval tick count during burst | 2026-09-24 | 27× more ticks with workers |
@@ -24,7 +26,7 @@ Last verified: 2026-09-24.
 | `worker-recycling.js` | `[perf-tested]` | per-cycle overhead (recycling latency, not throughput win) | 2026-09-24 | Event-driven wait replaces polling waitFor |
 | `zero-copy-image.js` | `[perf-tested]` | elapsedMs (transfer vs copy) + sender byteLength | 2026-09-23 | 3.07× speedup measured at 31.64 MB |
 
-**Coverage:** 15/15 examples tagged `[perf-tested]` (with measurable metric). 0 `[correctness]`, 0 `[api-surface]`.
+**Coverage:** 17/17 examples tagged `[perf-tested]` (with measurable metric). 0 `[correctness]`, 0 `[api-surface]`.
 
 ## Re-tagging history
 
@@ -58,4 +60,4 @@ for f in examples/*.js; do
 done
 ```
 
-Expected: 15 lines, 15 tag matches, 0 failures.
+Expected: 17 lines, 17 tag matches, 0 failures.
