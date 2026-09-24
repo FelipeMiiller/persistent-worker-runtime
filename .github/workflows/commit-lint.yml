@@ -1,8 +1,16 @@
 name: First commit message adheres to guidelines
 
-# Validates the first commit message in a PR via the official
-# `core-validate-commit` tool from the Node.js core project, which is
-# the strictest public Conventional Commits linter we can wire up.
+# Validates the first commit message in a PR against Conventional Commits
+# (type(scope): subject) using `@commitlint/cli` + `@commitlint/config-conventional`.
+#
+# History: this workflow previously used `core-validate-commit` from the
+# Node.js core project, which enforced Node.js-specific rules (DCO
+# `Signed-off-by` trailer + Node.js-internal subsystems like `async_hooks`,
+# `buffer`, `crypto`). Those don't apply to this personal project — replaced
+# 2026-09-23 with the standard Conventional Commits validator.
+#
+# Usage:
+#   npx --yes @commitlint/cli --config commitlint.config.js
 
 on:
   pull_request:
@@ -31,6 +39,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Check out PR head
+        uses: actions/checkout@de0fac6e82a2055fa8c90a393099e472f8c91d10 # v6.0.0
+        with:
+          fetch-depth: 1
+          ref: ${{ github.event.pull_request.head.sha }}
+
       - name: Validate first commit message
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
@@ -44,20 +58,29 @@ jobs:
               throw new Error('No commits found in pull request');
             }
             const commit = commits[0];
-            const { exitCode, stdout, stderr } = await exec.getExecOutput('npx', [
-              '-q', '--yes', '--ignore-scripts', 'core-validate-commit@6.0.0',
-              '--no-validate-metadata', '--tap', '-',
-            ], {
-              input: JSON.stringify([{
-                id: commit.sha,
-                message: commit.commit.message,
-                author: commit.commit.author,
-              }]),
-              silent: true,
-              ignoreReturnCode: true,
-            });
+            // commitlint reads commit message from `process.argv[2]` (a file
+            // path) in the default CLI flow. In the GitHub Action context the
+            // simplest robust path is to write the message to a temp file
+            // and invoke `commitlint --edit <file>`.
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const tmp = path.join(process.cwd(), `.commitlint-msg-${commit.sha}`);
+            fs.writeFileSync(tmp, commit.commit.message);
+            const { exitCode, stdout, stderr } = await exec.getExecOutput(
+              'npx',
+              [
+                '-q',
+                '--yes',
+                '--ignore-scripts',
+                '@commitlint/cli@19.6.0',
+                '--config', 'commitlint.config.cjs',
+                '--edit', tmp,
+              ],
+              { silent: true, ignoreReturnCode: true },
+            );
+            try { fs.unlinkSync(tmp); } catch (_) { /* ignore */ }
             if (exitCode !== 0) {
               core.setFailed(stdout || stderr || 'Commit message validation failed');
             } else {
-              core.info('First commit message passes validation');
+              core.info('First commit message passes Conventional Commits validation');
             }
