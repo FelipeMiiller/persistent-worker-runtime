@@ -256,6 +256,26 @@ export interface WorkerRuntimeOptions {
      * keeps writes non-blocking.
      */
     path: string;
+
+    /**
+     * T13.2: lease duration (ms) for a `state='processing'` claim.
+     * Tasks that were claimed but never marked done (worker died
+     * mid-execution) are reclaimed to `state='pending'` once this
+     * lease expires. Default 30 000 ms. Set lower for crash-prone
+     * environments where the next instance must pick up orphaned
+     * work quickly; set higher if some tasks legitimately take
+     * longer than 30 s to complete (and accept the corresponding
+     * delay before orphans are reclaimed).
+     */
+    leaseMs?: number;
+
+    /**
+     * T13.2: stable worker identifier used in the `claimed_by`
+     * column. Operators can override this when running multiple
+     * instances — useful for log correlation. Default: a per-
+     * instance random string based on pid + timestamp.
+     */
+    workerId?: string;
   };
 
   /**

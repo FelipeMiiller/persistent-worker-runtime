@@ -10,40 +10,38 @@
  * Why we use long tasks + few workers:
  *   With short tasks the first runtime's workers would dequeue +
  *   transition rows from `pending` → `processing` before we could
- *   simulate the crash. `#recoverPending` only restores `pending`
- *   rows, so any `processing` row would be orphaned. Long tasks
- *   (workers stay busy on the first batch) keep enough rows in
- *   `pending` for the recovery to be meaningful.
+ *   simulate the crash. Long tasks (workers stay busy on the first
+ *   batch) keep enough rows in `pending` for the recovery to be
+ *   meaningful. Conversely, with too many workers all tasks would
+ *   complete before the crash. We size the first runtime's worker
+ *   pool below the task count so a backlog of pending rows is
+ *   guaranteed at crash time.
  *
- *   Conversely, with too many workers all tasks would complete before
- *   the crash. We size the first runtime's worker pool below the
- *   task count so a backlog of pending rows is guaranteed at crash
- *   time.
- *
- * Known limitation surfaced by this example:
- *   The recovery scan only restores `state='pending'` rows. Tasks
- *   that were in `state='processing'` at crash time (claimed by a
- *   worker that didn't get to mark them done) are orphaned — they
- *   stay in the DB forever and the next runtime never reclaims them.
- *   The numbers in this example reveal this: `completedByFirst + N
- *   pending recovered + N orphaned processing ≈ TASK_COUNT`.
- *   Closing this gap requires either a stale-claim sweeper (mark
- *   `processing` rows older than X as `pending`) or an explicit
- *   `markOrphanedAsPending()` recovery primitive (T13.2 follow-up).
+ * Why we use a SHORT leaseMs on the first runtime (T13.2):
+ *   The recovery sweep `reclaimExpired()` only resets `processing`
+ *   rows whose lease has expired. Default lease is 30 000 ms; tasks
+ *   that were in `state='processing'` at crash time would stay
+ *   orphaned for 30 seconds before being reclaimed. To exercise the
+ *   T13.2 path within this example's lifetime, we configure the
+ *   first runtime with `leaseMs: 500`. By the time we open the
+ *   second runtime, any orphaned lease has expired and
+ *   `#recoverOrphans` brings the row back to `pending`.
  *
  * Use cases:
  *   - The user's primary durability story: dispatch work, crash
  *     mid-flight, work continues on the next instance.
  *
  * What this example measures:
- *   - `tasksCompletedAfterRestart` — number of tasks the second
- *     runtime's workers actually finish.
+ *   - `tasksCompletedByRestart` — number of tasks the second
+ *     runtime's workers actually finish (with T13.2: ALL remaining
+ *     work, including orphaned `processing` rows reclaimed by the
+ *     lease sweep).
  *   - `recoveryTimeMs` — wall-clock between the second runtime's
  *     start and the first task completing.
  *
  * Run: `node examples/durable-task-recovery-runtime.js`
  *
- * Refs: ADR-0020, `examples/durable-task-queue.js` (lower-level view).
+ * Refs: ADR-0020 (revised 2026-09-24, T13.2 lease reclaim), T13.1.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -54,11 +52,15 @@ import { createWorkerRuntime } from '../src/index.js';
 // === Configuration ===
 
 const TASK_COUNT = 20;
-const TASK_DURATION_MS = 200;
+const TASK_DURATION_MS = 300;
 // First runtime has FEWER workers than tasks — guarantees a backlog
 // of `pending` rows at crash time.
 const FIRST_RUNTIME_WORKERS = 2;
 const SECOND_RUNTIME_WORKERS = 4;
+// Short lease so orphaned processing rows (workers mid-task when
+// the runtime reference is dropped) are reclaimed quickly by the
+// recovery sweep on the next instance (T13.2).
+const FIRST_RUNTIME_LEASE_MS = 50;
 
 /** Worker fn — `delayMs` is passed via payload (ADR-0012 — no closure). */
 const workFn = ({ delayMs }) => new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -126,7 +128,7 @@ async function main() {
       workers: FIRST_RUNTIME_WORKERS,
       concurrency: FIRST_RUNTIME_WORKERS,
       queueBackend: 'sqlite',
-      sqlite: { path: dbPath },
+      sqlite: { path: dbPath, leaseMs: FIRST_RUNTIME_LEASE_MS },
     });
     first.addEventListener('task:completed', ({ taskId }) => {
       firstB_completed.push(taskId);
@@ -140,11 +142,17 @@ async function main() {
     }
     void first;
   }
-  // Wait for the first runtime's in-flight workers to finish (cap =
-  // FIRST_RUNTIME_WORKERS concurrent tasks). This bounds the pre-crash
-  // completions we need to subtract.
+  // Wait long enough for the first runtime's in-flight workers to
+  // finish AND for any orphaned leases (≤ FIRST_RUNTIME_LEASE_MS by
+  // T13.2 config) to expire. (FIRST_RUNTIME_WORKERS + 1) ×
+  // TASK_DURATION_MS gives every task that was claimed before the
+  // crash a chance to either complete (counted in firstB_completed)
+  // or expire its lease (reclaimed by #recoverOrphans on restart).
   await new Promise((resolve) =>
-    setTimeout(resolve, (FIRST_RUNTIME_WORKERS + 1) * TASK_DURATION_MS),
+    setTimeout(
+      resolve,
+      (FIRST_RUNTIME_WORKERS + 1) * TASK_DURATION_MS + FIRST_RUNTIME_LEASE_MS + 200,
+    ),
   );
 
   const recoveryStart = Date.now();

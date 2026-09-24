@@ -56,7 +56,12 @@ CREATE TABLE IF NOT EXISTS queue_tasks (
   max_retries INTEGER NOT NULL DEFAULT 0,
   enqueued_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  claimed_by TEXT
+  claimed_by TEXT,
+  -- T13.2: lease expiry timestamp (ms since epoch). A row with
+  -- state='processing' AND claim_expires_at < now() is treated as an
+  -- orphaned claim — the worker that owned it is presumed dead. The
+  -- startup recovery sweep resets such rows back to state='pending'.
+  claim_expires_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS queue_tasks_pending
   ON queue_tasks(state, priority DESC, enqueued_at ASC)
@@ -67,6 +72,9 @@ CREATE INDEX IF NOT EXISTS queue_tasks_affinity_pending
 CREATE INDEX IF NOT EXISTS queue_tasks_processing
   ON queue_tasks(state, updated_at)
   WHERE state = 'processing';
+CREATE INDEX IF NOT EXISTS queue_tasks_lease_expiry
+  ON queue_tasks(claim_expires_at)
+  WHERE state = 'processing' AND claim_expires_at IS NOT NULL;
 `;
 
 /**
@@ -118,6 +126,16 @@ export class SqliteTaskQueue {
   #dbPath;
   #maxQueueSize;
   #defaultQueueTimeoutMs;
+  // T13.2: lease duration (ms) — how long a `state='processing'` claim
+  // is valid before the recovery sweep reclaims it as orphaned.
+  // Default 30 000 ms accommodates most tasks; long-running tasks
+  // should pass `leaseMs` explicitly or use the future heartbeat API
+  // (Option 2 of the orphan-recovery design — not yet implemented).
+  #leaseMs;
+  // T13.2: stable worker identifier used in `claimed_by` so multi-
+  // instance observers can tell which process owns which claim.
+  // Generated per-instance; not persisted across restarts.
+  #workerId;
   #tasks = new Map(); // task_id → TaskHandle (same-process BC shim)
   #waiters = [];
   #closed = false;
@@ -135,6 +153,10 @@ export class SqliteTaskQueue {
     }
     this.#maxQueueSize = options.maxQueueSize || 2000;
     this.#defaultQueueTimeoutMs = options.queueTimeoutMs || 30000;
+    this.#leaseMs = options.leaseMs ?? 30000;
+    this.#workerId =
+      options.workerId ??
+      `pwr-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     this.#dbPath = options.path;
     this.#db = new DatabaseSync(options.path);
@@ -145,11 +167,64 @@ export class SqliteTaskQueue {
     this.#db.exec('PRAGMA synchronous = NORMAL;');
     this.#db.exec('PRAGMA busy_timeout = 5000;');
     this.#db.exec(SCHEMA);
+    // T13.2: idempotent migration for databases created before the
+    // `claim_expires_at` column existed. `ALTER TABLE ... ADD COLUMN`
+    // errors with "duplicate column name" if the column already exists;
+    // we swallow that specific error and ignore all others.
+    try {
+      this.#db.exec('ALTER TABLE queue_tasks ADD COLUMN claim_expires_at INTEGER;');
+    } catch (err) {
+      if (!(err instanceof Error && /duplicate column name/i.test(err.message))) {
+        throw err;
+      }
+    }
 
-    // Crash recovery: rebuild the in-memory TaskHandle map from any rows
-    // still in `pending` state. The restored handles have no live caller;
-    // they complete silently when workers execute them.
+    // Crash recovery: first reclaim orphaned `processing` claims whose
+    // lease expired (T13.2), then rebuild the in-memory TaskHandle map
+    // from any rows still in `pending` state. The restored handles
+    // have no live caller; they complete silently when workers
+    // execute them.
+    this.#recoverOrphans();
     this.#recoverPending();
+  }
+
+  #recoverOrphans() {
+    // Reset any `processing` row whose lease has expired back to
+    // `pending` so the next dequeue can claim it. Idempotent; safe
+    // to call on every constructor invocation.
+    const reclaimed = this.reclaimExpired();
+    if (reclaimed > 0) {
+      process.emitWarning(
+        `persistent-worker-runtime: SqliteTaskQueue reclaimed ${reclaimed} orphaned claim(s) from previous instance(s).`,
+        'PersistentWorkerRuntimeSqliteOrphanReclaim',
+      );
+    }
+  }
+
+  /**
+   * Sweep expired `processing` rows back to `pending`. Public so
+   * operators can run it from a cron / scheduler alongside
+   * `vacuumCompleted` and `checkpointWal`.
+   *
+   * @param {number} [now=Date.now()]
+   * @returns {number} rows reclaimed
+   */
+  reclaimExpired(now = Date.now()) {
+    if (this.#closed) return 0;
+    const result = this.#stmt(
+      'reclaim-expired',
+      `UPDATE queue_tasks
+         SET state = 'pending',
+             claimed_by = NULL,
+             claim_expires_at = NULL,
+             updated_at = ?
+       WHERE state = 'processing'
+         AND claim_expires_at IS NOT NULL
+         AND claim_expires_at < ?`,
+    ).run(now, now);
+    const reclaimed = Number(result.changes || 0);
+    if (reclaimed > 0) this.#size += reclaimed;
+    return reclaimed;
   }
 
   #recoverPending() {
@@ -425,9 +500,12 @@ export class SqliteTaskQueue {
       this.#stmt(
         'claim-processing',
         `UPDATE queue_tasks
-         SET state = 'processing', updated_at = ?
+         SET state = 'processing',
+             updated_at = ?,
+             claimed_by = ?,
+             claim_expires_at = ?
          WHERE task_id = ?`,
-      ).run(Date.now(), claimedId);
+      ).run(Date.now(), this.#workerId, Date.now() + this.#leaseMs, claimedId);
       this.#db.exec('COMMIT');
     } catch (err) {
       try {

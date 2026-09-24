@@ -615,12 +615,13 @@ describe('SqliteTaskQueue', () => {
           max_retries INTEGER NOT NULL DEFAULT 0,
           enqueued_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
-          claimed_by TEXT
+          claimed_by TEXT,
+          claim_expires_at INTEGER
         );
       `);
       setup
         .prepare(
-          'INSERT INTO queue_tasks (task_id, priority, affinity_key, payload, state, attempt, max_retries, enqueued_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO queue_tasks (task_id, priority, affinity_key, payload, state, attempt, max_retries, enqueued_at, updated_at, claimed_by, claim_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         )
         .run(
           'corrupt-1',
@@ -632,6 +633,8 @@ describe('SqliteTaskQueue', () => {
           0,
           Date.now(),
           Date.now(),
+          null,
+          null,
         );
       setup.close();
 
@@ -650,6 +653,247 @@ describe('SqliteTaskQueue', () => {
         assert.equal(row.state, 'failed', 'corrupt row must be quarantined as failed');
       } finally {
         q.destroy();
+      }
+    });
+  });
+
+  describe('T13.2 orphan claim recovery', () => {
+    /** Insert a row in `processing` state directly via the SQLite handle
+     *  to simulate a previous instance that crashed mid-execution. */
+    function plantOrphan(dbPath, opts = {}) {
+      const db = new DatabaseSync(dbPath);
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS queue_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT UNIQUE NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 0,
+            affinity_key TEXT,
+            payload BLOB NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER NOT NULL DEFAULT 0,
+            enqueued_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            claimed_by TEXT,
+            claim_expires_at INTEGER
+          );
+        `);
+        const now = Date.now();
+        const envelope = JSON.stringify({
+          id: opts.taskId || 'orphan-1',
+          type: 'test',
+          payload: { x: 1 },
+          affinityKey: null,
+          priority: 0,
+          fnCode: 'async () => 1',
+        });
+        db.prepare(
+          `INSERT INTO queue_tasks
+             (task_id, priority, affinity_key, payload, state, attempt,
+              max_retries, enqueued_at, updated_at, claimed_by, claim_expires_at)
+           VALUES (?, 0, NULL, ?, 'processing', 0, 0, ?, ?, ?, ?)`,
+        ).run(
+          opts.taskId || 'orphan-1',
+          Buffer.from(envelope, 'utf8'),
+          now,
+          now,
+          opts.claimedBy || 'previous-instance',
+          opts.claimExpiresAt ?? now - 1000, // default: already expired
+        );
+      } finally {
+        db.close();
+      }
+    }
+
+    it('reclaims processing rows whose lease has expired on startup', () => {
+      const dbPath = tmpDb('orphan-reclaim');
+      plantOrphan(dbPath, { taskId: 'orphan-expired', claimExpiresAt: Date.now() - 5000 });
+
+      const q = new SqliteTaskQueue({ path: dbPath });
+      try {
+        // After startup recovery, the orphan is back to 'pending' and
+        // accounted for in size. The next dequeue picks it up.
+        assert.equal(q.size, 1, 'expired orphan must be reclaimed to pending');
+        const next = q.dequeue();
+        assert.ok(next, 'dequeue must return the reclaimed task');
+        assert.equal(next.id, 'orphan-expired');
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('does NOT reclaim rows with an active lease (live worker)', () => {
+      const dbPath = tmpDb('orphan-active');
+      // Lease expires in 60 seconds — far in the future.
+      plantOrphan(dbPath, {
+        taskId: 'live-worker',
+        claimExpiresAt: Date.now() + 60_000,
+      });
+
+      const q = new SqliteTaskQueue({ path: dbPath });
+      try {
+        // Active lease = presumed live worker; we MUST NOT steal the task.
+        assert.equal(q.size, 0, 'active lease must not be reclaimed');
+        assert.equal(q.dequeue(), null, 'no task available while live worker owns it');
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('simulates crash-mid-execution: plant processing row with stale lease + recover via new instance', () => {
+      const dbPath = tmpDb('orphan-crash');
+      // 5 orphans: 4 expired (should reclaim), 1 with active lease (must stay).
+      plantOrphan(dbPath, { taskId: 'crash-1', claimExpiresAt: Date.now() - 30_000 });
+      plantOrphan(dbPath, { taskId: 'crash-2', claimExpiresAt: Date.now() - 10_000 });
+      plantOrphan(dbPath, { taskId: 'crash-3', claimExpiresAt: Date.now() - 1000 });
+      plantOrphan(dbPath, { taskId: 'crash-4', claimExpiresAt: Date.now() - 100 });
+      plantOrphan(dbPath, {
+        taskId: 'live-worker',
+        claimExpiresAt: Date.now() + 60_000,
+      });
+
+      const q = new SqliteTaskQueue({ path: dbPath });
+      try {
+        // Only the 4 expired orphans should be reclaimed to pending.
+        assert.equal(q.size, 4);
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('reclaimExpired() is idempotent and returns 0 when nothing to reclaim', () => {
+      const q = new SqliteTaskQueue({ path: ':memory:' });
+      try {
+        assert.equal(q.reclaimExpired(), 0);
+        assert.equal(q.reclaimExpired(), 0, 'idempotent on empty queue');
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('reclaimExpired() is callable from a cron / scheduler (not just startup)', async () => {
+      const dbPath = tmpDb('orphan-cron');
+      // Use a long lease so the recovery sweep on startup doesn't reclaim.
+      // We will reclaim manually after manually expiring the lease.
+      const q1 = new SqliteTaskQueue({ path: dbPath, leaseMs: 60_000 });
+      try {
+        await q1.enqueue(makeHandle({ id: 'cron-orphan' }));
+        const claimed = q1.dequeue();
+        assert.ok(claimed);
+        // At this point the row has state='processing' + lease +60s.
+        // Manually expire the lease to simulate a worker that died after
+        // claiming but before completing.
+        const db = new DatabaseSync(dbPath);
+        try {
+          db.prepare('UPDATE queue_tasks SET claim_expires_at = ? WHERE task_id = ?').run(
+            Date.now() - 1000,
+            'cron-orphan',
+          );
+        } finally {
+          db.close();
+        }
+        // First reclaim brings it back to pending.
+        const reclaimed = q1.reclaimExpired();
+        assert.equal(reclaimed, 1);
+        // Now size reflects the reclaimed row.
+        assert.equal(q1.size, 1);
+        // A second reclaim is a no-op.
+        assert.equal(q1.reclaimExpired(), 0);
+      } finally {
+        q1.destroy();
+      }
+    });
+
+    it('emits a warning when orphans are reclaimed on startup', () => {
+      const dbPath = tmpDb('orphan-warning');
+      plantOrphan(dbPath, { taskId: 'warn-1', claimExpiresAt: Date.now() - 60_000 });
+      plantOrphan(dbPath, { taskId: 'warn-2', claimExpiresAt: Date.now() - 30_000 });
+
+      const warnings = [];
+      const origEmit = process.emitWarning;
+      process.emitWarning = (msg, type) => {
+        if (type === 'PersistentWorkerRuntimeSqliteOrphanReclaim') {
+          warnings.push(msg);
+        }
+      };
+      try {
+        const q = new SqliteTaskQueue({ path: dbPath });
+        try {
+          assert.equal(q.size, 2);
+        } finally {
+          q.destroy();
+        }
+        assert.equal(warnings.length, 1, 'exactly one reclaim warning expected');
+        assert.match(warnings[0], /reclaimed 2 orphaned claim/);
+      } finally {
+        process.emitWarning = origEmit;
+      }
+    });
+
+    it('writes a lease on every dequeue', () => {
+      const dbPath = tmpDb('lease-write');
+      const q = new SqliteTaskQueue({ path: dbPath, leaseMs: 60_000 });
+      try {
+        // The test setup creates a queue with the SCHEMA + ALTER
+        // (which adds claim_expires_at). After dequeue, the row must
+        // have a non-null claim_expires_at.
+        const setup = new DatabaseSync(dbPath);
+        try {
+          setup
+            .prepare(
+              `INSERT INTO queue_tasks
+                 (task_id, priority, affinity_key, payload, state, attempt,
+                  max_retries, enqueued_at, updated_at)
+               VALUES (?, 0, NULL, ?, 'pending', 0, 0, ?, ?)`,
+            )
+            .run(
+              'lease-1',
+              Buffer.from(
+                JSON.stringify({
+                  id: 'lease-1',
+                  type: 'test',
+                  payload: { x: 1 },
+                  affinityKey: null,
+                  priority: 0,
+                  fnCode: 'async () => 1',
+                }),
+                'utf8',
+              ),
+              Date.now(),
+              Date.now(),
+            );
+        } finally {
+          setup.close();
+        }
+        // Use a fresh queue to recover the planted row.
+        q.destroy();
+        const q2 = new SqliteTaskQueue({ path: dbPath, leaseMs: 60_000 });
+        try {
+          const claimed = q2.dequeue();
+          assert.ok(claimed);
+          const db = new DatabaseSync(dbPath);
+          try {
+            const row = db
+              .prepare(
+                "SELECT state, claimed_by, claim_expires_at FROM queue_tasks WHERE task_id = 'lease-1'",
+              )
+              .get();
+            assert.equal(row.state, 'processing');
+            assert.ok(row.claimed_by, 'claimed_by must be set');
+            assert.ok(row.claim_expires_at > Date.now(), 'lease must be in the future');
+            assert.ok(
+              row.claim_expires_at <= Date.now() + 60_000 + 1000,
+              'lease must be ~now + leaseMs',
+            );
+          } finally {
+            db.close();
+          }
+        } finally {
+          q2.destroy();
+        }
+      } finally {
+        // already destroyed
       }
     });
   });
