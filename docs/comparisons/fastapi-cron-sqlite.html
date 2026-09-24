@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SQLite patterns — fastapi-cron vs persistent-worker-runtime</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #161922;
+      --panel-2: #1d2230;
+      --border: #2a2f3d;
+      --fg: #e6e9ef;
+      --fg-dim: #9aa3b2;
+      --accent: #7ab7ff;
+      --accent-2: #b48cff;
+      --green: #67d391;
+      --red: #fc8181;
+      --yellow: #f6e05e;
+      --code-bg: #0a0c10;
+      --code-fg: #e6e9ef;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    h1, h2, h3 { color: var(--fg); }
+    h1 { font-size: 22px; margin: 0 0 4px 0; }
+    .subtitle { color: var(--fg-dim); margin: 0 0 24px 0; font-size: 13px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 980px) { .row { grid-template-columns: 1fr; } }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .panel h3 {
+      margin: 0 0 12px 0;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .panel.fcrons { border-top: 3px solid var(--accent); }
+    .panel.pwr { border-top: 3px solid var(--accent-2); }
+    pre.code {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      font-family: var(--mono);
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--code-fg);
+      overflow-x: auto;
+      white-space: pre;
+    }
+    pre.code .kw { color: var(--accent); }
+    pre.code .str { color: var(--green); }
+    pre.code .cm { color: var(--fg-dim); font-style: italic; }
+    pre.code .num { color: var(--yellow); }
+    .tag {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: var(--mono);
+    }
+    .tag.green { background: rgba(103, 211, 145, 0.15); color: var(--green); }
+    .tag.red { background: rgba(252, 129, 129, 0.15); color: var(--red); }
+    .tag.yellow { background: rgba(246, 224, 94, 0.15); color: var(--yellow); }
+    .tag.blue { background: rgba(122, 183, 255, 0.15); color: var(--accent); }
+    .tag.purple { background: rgba(180, 140, 255, 0.15); color: var(--accent-2); }
+    table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+    th, td {
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      font-size: 13px;
+    }
+    th { color: var(--fg-dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+    td code { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+    .section { margin-bottom: 28px; }
+    .section h2 {
+      font-size: 16px;
+      margin: 0 0 12px 0;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 18px;
+      font-size: 12px;
+      color: var(--fg-dim);
+    }
+    .meta-item {
+      background: var(--panel-2);
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+    .verdict {
+      background: var(--panel-2);
+      border-left: 3px solid var(--green);
+      padding: 12px 14px;
+      border-radius: 0 6px 6px 0;
+      margin-top: 12px;
+      font-size: 13px;
+    }
+    .verdict.warn { border-left-color: var(--yellow); }
+    .pattern {
+      display: inline-block;
+      background: var(--panel-2);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--accent);
+      margin-right: 6px;
+    }
+    .conclusion {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+    }
+    .conclusion ul { margin: 8px 0; padding-left: 20px; }
+    .conclusion li { margin: 4px 0; }
+  </style>
+</head>
+<body>
+
+<h1>SQLite patterns — fastapi-cron vs persistent-worker-runtime</h1>
+<p class="subtitle">Comparative analysis of the two SQLite designs. Read by AI agents before adopting new patterns; update when either backend changes.</p>
+
+<div class="meta">
+  <span class="meta-item">fastapi-cron: <code>2.0.1</code></span>
+  <span class="meta-item">Repo: <code>mE-uMAr/fastapi-crons</code></span>
+  <span class="meta-item">pwr: <code>0.2.2-dev</code></span>
+  <span class="meta-item">pwr ADR: <code>0020 (revised 2026-09-24)</code></span>
+  <span class="meta-item">Author: <code>Felipe Miiller</code></span>
+</div>
+
+<div class="section">
+  <h2>1. Schema</h2>
+  <div class="row">
+    <div class="panel fcrons">
+      <h3>fastapi-cron — 3 tables <span class="tag blue">split by concern</span></h3>
+<pre class="code"><span class="cm">-- Tracks last-run timestamps (one row per job)</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> job_state (
+  name         <span class="kw">TEXT PRIMARY KEY</span>,
+  last_run     <span class="kw">TEXT</span>,
+  created_at   <span class="kw">TEXT</span> <span class="kw">DEFAULT</span> CURRENT_TIMESTAMP,
+  updated_at   <span class="kw">TEXT</span> <span class="kw">DEFAULT</span> CURRENT_TIMESTAMP
+);
+
+<span class="cm">-- Current execution status (one row per job)</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> job_status (
+  name         <span class="kw">TEXT PRIMARY KEY</span>,
+  status       <span class="kw">TEXT</span>,
+  instance_id  <span class="kw">TEXT</span>,
+  started_at   <span class="kw">TEXT</span>,
+  updated_at   <span class="kw">TEXT</span> <span class="kw">DEFAULT</span> CURRENT_TIMESTAMP
+);
+
+<span class="cm">-- Append-only audit log of every execution</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> job_execution_log (
+  id             <span class="kw">INTEGER PRIMARY KEY AUTOINCREMENT</span>,
+  job_name       <span class="kw">TEXT</span>,
+  instance_id    <span class="kw">TEXT</span>,
+  status         <span class="kw">TEXT</span>,
+  started_at     <span class="kw">TEXT</span>,
+  completed_at   <span class="kw">TEXT</span>,
+  duration       <span class="kw">REAL</span>,
+  error_message  <span class="kw">TEXT</span>,
+  created_at     <span class="kw">TEXT</span> <span class="kw">DEFAULT</span> CURRENT_TIMESTAMP
+);</pre>
+    </div>
+    <div class="panel pwr">
+      <h3>pwr SqliteTaskQueue — 1 table <span class="tag purple">state column</span></h3>
+<pre class="code"><span class="kw">CREATE TABLE IF NOT EXISTS</span> queue_tasks (
+  id           <span class="kw">INTEGER PRIMARY KEY AUTOINCREMENT</span>,
+  task_id      <span class="kw">TEXT UNIQUE NOT NULL</span>,
+  priority     <span class="kw">INTEGER NOT NULL DEFAULT</span> <span class="num">0</span>,
+  affinity_key <span class="kw">TEXT</span>,
+  payload      <span class="kw">BLOB NOT NULL</span>,           <span class="cm">-- JSON.stringify(task)</span>
+  state        <span class="kw">TEXT NOT NULL DEFAULT</span> <span class="str">'pending'</span>,
+                                       <span class="cm">-- pending|processing|done|failed</span>
+  attempt      <span class="kw">INTEGER NOT NULL DEFAULT</span> <span class="num">0</span>,
+  max_retries  <span class="kw">INTEGER NOT NULL DEFAULT</span> <span class="num">0</span>,
+  enqueued_at  <span class="kw">INTEGER NOT NULL</span>,
+  updated_at   <span class="kw">INTEGER NOT NULL</span>,
+  claimed_by   <span class="kw">TEXT</span>
+);
+
+<span class="cm">-- Partial index for the hot path</span>
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> queue_tasks_pending
+  <span class="kw">ON</span> queue_tasks(state, priority <span class="kw">DESC</span>, enqueued_at <span class="kw">ASC</span>)
+  <span class="kw">WHERE</span> state = <span class="str">'pending'</span>;
+
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> queue_tasks_affinity_pending
+  <span class="kw">ON</span> queue_tasks(affinity_key, state, priority <span class="kw">DESC</span>, enqueued_at <span class="kw">ASC</span>)
+  <span class="kw">WHERE</span> state = <span class="str">'pending'</span>;</pre>
+    </div>
+  </div>
+  <div class="verdict">
+    <strong>Takeaway:</strong> fastapi-cron splits concerns (state vs status vs audit log); pwr uses a single table with a <code>state</code> column. Different model — pwr tracks queue lifecycle (pending → processing → done/failed) per task; fastapi-cron tracks separate axes (last-run timestamp, current status, full audit trail). <strong>pwr could borrow</strong> the audit-log pattern: keep a separate <code>queue_tasks_history</code> table for completed/failed rows instead of <code>DELETE</code>-ing them in <code>markDone</code>.
+  </div>
+</div>
+
+<div class="section">
+  <h2>2. API surface</h2>
+  <div class="row">
+    <div class="panel fcrons">
+      <h3>fastapi-cron — <code>StateBackend</code> ABC + concrete impls</h3>
+<pre class="code"><span class="kw">class</span> StateBackend(ABC):
+    <span class="kw">async def</span> set_last_run(name, timestamp)
+    <span class="kw">async def</span> get_last_run(name) -> str | None
+    <span class="kw">async def</span> get_all_jobs() -> list
+    <span class="kw">async def</span> set_job_status(name, status, instance_id)
+    <span class="kw">async def</span> get_job_status(name) -> dict | None
+    <span class="kw">async def</span> log_job_execution(...)
+
+<span class="kw">class</span> SQLiteStateBackend(StateBackend):  <span class="cm"># aiosqlite</span>
+    <span class="kw">async def</span> _get_connection() -> aiosqlite.Connection
+    <span class="kw">async def</span> _ensure_tables(db)
+
+<span class="kw">class</span> RedisStateBackend(StateBackend):  <span class="cm"># redis.asyncio</span>
+    ...
+
+<span class="kw">class</span> SQLAlchemyStateBackend(StateBackend):  <span class="cm"># async + sync</span>
+    ...</pre>
+      <p>Three backends behind one ABC. Consumers depend on the abstract interface.</p>
+    </div>
+    <div class="panel pwr">
+      <h3>pwr — <code>TaskQueue</code> concrete + <code>queueBackend</code> factory</h3>
+<pre class="code"><span class="kw">class</span> TaskQueue {
+  get size, waitingCount
+  enqueue(task) -> Promise
+  peek() -> TaskHandle | null
+  dequeue(worker) -> TaskHandle | null
+  destroy(reason)
+}
+
+<span class="kw">class</span> SqliteTaskQueue <span class="kw">extends</span> <span class="cm">// implicit contract</span> {
+  <span class="cm">// same shape as TaskQueue</span>
+  markDone(taskId)
+  markFailed(taskId)
+  purgePending()
+  vacuumCompleted(olderThanMs)
+}
+
+<span class="cm">// Runtime factory selects backend</span>
+createWorkerRuntime({
+  queueBackend: <span class="str">'memory'</span> | <span class="str">'sqlite'</span>,
+  sqlite: { path: <span class="str">'/var/lib/pwr/queue.db'</span> },
+})</pre>
+      <p>Two concrete classes behind a structural interface (duck-typed). Factory picks one.</p>
+    </div>
+  </div>
+  <div class="verdict">
+    <strong>Takeaway:</strong> fastapi-cron uses Python's ABC for explicit interface contracts; pwr relies on JavaScript duck typing against the same shape as <code>TaskQueue</code>. Both work; ABC gives better IDE/compile-time safety, duck typing avoids ceremony. <strong>pwr could borrow</strong>: an explicit <code>QueueBackend</code> JSDoc interface + TypeScript declaration for compile-time checking on the consumer side (already partially done in <code>src/index.d.ts</code>).
+  </div>
+</div>
+
+<div class="section">
+  <h2>3. SQLite driver</h2>
+  <div class="row">
+    <div class="panel fcrons">
+      <h3>fastapi-cron — <code>aiosqlite</code> (Python bridge over stdlib <code>sqlite3</code>)</h3>
+<pre class="code"><span class="kw">import</span> aiosqlite
+
+<span class="kw">async def</span> _get_connection(self):
+    <span class="kw">if</span> self._db <span class="kw">is None</span>:
+        self._db = <span class="kw">await</span> aiosqlite.connect(self.db_path)
+        <span class="kw">await</span> self._db.execute(<span class="str">"PRAGMA journal_mode=WAL"</span>)
+    <span class="kw">return</span> self._db
+
+<span class="cm"># Connection cached, reused across calls.
+# aiosqlite runs sync sqlite3 on a shared thread —
+# main asyncio loop is NOT blocked (aiosqlite design).</span></pre>
+    </div>
+    <div class="panel pwr">
+      <h3>pwr — <code>node:sqlite</code> stdlib (Node ≥ 22.13)</h3>
+<pre class="code"><span class="kw">import</span> { DatabaseSync } <span class="kw">from</span> <span class="str">'node:sqlite'</span>;
+
+<span class="kw">this</span>.#db = <span class="kw">new</span> DatabaseSync(options.path);
+<span class="kw">this</span>.#db.exec(<span class="str">'PRAGMA journal_mode = WAL;'</span>);
+<span class="kw">this</span>.#db.exec(<span class="str">'PRAGMA synchronous = NORMAL;'</span>);
+<span class="kw">this</span>.#db.exec(<span class="str">'PRAGMA busy_timeout = 5000;'</span>);
+
+<span class="cm">// Sync API on the main thread — fast (~1ms per op on local disk)
+// but DOES block the Event Loop. ADR-0020 documents the trade-off
+// and the throughput ceiling (~1k ops/sec sustained).</span></pre>
+    </div>
+  </div>
+  <div class="verdict warn">
+    <strong>Trade-off:</strong> fastapi-cron chose <strong>async I/O</strong> via a thread pool (aiosqlite spins a thread per connection) so the asyncio loop stays free. pwr chose <strong>sync I/O</strong> via Node stdlib — fits <code>worker_threads</code> semantics (workers execute; the queue is in-process), and per-op latency is lower because there's no thread-hop. ADR-0020 §Positive Consequences explicitly accepts the Event Loop blocking; benchmark <code>sqlite-queue-throughput.benchmark.js</code> quantifies the cost.
+  </div>
+</div>
+
+<div class="section">
+  <h2>4. Connection lifecycle</h2>
+  <div class="row">
+    <div class="panel fcrons">
+      <h3>fastapi-cron — lazy connection + idempotent schema</h3>
+<pre class="code"><span class="kw">async def</span> _ensure_tables(self, db):
+    <span class="kw">if</span> self._tables_created:
+        <span class="kw">return</span>
+    <span class="kw">await</span> db.execute(<span class="str">"""CREATE TABLE IF NOT EXISTS ..."""</span>)
+    <span class="kw">await</span> db.commit()
+    self._tables_created = <span class="kw">True</span>
+
+<span class="kw">async def</span> close(self):
+    <span class="kw">if</span> self._db <span class="kw">is not None</span>:
+        <span class="kw">await</span> self._db.close()
+        self._db = <span class="kw">None</span>
+        self._tables_created = <span class="kw">False</span></pre>
+    </div>
+    <div class="panel pwr">
+      <h3>pwr — eager in constructor + statement cache</h3>
+<pre class="code">constructor(options) {
+  <span class="kw">this</span>.#db = <span class="kw">new</span> DatabaseSync(options.path);
+  <span class="kw">this</span>.#db.exec(<span class="str">'PRAGMA journal_mode = WAL;'</span>);
+  <span class="kw">this</span>.#db.exec(<span class="str">'PRAGMA synchronous = NORMAL;'</span>);
+  <span class="kw">this</span>.#db.exec(<span class="str">'PRAGMA busy_timeout = 5000;'</span>);
+  <span class="kw">this</span>.#db.exec(SCHEMA);
+  <span class="kw">this</span>.#recoverPending();   <span class="cm">// scan state='pending' rows on startup</span>
+}
+
+#stmt(key, sql) {
+  <span class="kw">let</span> stmt = <span class="kw">this</span>.#statementCache.get(key);
+  <span class="kw">if</span> (!stmt) {
+    stmt = <span class="kw">this</span>.#db.prepare(sql);
+    <span class="kw">this</span>.#statementCache.set(key, stmt);
+  }
+  <span class="kw">return</span> stmt;
+}
+
+destroy(reason) {
+  <span class="cm">// rejects waiters, closes connection</span>
+  <span class="kw">this</span>.#db.close();
+}</pre>
+    </div>
+  </div>
+  <div class="verdict">
+    <strong>Takeaway:</strong> fastapi-cron is lazy (open DB on first call). pwr is eager (open + schema + recovery in constructor). pwr adds a <strong>statement cache</strong> (prepared statements reused across calls) — fastapi-cron does NOT cache, every call recompiles. <strong>pwr could borrow</strong>: a <code>close()</code> method separate from <code>destroy()</code> for clean shutdown vs crash simulation. (Already addressed — pwr has <code>destroy()</code> leaving pending rows for rolling-deploy recovery + <code>purgePending()</code> for explicit cleanup.)
+  </div>
+</div>
+
+<div class="section">
+  <h2>5. Upsert semantics</h2>
+  <div class="row">
+    <div class="panel fcrons">
+      <h3>fastapi-cron — <code>INSERT OR REPLACE</code> for SQLite</h3>
+<pre class="code"><span class="kw">await</span> db.execute(
+    <span class="str">"""INSERT OR REPLACE INTO job_state (name, last_run, updated_at)
+       VALUES (?, ?, ?)"""</span>,
+    (job_name, timestamp.isoformat(), now_iso),
+)
+<span class="kw">await</span> db.commit()
+
+<span class="cm"># For terminal status, the library uses INSERT + ON CONFLICT
+# to preserve started_at across instance races (the SELECT inside
+# the COALESCE protects against losing the original start time).</span></pre>
+    </div>
+    <div class="panel pwr">
+      <h3>pwr — <code>ON CONFLICT DO UPDATE</code></h3>
+<pre class="code"><span class="kw">INSERT INTO</span> queue_tasks (task_id, priority, ..., state, ...)
+<span class="kw">VALUES</span> (?, ?, ..., <span class="str">'pending'</span>, ...)
+<span class="kw">ON CONFLICT</span>(task_id) <span class="kw">DO UPDATE SET</span>
+  priority = excluded.priority,
+  affinity_key = excluded.affinity_key,
+  payload = excluded.payload,
+  state = <span class="str">'pending'</span>,
+  attempt = excluded.attempt,
+  max_retries = excluded.max_retries,
+  updated_at = excluded.updated_at
+
+<span class="cm">// Equivalent semantic but EXPLICIT — fields not in SET keep
+// their previous value. INSERT OR REPLACE deletes+re-inserts
+// (any field not listed gets the default).</span></pre>
+    </div>
+  </div>
+  <div class="verdict">
+    <strong>Takeaway:</strong> <code>INSERT OR REPLACE</code> is simpler but DELETEs the row first — any column not in the <code>VALUES</code> list reverts to its default (e.g. <code>created_at = CURRENT_TIMESTAMP</code> would reset on every update). <code>ON CONFLICT DO UPDATE</code> is more verbose but keeps untouched columns intact. pwr chose the more explicit form on purpose (preserves <code>enqueued_at</code> across retries / re-enqueues).
+  </div>
+</div>
+
+<div class="section">
+  <h2>6. Concurrency model</h2>
+  <div class="row">
+    <div class="panel fcrons">
+      <h3>fastapi-cron — <code>asyncio.Lock</code> per backend</h3>
+<pre class="code"><span class="kw">def __init__</span>(self):
+    self._lock = asyncio.Lock()
+    self._db = <span class="kw">None</span>
+    self._tables_created = <span class="kw">False</span>
+
+<span class="kw">async def</span> set_last_run(self, name, ts):
+    <span class="kw">async with</span> self._lock:    <span class="cm"># serialize writes</span>
+        db = <span class="kw">await</span> self._get_connection()
+        <span class="kw">await</span> self._ensure_tables(db)
+        <span class="kw">await</span> db.execute(<span class="str">"INSERT OR REPLACE ..."</span>, (...))
+        <span class="kw">await</span> db.commit()
+
+<span class="cm"># Reads are NOT lock-guarded (parallel-safe with WAL).
+# Writes go through _lock to serialize across coroutines.</span></pre>
+    </div>
+    <div class="panel pwr">
+      <h3>pwr — <code>BEGIN IMMEDIATE</code> transaction</h3>
+<pre class="code"><span class="kw">this</span>.#db.exec(<span class="str">'BEGIN IMMEDIATE'</span>);   <span class="cm">// db-level write lock</span>
+<span class="kw">try</span> {
+  <span class="kw">this</span>.#stmt(<span class="str">'dequeue-affinity'</span>, <span class="str">"SELECT ..."</span>).get(targetAffinity);
+  <span class="cm">// ...</span>
+  <span class="kw">this</span>.#stmt(<span class="str">'claim-processing'</span>, <span class="str">"UPDATE ..."</span>).run(now, claimedId);
+  <span class="kw">this</span>.#db.exec(<span class="str">'COMMIT'</span>);
+} <span class="kw">catch</span> (err) {
+  <span class="kw">this</span>.#db.exec(<span class="str">'ROLLBACK'</span>);
+  <span class="kw">throw</span> err;
+}
+
+<span class="cm">// BEGIN IMMEDIATE acquires SQLite's reserved lock for the
+// duration of the txn — atomic state transition (claim a row
+// + mark processing in one indivisible step). Faster than
+// asyncio.Lock for high-throughput because no JS hops.</span></pre>
+    </div>
+  </div>
+  <div class="verdict">
+    <strong>Trade-off:</strong> fastapi-cron's <code>asyncio.Lock</code> serializes writes at the JS layer (cheap); pwr's <code>BEGIN IMMEDIATE</code> serializes at the SQLite layer (more correct under multi-instance writes, because SQLite-level locks compose with file-locks across processes). For pwr's threat model (multi-instance writers via NFS), <code>BEGIN IMMEDIATE</code> is the right choice. For fastapi-cron's threat model (one Python process, asyncio concurrency), <code>asyncio.Lock</code> is sufficient.
+  </div>
+</div>
+
+<div class="section">
+  <h2>7. Configuration knobs</h2>
+  <table>
+    <thead>
+      <tr><th>Knob</th><th>fastapi-cron</th><th>pwr</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>DB path</td>
+        <td><code>SQLiteStateBackend(db_path="cron_state.db")</code></td>
+        <td><code>sqlite: { path: '/var/lib/pwr/queue.db' }</code> or <code>':memory:'</code> for tests</td>
+      </tr>
+      <tr>
+        <td>PRAGMA: journal_mode</td>
+        <td><span class="tag green">WAL</span></td>
+        <td><span class="tag green">WAL</span></td>
+      </tr>
+      <tr>
+        <td>PRAGMA: synchronous</td>
+        <td><span class="tag yellow">not set</span> (SQLite default FULL)</td>
+        <td><span class="tag green">NORMAL</span></td>
+      </tr>
+      <tr>
+        <td>PRAGMA: busy_timeout</td>
+        <td><span class="tag yellow">not set</span> (SQLite default 0 = fail fast)</td>
+        <td><span class="tag green">5000 ms</span></td>
+      </tr>
+      <tr>
+        <td>Connection pool</td>
+        <td>single, cached per backend instance</td>
+        <td>single per queue instance</td>
+      </tr>
+      <tr>
+        <td>Async or sync API</td>
+        <td><span class="tag blue">async</span> (aiosqlite)</td>
+        <td><span class="tag purple">sync</span> (node:sqlite)</td>
+      </tr>
+      <tr>
+        <td>Schema migration</td>
+        <td><code>CREATE TABLE IF NOT EXISTS</code> (idempotent, no migrations)</td>
+        <td><code>CREATE TABLE IF NOT EXISTS</code> (same)</td>
+      </tr>
+      <tr>
+        <td>Retention / GC</td>
+        <td>none in SQLite path; relies on caller</td>
+        <td><code>vacuumCompleted(olderThanMs)</code></td>
+      </tr>
+      <tr>
+        <td>Audit log</td>
+        <td><span class="tag green">job_execution_log table</span> (append-only)</td>
+        <td><span class="tag yellow">markDone DELETEs</span> (no audit log)</td>
+      </tr>
+      <tr>
+        <td>Distributed lock</td>
+        <td><code>DistributedLockManager</code> + Local/Redis backends</td>
+        <td>not yet (single-instance focus)</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="verdict">
+    <strong>Patterns pwr could adopt:</strong>
+    <ul>
+      <li><code>PRAGMA synchronous = FULL</code> opt-in for users who want stronger durability than NORMAL (currently hardcoded).</li>
+      <li>An <code>audit_log</code> table for completed/failed tasks (fastapi-cron pattern).</li>
+      <li>An <code>extras</code> opt-in for advanced features (retention, snapshot export) — fastapi-cron uses <code>pip install fastapi-crons[sqlalchemy]</code>.</li>
+    </ul>
+    <strong>Patterns fastapi-cron could adopt:</strong>
+    <ul>
+      <li><code>PRAGMA busy_timeout</code> to avoid SQLITE_BUSY under contention.</li>
+      <li><code>PRAGMA synchronous = NORMAL</code> for faster commits (already documented as a tuning option).</li>
+      <li>Prepared statement caching (recompile cost is non-trivial at high QPS).</li>
+    </ul>
+  </div>
+</div>
+
+<div class="section">
+  <h2>8. Patterns worth borrowing — quick reference</h2>
+  <div class="conclusion">
+    <ul>
+      <li><span class="pattern">audit_log_table</span> Add <code>queue_tasks_history</code> for completed/failed rows instead of <code>DELETE</code>. Operations teams get post-mortem visibility without changing the hot path.</li>
+      <li><span class="pattern">multi_backend_ABC</span> Add an explicit <code>QueueBackend</code> interface (JSDoc + d.ts) so the runtime's contract is visible to TypeScript consumers. Already partially done; tighten the <code>SqliteTaskQueue</code> class to formally implement it.</li>
+      <li><span class="pattern">on_conflict_started_at</span> pwr's <code>attempt</code> column could grow a <code>started_at</code> mirror like fastapi-cron's status table — preserves the original dispatch start across retries.</li>
+      <li><span class="pattern">migration_helper</span> Both libraries are stuck on <code>CREATE TABLE IF NOT EXISTS</code>. fastapi-cron exposes <code>cron_metadata</code> for Alembic; pwr should at least document a manual migration path when adding columns to <code>queue_tasks</code>.</li>
+      <li><span class="pattern">distributed_lock</span> fastapi-cron ships a <code>DistributedLockManager</code> for multi-instance dispatch coordination. pwr's SQLite <code>BEGIN IMMEDIATE</code> handles the queue atomicity; for multi-instance worker selection (which task to claim next), pwr would need a separate lock layer.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="section">
+  <h2>9. Closing notes</h2>
+  <p style="color: var(--fg-dim); font-size: 13px;">
+    Both designs are correct for their respective runtimes. fastapi-cron optimizes for asyncio concurrency with low write volume; pwr optimizes for sync I/O on a single Node process with potentially high write volume. The schema choices (3 tables vs 1) reflect different concerns: fastapi-cron models a <em>cron scheduler</em> (timing + status + history); pwr models a <em>task queue</em> (lifecycle + payload + priority).
+  </p>
+  <p style="color: var(--fg-dim); font-size: 13px;">
+    Pages that should reference this comparison: <code>docs/adr/0020-durable-external-queue-for-production-deployments.md</code> (rationale for sync vs async), <code>.agents/skills/pwr-examples/</code> (patterns to mirror in examples), <code>docs/operations/disaster-recovery.md</code> §5.2.1 (RPO = 0 with SQLite).
+  </p>
+</div>
+
+</body>
+</html>

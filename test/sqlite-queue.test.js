@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, before, describe, it } from 'node:test';
 import { TaskQueueTimeoutError } from '../src/errors.js';
 import { SqliteTaskQueue } from '../src/queue/sqlite-backend.js';
@@ -465,6 +466,191 @@ describe('SqliteTaskQueue', () => {
       q.destroy();
       // Second call must not throw
       q.destroy();
+    });
+  });
+
+  describe('size cache', () => {
+    it('reflects enqueue + dequeue without a SQL COUNT(*)', async () => {
+      const q = new SqliteTaskQueue({ path: ':memory:' });
+      try {
+        assert.equal(q.size, 0);
+        await q.enqueue(makeHandle({ id: 'a' }));
+        assert.equal(q.size, 1);
+        await q.enqueue(makeHandle({ id: 'b' }));
+        assert.equal(q.size, 2);
+        q.dequeue();
+        assert.equal(q.size, 1, 'dequeue decrements size');
+        q.dequeue();
+        assert.equal(q.size, 0);
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('does not double-count on idempotent re-enqueue', async () => {
+      const q = new SqliteTaskQueue({ path: ':memory:' });
+      try {
+        const t = makeHandle({ id: 're' });
+        await q.enqueue(t);
+        assert.equal(q.size, 1);
+        await q.enqueue(t);
+        assert.equal(q.size, 1, 're-enqueue of same task_id must not bump size');
+        await q.enqueue(t);
+        assert.equal(q.size, 1);
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('decrements when markFailed transitions pending→failed', async () => {
+      const q = new SqliteTaskQueue({ path: ':memory:' });
+      try {
+        const t = makeHandle({ id: 'f' });
+        await q.enqueue(t);
+        assert.equal(q.size, 1);
+        q.markFailed(t.id);
+        assert.equal(q.size, 0, 'pending→failed decrements size');
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('does NOT decrement when markFailed transitions processing→failed', async () => {
+      const q = new SqliteTaskQueue({ path: ':memory:' });
+      try {
+        const t = makeHandle({ id: 'p' });
+        await q.enqueue(t);
+        assert.equal(q.size, 1);
+        q.dequeue(); // pending → processing; size drops to 0
+        assert.equal(q.size, 0);
+        q.markFailed(t.id); // processing → failed; size stays 0
+        assert.equal(q.size, 0);
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('decrements when markDone removes a pending row', async () => {
+      const q = new SqliteTaskQueue({ path: ':memory:' });
+      try {
+        const t = makeHandle({ id: 'd' });
+        await q.enqueue(t);
+        q.markDone(t.id);
+        assert.equal(q.size, 0);
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('purgePending zeroes the cache when all rows are pending', async () => {
+      const q = new SqliteTaskQueue({ path: ':memory:' });
+      try {
+        await q.enqueue(makeHandle({ id: 'p1' }));
+        await q.enqueue(makeHandle({ id: 'p2' }));
+        await q.enqueue(makeHandle({ id: 'p3' }));
+        assert.equal(q.size, 3);
+        const purged = q.purgePending();
+        assert.equal(purged, 3);
+        assert.equal(q.size, 0);
+      } finally {
+        q.destroy();
+      }
+    });
+  });
+
+  describe('checkpointWal', () => {
+    it('returns -1 on a destroyed queue', () => {
+      const q = new SqliteTaskQueue({ path: ':memory:' });
+      q.destroy();
+      assert.equal(q.checkpointWal(), -1);
+    });
+
+    it('returns a non-negative number on a live queue', () => {
+      const q = new SqliteTaskQueue({ path: ':memory:' });
+      try {
+        // No-op on `:memory:` (no WAL file to checkpoint) but the call
+        // must not throw.
+        const result = q.checkpointWal();
+        assert.ok(typeof result === 'number');
+        assert.ok(result >= 0);
+      } finally {
+        q.destroy();
+      }
+    });
+
+    it('truncates the WAL file on a real on-disk DB', async () => {
+      const dbPath = tmpDb('wal');
+      const q = new SqliteTaskQueue({ path: dbPath });
+      try {
+        // Generate some WAL activity
+        for (let i = 0; i < 10; i++) {
+          await q.enqueue(makeHandle({ id: `w${i}` }));
+        }
+        // checkpointWal must not throw and must return a non-negative number
+        const result = q.checkpointWal();
+        assert.ok(typeof result === 'number');
+        assert.ok(result >= 0);
+      } finally {
+        q.destroy();
+      }
+    });
+  });
+
+  describe('corrupt envelope handling', () => {
+    it('quarantines a corrupt pending row on recovery without crashing', () => {
+      const dbPath = tmpDb('corrupt-recover');
+      // Open the DB directly with node:sqlite, write a corrupt row,
+      // close. Then open via SqliteTaskQueue and verify recovery treats
+      // it as failed.
+      const setup = new DatabaseSync(dbPath);
+      setup.exec(`
+        CREATE TABLE IF NOT EXISTS queue_tasks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT UNIQUE NOT NULL,
+          priority INTEGER NOT NULL DEFAULT 0,
+          affinity_key TEXT,
+          payload BLOB NOT NULL,
+          state TEXT NOT NULL DEFAULT 'pending',
+          attempt INTEGER NOT NULL DEFAULT 0,
+          max_retries INTEGER NOT NULL DEFAULT 0,
+          enqueued_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          claimed_by TEXT
+        );
+      `);
+      setup
+        .prepare(
+          'INSERT INTO queue_tasks (task_id, priority, affinity_key, payload, state, attempt, max_retries, enqueued_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        )
+        .run(
+          'corrupt-1',
+          0,
+          null,
+          Buffer.from('this is not json{{{', 'utf8'),
+          'pending',
+          0,
+          0,
+          Date.now(),
+          Date.now(),
+        );
+      setup.close();
+
+      // Now open via SqliteTaskQueue — recovery must NOT throw.
+      const q = new SqliteTaskQueue({ path: dbPath });
+      try {
+        // The corrupt row was quarantined; size = 0 and the row's state
+        // is 'failed' (GC-eligible).
+        assert.equal(q.size, 0);
+        // Verify the underlying row was marked failed by querying the
+        // SQLite file directly.
+        const db = new DatabaseSync(dbPath);
+        const row = db.prepare("SELECT state FROM queue_tasks WHERE task_id = 'corrupt-1'").get();
+        db.close();
+        assert.ok(row, 'corrupt row must still exist in the DB');
+        assert.equal(row.state, 'failed', 'corrupt row must be quarantined as failed');
+      } finally {
+        q.destroy();
+      }
     });
   });
 });

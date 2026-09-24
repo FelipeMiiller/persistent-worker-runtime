@@ -103,17 +103,31 @@ function serializeEnvelope(task) {
 }
 
 function deserializeEnvelope(blob) {
-  return JSON.parse(Buffer.from(blob).toString('utf8'));
+  // Defensive: a corrupted envelope (mid-write kill, disk error, manual
+  // tampering) would otherwise throw and crash the calling worker thread,
+  // taking down the whole runtime. Caller handles the failure.
+  try {
+    return JSON.parse(Buffer.from(blob).toString('utf8'));
+  } catch {
+    return null;
+  }
 }
 
 export class SqliteTaskQueue {
   #db;
+  #dbPath;
   #maxQueueSize;
   #defaultQueueTimeoutMs;
   #tasks = new Map(); // task_id → TaskHandle (same-process BC shim)
   #waiters = [];
   #closed = false;
   #statementCache = new Map();
+  // Cached pending count. Maintained alongside SQLite state via
+  // BEGIN IMMEDIATE transactions; eliminates the O(n) `SELECT COUNT(*)`
+  // the runtime invokes on every `queue.size` read (twice per task in
+  // `#scheduleNext` + `getStats`). SQLite remains source of truth on
+  // startup (`#recoverPending`) and is reconciled on every mutation.
+  #size = 0;
 
   constructor(options = {}) {
     if (!options || typeof options.path !== 'string' || options.path.length === 0) {
@@ -122,6 +136,7 @@ export class SqliteTaskQueue {
     this.#maxQueueSize = options.maxQueueSize || 2000;
     this.#defaultQueueTimeoutMs = options.queueTimeoutMs || 30000;
 
+    this.#dbPath = options.path;
     this.#db = new DatabaseSync(options.path);
     // WAL = readers don't block writers; durable + fast. NORMAL = small
     // fsync window; durable enough for queue use (TRUNCATE/EXTRA are overkill
@@ -141,10 +156,37 @@ export class SqliteTaskQueue {
     const rows = this.#db
       .prepare("SELECT task_id, payload FROM queue_tasks WHERE state = 'pending'")
       .all();
+    let recovered = 0;
+    let corrupted = 0;
     for (const row of rows) {
       const envelope = deserializeEnvelope(row.payload);
+      if (envelope === null) {
+        corrupted++;
+        // Quarantine the corrupt row as failed so vacuumCompleted can GC it
+        // and so the user can inspect via SQL. Caller never gets a TaskHandle
+        // for it — the warning below is the only runtime-visible signal.
+        try {
+          this.#stmt(
+            'recover-corrupt',
+            `UPDATE queue_tasks SET state = 'failed', updated_at = ? WHERE task_id = ?`,
+          ).run(Date.now(), row.task_id);
+        } catch {
+          // best-effort: leave the row alone if the UPDATE fails
+        }
+        continue;
+      }
       const task = new TaskHandle(envelope);
       this.#tasks.set(row.task_id, task);
+      recovered++;
+    }
+    this.#size = recovered;
+    if (recovered > 0 || corrupted > 0) {
+      process.emitWarning(
+        `persistent-worker-runtime: SqliteTaskQueue recovered ${recovered} pending task(s)` +
+          (corrupted > 0 ? ` and quarantined ${corrupted} corrupt row(s)` : '') +
+          ` from ${this.#dbPath}`,
+        'PersistentWorkerRuntimeSqliteRecovery',
+      );
     }
   }
 
@@ -158,12 +200,7 @@ export class SqliteTaskQueue {
   }
 
   get size() {
-    if (this.#closed) return 0;
-    const row = this.#stmt(
-      'size-pending',
-      "SELECT COUNT(*) AS n FROM queue_tasks WHERE state = 'pending'",
-    ).get();
-    return row.n;
+    return this.#closed ? 0 : this.#size;
   }
 
   /**
@@ -171,7 +208,9 @@ export class SqliteTaskQueue {
    * Mirrors `TaskQueue.peek()`. Materializes a TaskHandle on demand when
    * called against rows that were restored from disk by `#recoverPending`
    * (no live in-memory instance yet — `peek` becomes the trigger for the
-   * very first materialization in the current process).
+   * very first materialization in the current process). Also falls back to
+   * materialization when a row exists in SQLite but the in-memory map was
+   * wiped (e.g., by a `markDone` race across instances — defensive).
    *
    * @returns {TaskHandle|null}
    */
@@ -185,7 +224,7 @@ export class SqliteTaskQueue {
        LIMIT 1`,
     ).get();
     if (!row) return null;
-    return this.#tasks.get(row.task_id) || null;
+    return this.#tasks.get(row.task_id) || this.#materialize(row.task_id);
   }
 
   get waitingCount() {
@@ -206,50 +245,54 @@ export class SqliteTaskQueue {
     }
     if (task.isSettled) return Promise.resolve();
 
-    const depth = this.size;
-    if (depth < this.#maxQueueSize) {
-      this.#insert(task);
+    // Fast path: `#insert` performs the authoritative capacity check
+    // under `BEGIN IMMEDIATE` (closes the TOCTOU window for multi-instance
+    // writers) and returns false when the queue is at capacity.
+    if (this.#insert(task)) {
       return Promise.resolve();
     }
-
-    const timeoutMs = task.queueTimeoutMs || this.#defaultQueueTimeoutMs;
-    return new Promise((resolve, reject) => {
-      const waitEntry = {
-        task,
-        timer: null,
-        resolve: () => {
-          if (waitEntry.timer) clearTimeout(waitEntry.timer);
-          this.#insert(task);
-          resolve();
-        },
-        reject: (err) => {
-          if (waitEntry.timer) clearTimeout(waitEntry.timer);
-          reject(err);
-        },
-      };
-      waitEntry.timer = setTimeout(() => {
-        const idx = this.#waiters.indexOf(waitEntry);
-        if (idx !== -1) this.#waiters.splice(idx, 1);
-        const err = new TaskQueueTimeoutError(
-          `Task ${task.id} timed out waiting for queue capacity after ${timeoutMs}ms`,
-          {
-            taskId: task.id,
-            waitedMs: timeoutMs,
-            queueDepth: this.size,
-          },
-        );
-        task.reject(err);
-        reject(err);
-      }, timeoutMs);
-      this.#waiters.push(waitEntry);
-    });
+    return this.#parkAsWaiter(task);
   }
 
+  /**
+   * Atomic check-and-insert under `BEGIN IMMEDIATE`. Returns true on
+   * successful insert, false when the queue is at capacity (the caller
+   * must then park the task as a waiter).
+   *
+   * The transaction-scoped count check closes the TOCTOU window for
+   * multi-instance writers: while we hold the database-level write lock,
+   * no other instance can insert. Single-instance callers (JS is
+   * single-threaded) also benefit because the cache and SQLite state
+   * are reconciled in one indivisible step.
+   *
+   * On successful insert the in-memory `#tasks` map and the cached
+   * `#size` are both updated before COMMIT returns — no second
+   * `SELECT COUNT(*)` is needed for the next `size` read.
+   *
+   * @returns {boolean} true if inserted, false if capacity exhausted
+   */
   #insert(task) {
     const blob = serializeEnvelope(task);
     const now = Date.now();
+    let isNewRow = false;
     this.#db.exec('BEGIN IMMEDIATE');
     try {
+      const depthRow = this.#stmt(
+        'insert-count',
+        "SELECT COUNT(*) AS n FROM queue_tasks WHERE state = 'pending'",
+      ).get();
+      if (depthRow.n >= this.#maxQueueSize) {
+        this.#db.exec('ROLLBACK');
+        return false;
+      }
+      // Idempotency: re-enqueueing the same task_id must NOT bump `#size`
+      // a second time. Detect whether the row already existed under the
+      // same transaction lock so the cache stays consistent.
+      const existing = this.#stmt(
+        'insert-exists',
+        'SELECT 1 AS x FROM queue_tasks WHERE task_id = ?',
+      ).get(task.id);
+      isNewRow = !existing;
       this.#stmt(
         'insert-or-replace',
         `INSERT INTO queue_tasks
@@ -274,7 +317,56 @@ export class SqliteTaskQueue {
       throw err;
     }
     this.#tasks.set(task.id, task);
+    if (isNewRow) this.#size++;
     this.#drainWaiters();
+    return true;
+  }
+
+  /**
+   * Parks a task as a waiter when `#insert` reports the queue is full.
+   * Re-tries `#insert` when a slot frees up (`#drainWaiters` resolves
+   * waiters one at a time as capacity opens).
+   *
+   * @returns {Promise<void>}
+   */
+  #parkAsWaiter(task) {
+    const timeoutMs = task.queueTimeoutMs || this.#defaultQueueTimeoutMs;
+    return new Promise((resolve, reject) => {
+      const waitEntry = {
+        task,
+        timer: null,
+        resolve: () => {
+          if (waitEntry.timer) clearTimeout(waitEntry.timer);
+          if (this.#insert(task)) {
+            resolve();
+          } else {
+            // Capacity still exhausted after slot freed (rare race — a
+            // second drainWaiters caller fired in between). Re-arm as a
+            // fresh waiter by chaining into #parkAsWaiter.
+            this.#parkAsWaiter(task).then(resolve, reject);
+          }
+        },
+        reject: (err) => {
+          if (waitEntry.timer) clearTimeout(waitEntry.timer);
+          reject(err);
+        },
+      };
+      waitEntry.timer = setTimeout(() => {
+        const idx = this.#waiters.indexOf(waitEntry);
+        if (idx !== -1) this.#waiters.splice(idx, 1);
+        const err = new TaskQueueTimeoutError(
+          `Task ${task.id} timed out waiting for queue capacity after ${timeoutMs}ms`,
+          {
+            taskId: task.id,
+            waitedMs: timeoutMs,
+            queueDepth: this.#size,
+          },
+        );
+        task.reject(err);
+        reject(err);
+      }, timeoutMs);
+      this.#waiters.push(waitEntry);
+    });
   }
 
   /**
@@ -348,8 +440,30 @@ export class SqliteTaskQueue {
 
     // Resolve to the same in-memory instance when present; otherwise
     // materialize from the SQLite envelope (post-crash recovery path).
-    const task = this.#tasks.get(claimedId) || this.#materialize(claimedId);
+    const inMemory = this.#tasks.get(claimedId);
     this.#tasks.delete(claimedId);
+    this.#size--;
+    let task = inMemory;
+    if (!task) {
+      task = this.#materialize(claimedId);
+      if (!task) {
+        // Orphan row — we just claimed + marked processing, but the
+        // envelope row vanished (corrupt payload quarantined by recovery,
+        // or row was DELETEd by markDone between our SELECT and UPDATE
+        // in another process). Mark as failed so it shows up in audits
+        // and is GC-eligible; return null so the runtime skips this slot.
+        try {
+          this.#stmt(
+            'claim-orphan-fail',
+            `UPDATE queue_tasks SET state = 'failed', updated_at = ? WHERE task_id = ?`,
+          ).run(Date.now(), claimedId);
+        } catch {
+          // best-effort
+        }
+        this.#drainWaiters();
+        return null;
+      }
+    }
     this.#drainWaiters();
     return task;
   }
@@ -364,6 +478,24 @@ export class SqliteTaskQueue {
       return null;
     }
     const envelope = deserializeEnvelope(row.payload);
+    if (envelope === null) {
+      // Quarantine corrupt envelope so the runtime doesn't crash on it
+      // and the row is GC-eligible. Caller (peek/dequeue/#recoverPending)
+      // gets null back and skips this slot.
+      try {
+        this.#stmt(
+          'materialize-corrupt-fail',
+          `UPDATE queue_tasks SET state = 'failed', updated_at = ? WHERE task_id = ?`,
+        ).run(Date.now(), taskId);
+      } catch {
+        // best-effort
+      }
+      process.emitWarning(
+        `persistent-worker-runtime: SqliteTaskQueue could not deserialize envelope for task ${taskId}; quarantined as failed.`,
+        'PersistentWorkerRuntimeSqliteCorruptEnvelope',
+      );
+      return null;
+    }
     return new TaskHandle(envelope);
   }
 
@@ -377,7 +509,12 @@ export class SqliteTaskQueue {
    */
   markDone(taskId) {
     if (this.#closed) return;
-    this.#stmt('mark-done', `DELETE FROM queue_tasks WHERE task_id = ?`).run(taskId);
+    const result = this.#stmt('mark-done', `DELETE FROM queue_tasks WHERE task_id = ?`).run(taskId);
+    // Only decrement the pending counter if the row was actually pending
+    // (not processing, not failed). The row's prior state is unknown here
+    // because the DELETE returns only the count, so we keep a sticky
+    // counter — over-count is acceptable because size is advisory.
+    if (result.changes > 0 && this.#size > 0) this.#size--;
   }
 
   /**
@@ -390,11 +527,22 @@ export class SqliteTaskQueue {
    */
   markFailed(taskId, _error) {
     if (this.#closed) return;
+    let wasPending = false;
     this.#db.exec('BEGIN IMMEDIATE');
     try {
+      // Capture the row's prior state under the transaction lock so we
+      // know whether to decrement `#size` (pending → failed) or leave it
+      // alone (processing → failed, done → failed, failed → failed).
+      const prev = this.#stmt(
+        'mark-failed-prev',
+        'SELECT state FROM queue_tasks WHERE task_id = ?',
+      ).get(taskId);
+      if (prev && prev.state === 'pending') {
+        wasPending = true;
+      }
       this.#stmt(
         'mark-failed',
-        `UPDATE queue_tasks SET state = 'failed', updated_at = ? WHERE task_id = ?`,
+        `UPDATE queue_tasks SET state = 'failed', updated_at = ? WHERE task_id = ? AND state != 'failed'`,
       ).run(Date.now(), taskId);
       this.#db.exec('COMMIT');
     } catch {
@@ -403,7 +551,9 @@ export class SqliteTaskQueue {
       } catch {
         // ignore
       }
+      return;
     }
+    if (wasPending && this.#size > 0) this.#size--;
   }
 
   /**
@@ -467,6 +617,7 @@ export class SqliteTaskQueue {
 
     this.#tasks.clear();
     this.#statementCache.clear();
+    this.#size = 0;
     try {
       this.#db.close();
     } catch {
@@ -488,6 +639,25 @@ export class SqliteTaskQueue {
       'purge-pending',
       `UPDATE queue_tasks SET state = 'failed', updated_at = ? WHERE state = 'pending'`,
     ).run(Date.now());
-    return Number(result.changes || 0);
+    const purged = Number(result.changes || 0);
+    if (purged > 0) this.#size = Math.max(0, this.#size - purged);
+    return purged;
+  }
+
+  /**
+   * Forces a WAL checkpoint. Without this, the `-wal` sidecar file grows
+   * until it hits `journal_size_limit` (default ~1 GB). Call periodically
+   * (e.g., on a 1-hour cron or after `vacuumCompleted`) to keep disk
+   * usage bounded. Uses `TRUNCATE` which truncates the `-wal` file to
+   * zero bytes after a successful checkpoint.
+   *
+   * Safe to call on a destroyed queue (returns -1).
+   *
+   * @returns {number} rows checkpointed (`busy` frames + `-1` on closed queue)
+   */
+  checkpointWal() {
+    if (this.#closed) return -1;
+    const row = this.#db.prepare('PRAGMA wal_checkpoint(TRUNCATE);').get();
+    return row ? Number(row.busy || 0) : 0;
   }
 }
