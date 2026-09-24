@@ -80,7 +80,7 @@
 
 ### Open follow-ups (in priority order)
 
-1. **T13+ portable benchmarks** — fix macOS-Latest ARM64 benchmark calibrations (`.agents/issues/CI-FAILURE-macos-benchmarks.md`). Currently failing `benchmarks/cpu-saturation` step on macOS-Latest / Node 22/24. Use Linux x86_64 / Windows calibrations for `availableParallelism()`-based saturation assertions, or port the assertions to be architecture-agnostic.
+1. **T13+ portable benchmarks** — ✅ DONE 2026-09-23 (commit `75deeaf`). `.agents/issues/CI-FAILURE-macos-benchmarks.md` marked RESOLVED; macOS-Latest ARM64 benchmark now uses platform-aware `1.15× darwin / 1.3× others` threshold in `benchmarks/cpu-saturation.benchmark.js`. CI green across 4 consecutive runs.
 2. **`gh auth refresh --scopes workflow`** — ✅ DONE 2026-09-23. Token now has `gist`, `read:org`, `repo`, **`workflow`** (verified via `gh auth status`). Future dependabot PRs that touch `.github/workflows/*.yml` can be merged with `gh pr merge` directly — no more `git fetch + local merge + git push` workaround.
 3. **Spec-precision follow-ups** (cheap, non-blocking, ~25 lines total):
    - `RECYCLE-08` — negative-case assertion in `test/worker-recycling.test.js`.
