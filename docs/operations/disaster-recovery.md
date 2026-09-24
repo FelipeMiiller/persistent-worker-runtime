@@ -276,7 +276,7 @@ Quick reference (full detail follows):
 | §    | Item                                       | Status   | Workaround in place                                                                                                              |
 | ---- | ------------------------------------------ | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | 8.1  | SIGTERM handler with drain timeout         | deferred | User-wired `process.on('SIGTERM', () => runtime.shutdown())` — see `skills/.../references/observability.md §Lifecycle`           |
-| 8.2  | Health-check endpoint (`/healthz`, `/readyz`) | deferred | User-side `http.createServer` reading `runtime.stats()` and `runtime.getWorkers()` (ADR-0024 / HARDEN-03)                       |
+| 8.2  | Health-check endpoint (`/healthz`, `/readyz`) | closed (2026-09-24) | Runtime exposes `isAlive()` + `isReady()` (ADR-0024); user wires HTTP / cron / script transport — see `src/worker-runtime.js:712–762` |
 | 8.3  | OpenTelemetry traces                       | deferred | User installs `@opentelemetry/api`; runtime preserves `AsyncResource` context across the main → worker boundary (transport only)|
 | 8.4  | Durable queue backend (SQLite via `node:sqlite`) | in-progress | `queueBackend: 'memory'` is the v0.2.x default; production users enable `queueBackend: 'sqlite'` (ADR-0020) for RPO=0 |
 | 8.5  | Chaos game day playbook                    | missing  | —                                                                                                                                  |
