@@ -59,7 +59,7 @@ Per ADR-0005 (zero external runtime deps), these are noted for completeness — 
 | Library | Could replace | Why we don't use it |
 |---|---|---|
 | **Piscina** | `WorkerRuntime` core | Has pool + dispatch + transferList, but no adaptive concurrency, no drain semantics, no L1/L2/L3 tiers, no streaming, no priority. We'd still build our own layer on top. |
-| **BullMQ** | `TaskQueue` (Redis-backed) | Has retry + priority + backoff for *Redis-backed* queues. ADR-0020 plans to use Postgres-backed instead (we already operate Postgres). |
+| **BullMQ** | `TaskQueue` (Redis-backed) | Has retry + priority + backoff for *Redis-backed* queues. ADR-0020 ships SQLite via `node:sqlite` instead — zero runtime deps, no peer dep needed. |
 | **threads.js** | `worker_threads` wrapper | Just a Promise wrapper. Doesn't add features we'd use. |
 | **overload-protection** | Our adaptive controller | Less customizable than the threshold + debounce design we built. |
 | **p-queue** | Simple async concurrency limit | No backpressure timeout, no SLA, no priority. |

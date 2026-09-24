@@ -12,7 +12,7 @@ This document covers disaster recovery for a production deployment of the `persi
 
 1. **The runtime host(s)** — replaceable in minutes via the runtime's container/AMI definition.
 2. **Task durability** — in-flight and queued tasks that have not yet produced their side effect (DB write, message publish, etc.).
-3. **Supervised external dependencies** — Postgres (primary + replicas), Redis (cache + rate limit), message broker (if any), object storage for state.
+3. **Supervised external dependencies** — SQLite (primary, replicated via Litestream / rqlite / file sync), Redis (cache + rate limit), message broker (if any), object storage for state.
 
 The DR plan assumes the runtime is deployed behind a managed load balancer (nginx / HAProxy / cloud L7) and that the surrounding infrastructure (DNS, secrets store, monitoring) is itself a separate concern handled by the platform team.
 
@@ -35,12 +35,12 @@ Targets assume the architecture described in `BENCHMARKS.md §18` (≤ 16 worker
 | **S1 — Minor** | Single instance crash / health check fails | ≤ 2 minutes (LB removes + auto-scaling spins up) | 0 (no local state to lose) | LB + autoscaler |
 | **S2 — Moderate** | TaskQueue overflow / sustained backpressure | ≤ 15 minutes (manual: drain queue, scale workers, restart) | 0 (queue is in-memory; tasks dropped with rejection error) | On-call SRE |
 | **S3 — Significant** | Single AZ failure | ≤ 30 minutes (LB fails over to other AZs) | 0 if async durable queue; ≤ 5 minutes if in-memory queue | On-call SRE + Platform |
-| **S4 — Major** | Postgres primary failure | ≤ 15 minutes (failover to replica) | ≤ 30 seconds (replication lag at fail-over moment) | DBA + Platform |
-| **S5 — Severe** | Region failure | ≤ 4 hours (activate standby region) | ≤ 5 minutes (last cross-region snapshot) | Incident commander |
+| **S4 — Major** | SQLite primary instance failure | ≤ 30 minutes (cut over to Litestream-replicated standby) | ≤ 30 seconds (replication lag at fail-over moment) | DBA + Platform |
+| **S5 — Severe** | Region failure | ≤ 4 hours (activate standby region) | ≤ 5 minutes (last cross-region Litestream snapshot) | Incident commander |
 
 **Notes**:
-- RPO for S2/S3 is 0 *only* when the queue is backed by durable storage (Postgres-backed queue, Kafka, SQS). If the runtime is using the default in-memory `TaskQueue`, a process crash drops queued tasks — see §5.2 for the upgrade path.
-- S4's RPO depends on Postgres replication topology (sync vs async replication). Synchronous replicas give RPO=0; the 30s figure assumes the default `async` setting.
+- RPO for S2/S3 is 0 *only* when the queue is backed by durable storage — the runtime ships a SQLite-backed queue (`queueBackend: 'sqlite'`, ADR-0020) using the same `node:sqlite` stdlib module. If the runtime is using the default `queueBackend: 'memory'`, a process crash drops queued tasks — see §5.2 for the upgrade path.
+- S4's RPO depends on SQLite replication topology (Litestream continuous WAL → object storage, with a few seconds of lag during normal operation). Synchronous Litestream replicas give RPO=0; the 30s figure assumes the default async cadence.
 
 ---
 
@@ -72,10 +72,17 @@ The DR plan assumes this layout:
             └──────────┬───────────┘                              └──────────────────────┘
                        │
                        ▼
-            ┌──────────────────────┐                              ┌──────────────────────┐
-            │ Postgres primary     │   ◄── streaming replica  ──► │ Postgres replica     │
-            │ (AZ-A)               │                              │ (Region B)           │
-            └──────────────────────┘                              └──────────────────────┘
+            ┌──────────────────────┐
+            │ SQLite primary       │
+            │ (AZ-A)               │
+            └──────────┬───────────┘
+                       │  Litestream continuous WAL → S3 / GCS
+                       │  (async, ≤ 30 s lag)
+                       ▼
+            ┌──────────────────────┐
+            │ SQLite standby       │   ◄── cut over via Litestream restore on standby boot
+            │ (Region B, cold)     │
+            └──────────────────────┘
 ```
 
 Cross-region replication is asynchronous by default; the RPO of 5 minutes for S5 reflects the worst case before the last successful snapshot.
@@ -88,9 +95,10 @@ Three copies, two different storage media, one offsite. Per data class:
 
 | Data | Copy 1 (primary) | Copy 2 (local snapshot) | Copy 3 (offsite) | Frequency | Retention |
 |---|---|---|---|---|---|
-| **Postgres** | Primary instance | Daily base backup on AZ-local NVMe | Cross-region snapshot (S3 / GCS) | Continuous WAL archiving + daily base | 7d hot, 30d warm, 1y cold |
+| **SQLite (primary db)** | Primary instance + Litestream WAL streamer | Daily snapshot on AZ-local NVMe | Cross-region Litestream target (S3 / GCS) | Continuous WAL streaming + daily snapshot | 7d hot, 30d warm, 1y cold |
+| **SQLite queue (ADR-0020)** | Local `.db` file | `sqlite3 .db .backup` to AZ-local snapshot | Cross-region Litestream target | Continuous | 7d hot, 30d warm, 1y cold |
 | **Redis** | Primary instance | AOF rewrite (default 1s fsync) | — (replica only) | Every 1s | 1h hot, 7d via replica |
-| **TaskQueue state** | (in-memory, see §5.2) | — | — | n/a | n/a |
+| **TaskQueue state** | in-memory by default (`queueBackend: 'memory'`); opt-in durable via `queueBackend: 'sqlite'` (§5.2) | SQLite `.db` file is the durable copy once enabled | Same as SQLite queue above | n/a (memory) or continuous (sqlite) | n/a (memory) or 7d hot, 30d warm, 1y cold (sqlite) |
 | **Runtime config / env** | Source repo | — | Image registry (immutable tags) | Per deploy | Permanent per tag |
 | **Secrets** | Vault | — | Vault replicas (HA) | Per rotation | Per secret TTL |
 | **Observability data** | Prometheus TSDB | Loki log archive | S3 cold storage | Continuous | 30d hot, 1y cold |
@@ -121,9 +129,9 @@ LB health check (`GET /healthz`) fails for ≥ 3 consecutive 1-second probes. LB
 
 The default `TaskQueue` (`src/task-queue.js`) keeps pending tasks in memory. A crash drops them. Mitigations, in order of preference:
 
-1. **Recommended for prod**: front the runtime with a durable external queue (SQS, Kafka, Postgres-backed). The runtime reads from the external queue, so crash loses only the in-flight ones (handled by retry).
-2. **Acceptable for low-loss workloads**: keep in-memory queue but reduce `maxQueueSize` and rely on caller-side retry. Document the data-loss window in the API contract.
-3. **Experimental**: use Postgres-backed queue inside the runtime (`options.queueBackend: 'postgres'` — TBD; tracked in §8).
+1. **Recommended for prod**: enable the runtime's built-in `queueBackend: 'sqlite'` (ADR-0020, implemented in `src/queue/sqlite-backend.js`). Tasks are persisted to a local `.db` file; a crash loses only the in-flight ones (handled by ADR-0007 retry semantics).
+2. **Acceptable for very-high-throughput multi-instance dispatch (> ~1000 dispatches/sec)**: front the runtime with an external queue (SQS, Kafka, etc.). The runtime reads from the external queue as an idempotent inner worker. This pattern is **not shipped by the runtime** — see ADR-0020 §Out-of-scope backends.
+3. **Acceptable for low-loss workloads (v0.2.x floor)**: keep `queueBackend: 'memory'` (the default) but reduce `maxQueueSize` and rely on caller-side retry. Document the data-loss window in the API contract.
 
 ### 5.3 TaskQueue overflow / sustained backpressure (S2 — on-call)
 
@@ -146,15 +154,16 @@ LB detects AZ-local instances failing health checks. Routes traffic to surviving
 3. Bring up replacement instances in a third AZ (if available) — DR drills should pre-warm AMIs.
 4. Once AZ is back, rebalance gradually (don't rejoin all instances at once or you'll overwhelm cold caches).
 
-### 5.5 Postgres primary failure (S4 — DBA)
+### 5.5 SQLite primary failure (S4 — DBA)
 
-Detected by: connection refused from app → pg_isready check → alert.
+Detected by: connection refused from app → alert from Litestream (no writes being replicated) OR operational dashboard showing primary unreachable.
 
 **Recovery steps**:
-1. Verify replica is healthy and replication lag is acceptable.
-2. Promote replica: `pg_ctl promote` or cloud-managed equivalent (RDS failover, Cloud SQL failover).
-3. App connection pool re-resolves DNS to the new primary within seconds.
-4. **Verify in-flight tasks**: tasks mid-transaction may need to be re-driven. Use the retry policy (ADR-0007) — failed transactions during the failover window are normal.
+1. Verify the Litestream target (S3 / GCS) has fresh enough WAL segments to restore from (typically ≤ 30 s lag).
+2. **Boot the standby region** (cold standby — usually Region B). Litestream restores the database file on that node.
+3. **Cut application traffic over** to the standby's filesystem / container. The app's connection resolves to the new mount point (or DNS-update the host).
+4. **Verify in-flight tasks**: tasks mid-transaction may need to be re-driven. Use the retry policy (ADR-0007) — failed transactions during the cut-over window are normal.
+5. **Once the old primary is healthy**, do NOT merge writes — the standby's restored state is canonical. Bring the old primary up as the new standby (Litestream replicates the other direction).
 
 ### 5.6 Region failure (S5 — incident commander)
 
@@ -163,8 +172,8 @@ This is a war-room scenario. Decisions are made by the incident commander (engin
 **Recovery steps**:
 1. **Declare the incident** on the status page. Internal stakeholders per the escalation tree (see `runbook.md`).
 2. **DNS failover** to the standby region's LB. TTL on the public DNS should already be ≤ 60 seconds.
-3. **Warm the standby** — the standby region's app instances are scaled down (cost-saving). Spin them up to full capacity. The runtime's own boot time is short; the bottleneck is usually the Postgres replica promotion + Redis promotion.
-4. **Postgres**: promote the cross-region replica. RPO is the last successful cross-region snapshot (≤ 5 minutes by default).
+3. **Warm the standby** — the standby region's app instances are scaled down (cost-saving). Spin them up to full capacity. The runtime's own boot time is short; the bottleneck is usually the Litestream restore + Redis promotion.
+4. **SQLite**: the Litestream-replicated standby region's database restores on boot from the last WAL segment in cross-region storage (RPO = last successful cross-region segment, ≤ 5 minutes).
 5. **Redis**: the cross-region replica becomes the new primary. Brief TTL miss during failover is acceptable; cache rebuilds.
 6. **Validate**: smoke test critical endpoints, watch error rate for 30 minutes.
 7. **Communicate**: status page updates every 30 minutes until resolution.
@@ -195,27 +204,29 @@ curl http://new-instance:3000/healthz
 # 5. Postmortem within 24h
 ```
 
-### 6.2 Restore Postgres from snapshot (S4 — extreme)
+### 6.2 Restore SQLite from snapshot (S4 — extreme)
 
 ```bash
 # 1. Identify the snapshot to restore
-# In S3 / GCS, find the latest snapshot BEFORE the incident time
-SNAPSHOT_ID="snap-2026-09-18T0300Z"
+# In S3 / GCS (Litestream target), find the latest snapshot BEFORE the incident time
+SNAPSHOT_OBJECT="litestream/queue-prod/2026-09-18T0300Z/db.00001.db.lz4"
 
-# 2. Spawn a new instance from the snapshot
-# (Cloud-specific: aws rds restore-db-instance-to-point-in-time, etc.)
+# 2. Run a one-shot Litestream restore on a fresh host
+litestream restore -o /var/lib/pwr/restore.db "$SNAPSHOT_OBJECT"
 
-# 3. Wait for the new instance to be available
-# This can take 5-30 minutes for large DBs
+# 3. SQLite durability note: the restored file is self-contained;
+# no separate recovery process is needed.
 
-# 4. Update connection string (or DNS) to point to the new instance
+# 4. Update mount / DNS to point the app to /var/lib/pwr/restore.db
 
 # 5. Verify
-psql -h new-primary -c "SELECT count(*) FROM tasks WHERE created_at > now() - interval '5 minutes';"
+sqlite3 /var/lib/pwr/restore.db "SELECT count(*) FROM tasks WHERE created_at > datetime('now', '-5 minute');"
 # Should show recent activity
 
-# 6. The DRILLED-RESTORE record in runbook.md §Backup Drills must be updated.
+# 6. Update DRILLED-RESTORE record in runbook.md §Backup Drills.
 ```
+
+> **Note**: SQLite's restore is dramatically faster than a typical RDBMS PITR because there is no server startup, no WAL replay against a shared buffer pool, and no replication catch-up — the file IS the database.
 
 ### 6.3 Activate standby region (S5)
 
@@ -226,8 +237,9 @@ psql -h new-primary -c "SELECT count(*) FROM tasks WHERE created_at > now() - in
 # 2. Scale standby region app instances to full capacity
 # (Cloud-specific — e.g., aws autoscaling update-auto-scaling-group --desired-capacity 8)
 
-# 3. Promote Postgres replica
-# (Cloud-specific or self-managed: pg_ctl promote)
+# 3. Restore SQLite on the standby (Litestream restore from last cross-region WAL segment)
+# See §6.2 for the restore procedure; the standby region's container is configured to
+# auto-restore on boot.
 
 # 4. Promote Redis replica (or accept cache miss)
 # Redis Sentinel / Cluster: failover via sentinel CLI
@@ -246,11 +258,11 @@ done
 
 | Frequency | Test | Owner | Pass criteria |
 |---|---|---|---|
-| Weekly (automated) | Backup restore drill — Postgres snapshot → fresh instance → verify checksum | Platform | Restored instance boots, accepts connections, last 24h data queryable |
+| Weekly (automated) | Backup restore drill — Litestream snapshot → fresh host → verify checksum | Platform | Restored instance accepts connections, last 24h data queryable |
 | Weekly (automated) | Synthetic transaction — send 100 tasks, confirm completion | SRE | All 100 complete within SLO, no errors |
-| Monthly | Single instance kill (SIGKILL) → verify auto-recovery | SRE | New instance up within 2 minutes, no task loss (when queue is durable) |
+| Monthly | Single instance kill (SIGKILL) → verify auto-recovery | SRE | New instance up within 2 minutes, no task loss (when queue is durable via `queueBackend: 'sqlite'`) |
 | Quarterly | AZ failover drill — block AZ-A traffic, verify AZ-B absorbs | SRE + Platform | p99 latency stays within SLO during failover |
-| Quarterly | Postgres failover drill — promote replica, verify app reconnects | DBA + SRE | App reconnects within 60 seconds, error rate < 1% during failover |
+| Quarterly | SQLite failover drill — boot standby from Litestream, verify app reconnects | DBA + SRE | App reconnects within 60 seconds, error rate < 1% during failover |
 | Annually | Full region failover — activate Region B | Incident commander + leadership | RTO ≤ 4 hours, RPO ≤ 5 minutes, status page updated throughout |
 
 ---
@@ -266,7 +278,7 @@ Quick reference (full detail follows):
 | 8.1  | SIGTERM handler with drain timeout         | deferred | User-wired `process.on('SIGTERM', () => runtime.shutdown())` — see `skills/.../references/observability.md §Lifecycle`           |
 | 8.2  | Health-check endpoint (`/healthz`, `/readyz`) | deferred | User-side `http.createServer` reading `runtime.stats()` and `runtime.getWorkers()` (ADR-0024 / HARDEN-03)                       |
 | 8.3  | OpenTelemetry traces                       | deferred | User installs `@opentelemetry/api`; runtime preserves `AsyncResource` context across the main → worker boundary (transport only)|
-| 8.4  | Durable queue backend (Postgres `SKIP LOCKED`) | deferred | Caller fronts the runtime with an external queue (SQS / Kafka / Postgres) — see §5.2.1 and ADR-0020                            |
+| 8.4  | Durable queue backend (SQLite via `node:sqlite`) | in-progress | `queueBackend: 'memory'` is the v0.2.x default; production users enable `queueBackend: 'sqlite'` (ADR-0020) for RPO=0 |
 | 8.5  | Chaos game day playbook                    | missing  | —                                                                                                                                  |
 | 8.6  | Cross-region snapshot automation           | missing  | —                                                                                                                                  |
 
@@ -365,32 +377,35 @@ Without production telemetry to anchor these choices, building first locks us in
 
 ---
 
-### 8.4 Durable queue backend (Postgres `SKIP LOCKED`)
+### 8.4 Durable queue backend (SQLite via `node:sqlite`) — **in-progress**
 
-**Goal**: `createWorkerRuntime({ queueBackend: 'postgres', postgres: { connectionString: ... } })` so `dispatch()` writes to a Postgres queue table and workers pull via `SELECT … FOR UPDATE SKIP LOCKED`. Closes the RPO>0 gap on S1 (single-instance crash) for users who already operate Postgres.
+**Goal**: `createWorkerRuntime({ queueBackend: 'sqlite', sqlite: { path: '/var/lib/pwr/queue.db' } })` so `dispatch()` writes to a SQLite queue table and workers pull via `BEGIN IMMEDIATE TRANSACTION` + `SELECT … ORDER BY priority DESC, enqueued_at ASC LIMIT 1` + `UPDATE state='processing'`. Closes the RPO>0 gap on S1 (single-instance crash) for typical workloads without an external dependency.
 
 **Current state**:
 
-- **Not implemented.** ADR-0020 records the **decision** (Postgres-first; Kafka or SQS acceptable alternatives) and explicitly defers implementation: *"Tracked separately as T7-extension or T12 — this ADR records the decision, not the implementation steps."* (ADR-0020 §Implementation Notes).
-- `src/task-queue.js` is the only backend — well-tested, in-memory, zero deps.
+- **In progress** (this PR / branch). ADR-0020 records the **decision** (SQLite via `node:sqlite` is the runtime-shipped durable queue; external backends like RDBMS / event-streaming tiers are explicitly out of scope per §Out-of-scope backends).
+- `src/task-queue.js` is the in-memory backend — still the default and used by all tests + small workloads.
 - §5.2.1 documents the in-memory queue crash-loss behavior and ranks this as the **#1 RPO risk** for production deployments without external durability.
 
-**Why deferred**:
+**Why this work is non-trivial**:
 
-- **Schema design** decisions: queue table shape, indexes for FIFO + worker affinity (`affinityKey`), retention policy for completed rows.
-- **Peer-dep without breaking ADR-0005:** the runtime must work when `pg` is absent (in-memory fallback) but switch to Postgres when present. Non-trivial factory wiring.
+- **Schema design**: queue table shape, indexes for FIFO + priority + worker affinity (`affinityKey`), retention policy for completed rows.
+- **SQLite write serialization**: SQLite's writer model uses BEGIN IMMEDIATE (database-level write lock) rather than the row-level locks used by traditional RDBMS backends. Adequate for typical workloads (≤ ~1000 dispatches/sec across all instances).
+- **Multi-instance deployment**: requires a shared filesystem (NFS, EFS, rqlite, Litestream) since SQLite is file-based. File-system selection is ops-owned.
+- **TaskHandle ↔ envelope deserialization**: the live `TaskHandle` carries live `Promise`s and `AbortSignal` subscribers that must not be serialized. The SQLite backend persists just the *envelope* (id, type, payload, fn source, transferList-compatible fields, priority, affinity, retry config) and reconstructs a fresh `TaskHandle` on dispatch — the original dispatch Promise becomes dangling on crash, matching the existing in-memory behavior (DR §5.2.1 surfaces this honestly).
 - **Migration story**: existing single-instance users get the new option as additive, but tests / benchmarks must keep both code paths green.
-- **Operational concerns**: queue table needs TTL / vacuum to avoid unbounded growth, plus a way to inspect backlog (`runtime.queueStats()`).
 
-**Workaround today**: per §5.2.1 — front the runtime with a **durable external queue** (SQS / Kafka / Postgres). The caller reads from the external queue and feeds the runtime via `dispatch()` (which becomes the inner, idempotent worker). For RPO=0 with the in-memory queue, ensure callers use ADR-0007 retry semantics with idempotent task fns.
+**Workaround today** (while §8.4 ships): per §5.2.1 — front the runtime with an external queue (SQS, Kafka, etc.). The runtime does not ship drivers for any of them; callers own the integration. For users not on a managed-queue tier, the default `queueBackend: 'memory'` continues to work as the v0.2.x floor.
 
-**Estimated effort to close**: ~300–400 LOC across `src/queue/postgres-backend.js` + `pg` peer-dep + tests + migration tooling + ADR. Owner: TBD.
+**Estimated effort to close**: ~250 LOC across `src/queue/sqlite-backend.js` + schema migration + tests + benchmarking. **This work is the active branch** (`examples/recycle-retry-preemption` evolved into `feat/sqlite-queue-backend` — T13). Owner: Felipe Miiller.
+
+> Note: ADR-0020 originally chose an **RDBMS-backed** queue as the primary recommendation (2026-09-18). The choice was **revised to SQLite on 2026-09-24** because `node:sqlite` is now stable in Node ≥ 22.13 — no peer dependency, ADR-0005 preserved. External backends were then explicitly removed as alternatives on 2026-09-24 per project direction.
 
 ---
 
 ### 8.5 Chaos game day playbook
 
-**Goal**: Scheduled drills (chaos-mesh / Gremlin scenarios) that exercise the runtime's failure modes systematically — single-worker kill, `SIGKILL` the whole instance, Postgres primary failover during active dispatch, broadcast-channel storm — with a written playbook so on-call engineers can run them with confidence.
+**Goal**: Scheduled drills (chaos-mesh / Gremlin scenarios) that exercise the runtime's failure modes systematically — single-worker kill, `SIGKILL` the whole instance, SQLite primary failover during active dispatch, broadcast-channel storm — with a written playbook so on-call engineers can run them with confidence.
 
 **Current state**: missing. §7 lists the test cadence (weekly / monthly / quarterly) but no executable drill scripts.
 
@@ -402,7 +417,7 @@ Without production telemetry to anchor these choices, building first locks us in
 
 **Goal**: Automated snapshot push from the primary region's storage to the standby region (AWS Backup plans, GCP Backup, or equivalent), replacing the manual §4 dance.
 
-**Current state**: missing. §4 §Postgres row documents today's manual cross-region snapshot.
+**Current state**: missing. §4 §SQLite row documents today's manual cross-region snapshot (Litestream target is the next step).
 
 **Estimated effort to close**: depends on cloud choice (Terraform module + AWS Backup plan ≈ 80 LOC; GCP equivalent ≈ 100 LOC). Owner: TBD.
 

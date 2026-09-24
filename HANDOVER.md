@@ -51,7 +51,7 @@
 9. **`cooperative-cancellation/`** — Complete (ADR-0017).
 10. **`fire-and-forget-hazard/`** — Complete (ADR-0018).
 11. **`default-pool-sizing/`** — Complete (ADR-0019).
-12. **`durable-queue-rpo/`** — Complete (ADR-0020). Postgres `SELECT FOR UPDATE SKIP LOCKED` first; Kafka/SQS acceptable.
+12. **`durable-queue-rpo/`** — Complete (ADR-0020). SQLite via `node:sqlite` chosen (in-progress implementation in branch `feat/sqlite-queue-backend`). External backends (RDBMS / event-streaming) explicitly out of scope per ADR revision 2026-09-24.
 13. **`multi-az-topology/`** — Complete (ADR-0021). ≥2 instances × ≥2 AZs active-active.
 14. **`node-built-ins-map/`** — Complete (ADR-0022). Authoritative map of "Node built-ins we use" vs "custom code we wrote".
 15. **`sizing-policy/`** — Complete (ADR-0023). `WORKER_CONCURRENCY` env + `concurrency: 'auto'` factory option.
@@ -87,11 +87,11 @@
    - `PREEMPT-06` — explicit field-name assertions in `worker_replaced` event payload.
    - `PREEMPT-08` — shutdown-during-pending-watchdog `unhandledRejection` regression test.
 4. **`tasks.md` template migration** — pre-existing drift in `.specs/features/adaptive-concurrency/tasks.md` and `.specs/features/persistent-worker-runtime/tasks.md`. Both fail `validate_tasks.py` with 4 structural errors each (missing `## Test Coverage Matrix`, `## Gate Check Commands`, `## Execution Plan`, `## Task Breakdown` + per-task `**Tests**:` / `**Gate**:` fields). Dedicated session with human review.
-5. **DR plan §8 open items** — SIGTERM handler, `/healthz` endpoint, OpenTelemetry, durable queue backend (Postgres impl per ADR-0020). **All 4 are deferred, not built-in** (corrected 2026-09-23 — earlier text said "Implementation partial in `src/`" which over-stated reality):
+5. **DR plan §8 open items** — SIGTERM handler, `/healthz` endpoint, OpenTelemetry, durable queue backend (SQLite via `node:sqlite` per ADR-0020). **3 are deferred, 1 is in-progress** (revised 2026-09-24: external queue backends removed from queue scope; SQLite backend shipping in active branch `feat/sqlite-queue-backend`):
    - **SIGTERM handler** — `runtime.shutdown()` exists and is idempotent, but no built-in `process.on('SIGTERM', ...)` registration in `src/`. Workaround (works today): user wires a 3-line listener; pattern documented in `skills/persistent-worker-runtime/references/observability.md §Lifecycle`.
    - **/healthz endpoint** — zero HTTP server in `src/`. Workaround (works today): caller-side `http.createServer` reads `runtime.stats()` + `isShuttingDown`.
    - **OpenTelemetry** — only `AsyncResource` propagation is in place (the OTel Node SDK's transport); no spans emitted by the runtime. Workaround (works today): user installs `@opentelemetry/api` and wraps their own task fns; context flows into workers automatically.
-   - **queueBackend Postgres** — not implemented. ADR-0020 §Implementation Notes: *"Tracked separately as T7-extension or T12 — this ADR records the decision, not the implementation steps."* Workaround: caller fronts the runtime with an external queue (SQS / Kafka / Postgres) per DR §5.2.1.
+   - **queueBackend SQLite** — **in-progress**. ADR-0020 records the decision (SQLite via `node:sqlite` is the only durable backend shipped by the runtime; external backends removed from scope 2026-09-24). Implementation tracked in branch `feat/sqlite-queue-backend`. §8.4 references will be updated to "complete" once the SQLite backend ships.
    - **§8 doc formalization**: ✅ DONE 2026-09-23 (this session) — 6 detailed subsections (`docs/operations/disaster-recovery.md §8.1–§8.6`). Each entry has Goal / Current state / Why deferred / Workaround today / Estimated effort to close.
 
 ### Workflow for next release (v0.3.0 — placeholder)

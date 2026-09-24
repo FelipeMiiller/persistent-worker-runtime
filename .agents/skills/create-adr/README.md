@@ -37,12 +37,12 @@ Just tell the agent you want an ADR:
 
 **English:**
 ```
-Write an ADR for using PostgreSQL as our primary database
+Write an ADR for using SQLite as our primary database
 ```
 
 **Portuguese:**
 ```
-Escreva um ADR para documentar a decisão de usar PostgreSQL
+Escreva um ADR para documentar a decisão de usar SQLite
 ```
 
 **Spanish:**
@@ -90,7 +90,7 @@ Our API requires fast session lookups at high concurrency...
 
 ## Considered Options
 - Redis (chosen)
-- PostgreSQL session table
+- SQLite session table
 - JWT stateless tokens
 
 ## Decision Outcome
@@ -140,7 +140,7 @@ accepting **the operational overhead of an additional managed service**.
 ## What the Agent Will Ask (if context is missing)
 
 **About the decision:**
-- What was decided? (noun phrase — e.g., "Use PostgreSQL for primary storage")
+- What was decided? (noun phrase — e.g., "Use SQLite for primary storage")
 - What is the current status — Accepted, Proposed, Deprecated, or Superseded?
 
 **About the context:**
@@ -176,7 +176,7 @@ ADRs live in a dedicated directory, numbered sequentially:
 
 ```
 docs/adr/
-├── 001-use-postgresql-for-primary-storage.md
+├── 001-use-sqlite-for-primary-storage.md
 ├── 002-adopt-event-driven-architecture.md
 ├── 003-use-redis-for-session-storage.md
 └── README.md   ← optional index
@@ -200,7 +200,7 @@ Common directory locations: `docs/adr/`, `docs/decisions/`, `adr/`, `.adr/`
 ```
 ❌ We needed a session store.
 ✅ Our API must support 50k concurrent sessions with automatic expiry.
-   The team evaluated Redis, PostgreSQL, and stateless JWTs. PostgreSQL
+   The team evaluated Redis, SQLite, and stateless JWTs. SQLite
    was ruled out due to TTL complexity; JWTs were ruled out because
    server-side revocation is required for security compliance.
 ```
@@ -245,9 +245,9 @@ Target 200–500 words. If the decision needs extensive explanation, link to the
 
 | Language | Example Trigger |
 |----------|-----------------|
-| English | "Write an ADR for using PostgreSQL" |
-| Portuguese | "Escreva um ADR para documentar o uso do PostgreSQL" |
-| Spanish | "Escribe un ADR sobre la decisión de usar PostgreSQL" |
+| English | "Write an ADR for using SQLite" |
+| Portuguese | "Escreva um ADR para documentar o uso do SQLite" |
+| Spanish | "Escribe un ADR sobre la decisión de usar SQLite" |
 
 All section headers and content are automatically generated in the detected language.
 

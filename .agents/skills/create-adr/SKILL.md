@@ -76,7 +76,7 @@ If the user provides minimal context, use **AskQuestion** to collect essential i
   "questions": [
     {
       "id": "adr_decision",
-      "prompt": "What was the decision made? (e.g., 'Use PostgreSQL for primary storage')",
+      "prompt": "What was the decision made? (e.g., 'Use SQLite for primary storage')",
       "options": [
         { "id": "free_text", "label": "I'll describe it in my next message" }
       ]
@@ -303,7 +303,7 @@ Before finalizing, verify:
 
 ```
 docs/adr/
-├── 001-use-postgresql-for-primary-storage.md
+├── 001-use-sqlite-via-node-sqlite-for-queue.md
 ├── 002-adopt-event-driven-architecture.md
 ├── 003-replace-jenkins-with-github-actions.md   ← supersedes ADR-001 if relevant
 └── README.md                                     ← optional index
@@ -320,9 +320,9 @@ docs/adr/
 
 ### Title as a Question
 
-**BAD**: `# ADR-001: Should we use PostgreSQL?`
+**BAD**: `# ADR-001: Should we use SQLite?`
 
-**GOOD**: `# ADR-001: Use PostgreSQL for Primary Storage`
+**GOOD**: `# ADR-001: Use SQLite for Primary Storage`
 
 Titles should record the decision, not the question. Future readers need to know *what was decided*, not what was considered.
 
@@ -332,15 +332,15 @@ Titles should record the decision, not the question. Future readers need to know
 
 **BAD**:
 ```
-We needed a database and chose PostgreSQL.
+We needed a database and chose SQLite.
 ```
 
 **GOOD**:
 ```
 Our application requires a relational database with strong ACID guarantees.
-The team has deep PostgreSQL experience. MySQL was evaluated but lacks
+The team has deep SQLite experience. MySQL was evaluated but lacks
 native support for JSONB columns, which our schema design requires.
-Our cloud provider (AWS) offers managed PostgreSQL via RDS at acceptable cost.
+Our cloud provider (AWS) offers managed SQLite via RDS at acceptable cost.
 ```
 
 Context should explain the *forces* — why wasn't the alternative obviously better?
@@ -352,7 +352,7 @@ Context should explain the *forces* — why wasn't the alternative obviously bet
 **BAD**:
 ```
 ## Consequences
-PostgreSQL is fast and reliable.
+SQLite is fast and reliable.
 ```
 
 **GOOD**:
@@ -389,7 +389,7 @@ We will use Redis for session storage.
 **GOOD**:
 ```
 ## Decision
-We will use Redis for session storage. We considered storing sessions in PostgreSQL
+We will use Redis for session storage. We considered storing sessions in SQLite
 (already in our stack) but Redis's built-in TTL support and in-memory performance
 make it significantly better suited for high-frequency session reads. The operational
 cost of an additional service is justified by the simplified session expiry logic.
@@ -412,18 +412,18 @@ The rationale is *why this option and not the others* — not just what was chos
 ## Example Prompts that Trigger This Skill
 
 ### English
-- "Write an ADR for using PostgreSQL as our primary database"
+- "Write an ADR for using SQLite as our primary database"
 - "Document our decision to adopt GraphQL"
 - "Create an ADR for moving our frontend to Next.js"
 - "I need to record why we chose Kafka over RabbitMQ"
 - "Add an architecture decision record for our authentication approach"
 
 ### Portuguese
-- "Escreva um ADR sobre a decisão de usar PostgreSQL"
+- "Escreva um ADR sobre a decisão de usar SQLite"
 - "Documente a decisão de adotar GraphQL no projeto"
 - "Crie um ADR explicando por que escolhemos Kafka"
 
 ### Spanish
-- "Escribe un ADR sobre la decisión de usar PostgreSQL"
+- "Escribe un ADR sobre la decisión de usar SQLite"
 - "Documenta la decisión de adoptar microservicios"
 - "Crea un ADR explicando por qué elegimos Next.js"

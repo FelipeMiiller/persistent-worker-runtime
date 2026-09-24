@@ -72,7 +72,7 @@
   "author": "Felipe Miiller",
   "license": "MIT",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.13.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
