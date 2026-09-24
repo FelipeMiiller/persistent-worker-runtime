@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **T13.2 orphan reclaim infinite-loop guard** — `SqliteTaskQueue.reclaimExpired()`
+  now increments the row's `attempt` counter on every reclaim and marks the
+  row `failed` (instead of `pending`) when the post-increment value exceeds
+  `max_retries`. Previously a worker that consistently crashed mid-task on the
+  same task would oscillate pending → processing → pending forever, blocking
+  the queue. BC break on `reclaimExpired()` return type — now
+  `{ reclaimed: number, exhausted: number }` instead of `number`. Two distinct
+  warnings are emitted on startup: `PersistentWorkerRuntimeSqliteOrphanReclaim`
+  (recovered rows) and `PersistentWorkerRuntimeSqliteOrphanBudgetExhausted`
+  (budget-exhausted rows).
 - **Pure-ESM `require()` warning (yarn 1.x)** — `package.json#exports."."` now
   declares both `import` and `require` conditions pointing at `src/index.js`.
   Yarn 1.x and other CJS-first resolvers no longer emit

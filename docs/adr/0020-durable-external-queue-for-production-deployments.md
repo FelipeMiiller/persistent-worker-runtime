@@ -120,10 +120,25 @@ CREATE TABLE queue_tasks (
   attempt INTEGER NOT NULL DEFAULT 0,
   max_retries INTEGER NOT NULL DEFAULT 0,
   enqueued_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  claimed_by TEXT,
+  -- T13.2: lease expiry timestamp (ms since epoch). A row in
+  -- state='processing' whose claim_expires_at < now() is treated as
+  -- an orphaned claim — the owning worker is presumed dead.
+  claim_expires_at INTEGER
 );
 CREATE INDEX queue_tasks_pending ON queue_tasks(state, priority DESC, enqueued_at ASC) WHERE state = 'pending';
+CREATE INDEX queue_tasks_processing ON queue_tasks(state, updated_at) WHERE state = 'processing';
+CREATE INDEX queue_tasks_lease_expiry ON queue_tasks(claim_expires_at) WHERE state = 'processing' AND claim_expires_at IS NOT NULL;
 ```
+
+**T13.2 — Lease-based orphan recovery (delivered 2026-09-22, hardened 2026-09-24):**
+
+- **Lease write.** Every `dequeue()` writes `claim_expires_at = now() + leaseMs` alongside the `state='processing'` transition, in the same `BEGIN IMMEDIATE` transaction. Default `leaseMs = 30000`. Long-running tasks may override via `options.leaseMs` (a future heartbeat API is tracked separately as a design option, not yet implemented).
+- **Recovery sweep.** `#recoverOrphans()` calls `reclaimExpired()` on every constructor invocation. Rows in `state='processing'` with `claim_expires_at < now()` are reclaimed — incremented `attempt` and either returned to `pending` (under budget) or marked `failed` (budget exhausted). The sweep is idempotent; safe to run from a cron / scheduler alongside `vacuumCompleted()` and `checkpointWal()`.
+- **Retry budget enforcement.** Each reclaim counts as an attempt: the `attempt` column is incremented before the budget check, and the new state is `failed` when the post-increment value exceeds `max_retries`. Without this guard a worker that consistently crashes mid-task on the same task would cause an infinite reclaim oscillation (pending → processing → pending forever). The SQL must increment `attempt` first using the pre-UPDATE value on the RHS — SQLite evaluates all SET RHS expressions using pre-UPDATE column values, so the CASE predicate and the increment see the same `attempt` value.
+- **Return shape.** `reclaimExpired()` returns `{ reclaimed: number, exhausted: number }` (BC break from the v1 `number` return). Callers emit two distinct warnings — `PersistentWorkerRuntimeSqliteOrphanReclaim` for recovered rows and `PersistentWorkerRuntimeSqliteOrphanBudgetExhausted` for budget-exhausted rows — so operators can tell the two phases apart in stderr.
+- **Out of scope (deferred).** Heartbeat extension (`leaseMs` refresh mid-task) is documented as the design option but not implemented; long tasks should pass an explicit large `leaseMs`. A future `task.heartbeat()` API is tracked separately.
 
 **Backwards compatibility:** the default `queueBackend: 'memory'` keeps the existing `TaskQueue` and tests intact. The SQLite backend is opt-in.
 
