@@ -2,7 +2,7 @@
 
 > **Status**: Living document. Update after every incident, every game day, and every architecture change.
 > **Owner**: SRE + Platform team. Reviewed quarterly.
-> **Last validated against runtime**: T5 (commit `89d1666`) — adaptive controller + worker lifecycle. T7/T8 wiring still pending; DR sections that depend on those will need amendment after T7 lands.
+> **Last validated against runtime**: v0.2.1 (post-release hygiene `99ef885`) — adaptive controller (ADR-0014, T1–T12) + runtime hardening (ADR-0024, HARDEN-01..11) all shipped. §8 captures the remaining operational gaps; nothing in this plan depends on unimplemented features.
 
 ---
 
@@ -257,16 +257,154 @@ done
 
 ## 8. Open Items (gaps to close)
 
-These are concrete items that improve DR posture. None block the runtime from being production-usable today, but each reduces RPO/RTO or operator risk.
+These are concrete items that improve DR posture. None block the runtime from being production-usable **today** — every deferred item has a user-side workaround that works against the current `src/`. The subsections below capture each gap's goal, current state, why it's deferred, the workaround that already works, and the estimated effort to close it.
 
-| Item | Status | Notes |
-|---|---|---|
-| Durable external queue (SQS / Kafka / Postgres-backed) | recommended | Eliminates in-memory queue crash loss. T7 spec to add `options.queueBackend`. |
-| SIGTERM handler with drain timeout | planned T9 | Graceful shutdown on instance termination. |
-| Health-check endpoint (`/healthz`, `/readyz`) | planned T10 | Required for LB health checks. |
-| OpenTelemetry traces | planned T10 | Speeds root-cause in incidents. |
-| Chaos game day playbook | missing | Need explicit gameday schedule. |
-| Cross-region snapshot automation | missing | Manual today; cloud-native solutions exist (AWS Backup, GCP Backup). |
+Quick reference (full detail follows):
+
+| §    | Item                                       | Status   | Workaround in place                                                                                                              |
+| ---- | ------------------------------------------ | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 8.1  | SIGTERM handler with drain timeout         | deferred | User-wired `process.on('SIGTERM', () => runtime.shutdown())` — see `skills/.../references/observability.md §Lifecycle`           |
+| 8.2  | Health-check endpoint (`/healthz`, `/readyz`) | deferred | User-side `http.createServer` reading `runtime.stats()` and `runtime.getWorkers()` (ADR-0024 / HARDEN-03)                       |
+| 8.3  | OpenTelemetry traces                       | deferred | User installs `@opentelemetry/api`; runtime preserves `AsyncResource` context across the main → worker boundary (transport only)|
+| 8.4  | Durable queue backend (Postgres `SKIP LOCKED`) | deferred | Caller fronts the runtime with an external queue (SQS / Kafka / Postgres) — see §5.2.1 and ADR-0020                            |
+| 8.5  | Chaos game day playbook                    | missing  | —                                                                                                                                  |
+| 8.6  | Cross-region snapshot automation           | missing  | —                                                                                                                                  |
+
+### 8.1 SIGTERM handler with drain timeout
+
+**Goal**: A built-in `createWorkerRuntime({ shutdown: { signals: true, drainMs: 30_000 } })` option that registers `process.on('SIGTERM')` / `process.on('SIGINT')` automatically and invokes `runtime.shutdown()` with a configurable drain timeout before SIGKILL fallback.
+
+**Current state**:
+
+- `runtime.shutdown()` is **idempotent** and does the right thing — drains the queue, closes main-thread `BroadcastChannel` instances, terminates workers, releases the Event Loop (`src/worker-runtime.js:1187`, `src/supervisor.js:835`).
+- The wiring pattern users should adopt is already documented in `skills/persistent-worker-runtime/references/observability.md §Lifecycle`:
+  ```js
+  process.on('SIGTERM', () => runtime.shutdown());
+  ```
+- **No built-in signal-listener registration** in `src/`. Installing the listener inside `createWorkerRuntime()` is currently the user's responsibility.
+
+**Why deferred**: requires settling API shape across three boundaries — (a) supervisor / runtime / process-lifecycle ownership (who owns the `process` listener when the runtime is one of many in a process?), (b) re-entrancy (a second `SIGTERM` mid-shutdown must not start a parallel drain), and (c) k8s-style grace-period semantics (`terminationGracePeriodSeconds` ≈ 30s default). All three are spec decisions rather than code; deferring avoids baking in an opinion before a production deployment exposes the real constraints.
+
+**Workaround today**: the snippet above, plus re-killing the process with `SIGKILL` after the platform grace period (`terminationGracePeriodSeconds: 30` in the k8s pod spec). Listen for both `SIGTERM` and `SIGINT`:
+
+```js
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => runtime.shutdown());
+}
+```
+
+`runtime.shutdown()` is already idempotent — a double-signal is safe.
+
+**Estimated effort to close**: ~25 LOC + 5 tests; one new ADR (or amendment to ADR-0018 §Shutdown Semantics). Owner: TBD.
+
+---
+
+### 8.2 Health-check endpoint (`/healthz`, `/readyz`)
+
+**Goal**: Stdlib HTTP endpoints returning `{ status: 'ok' | 'draining', workers, queueDepth }` for LB health checks. `/healthz` = liveness (process alive); `/readyz` = readiness (pool ready to accept work — 503 during `shutdown()`).
+
+**Current state**:
+
+- **No HTTP server in `src/`.** The runtime is a library, not a daemon — HTTP is intentionally out of scope to avoid pulling `http.createServer` into the boot path for users who don't want it (ADR-0005).
+- **All telemetry the response body needs is already implemented:** `runtime.stats()` (full counters + `adaptive` block, ADR-0014 T10-E) and `runtime.getWorkers()` (per-worker snapshot, ADR-0024 / HARDEN-03).
+- The LB-side integration is documented in §6.1 (single-instance replace runbook) and §5.2 (auto-scaler flow).
+
+**Why deferred**: a built-in opt-in server (`createWorkerRuntime({ health: { port: 3000 } })`) is the right long-term design but introduces a port-allocation concern (what if the user's app already binds 3000?), a graceful-shutdown hook (the server must 503 → drain → close), and a meaningful test surface (port-bound tests are notoriously flaky in CI). Non-trivial.
+
+**Workaround today**: a minimal caller-side handler (~12 lines):
+
+```js
+import { createServer } from 'node:http';
+
+const server = createServer((req, res) => {
+  if (req.url === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', ...runtime.stats() }));
+  } else if (req.url === '/readyz') {
+    res.writeHead(runtime.isShuttingDown ? 503 : 200);
+    res.end();
+  }
+});
+server.listen(3000);
+```
+
+`runtime.stats()` already returns counters plus `workers: {...}` and `adaptive: {...}` blocks (ADR-0024 + ADR-0014 surface). For `/readyz` 503-during-shutdown, gate on the existing `isShuttingDown` flag.
+
+**Estimated effort to close**:
+
+- _"Ship a recipe only" option_: ~30 LOC example + docs cross-link. ~10 minutes.
+- _"Built-in opt-in server" option_: ~80 LOC in `src/health-server.js` + 5 tests + shutdown coordination. 1–2 hours. Decision required.
+
+---
+
+### 8.3 OpenTelemetry traces
+
+**Goal**: Stdlib-compatible spans (`@opentelemetry/api` style) so users can plug in their own exporter (OTLP / Jaeger / Honeycomb) without forcing the runtime to import OTel itself — ADR-0005 forbids runtime deps.
+
+**Current state**:
+
+- **Partial foundation in place.** `src/task-handle.js:47` documents integration with `AsyncResource` (`node:async_hooks`) for APM/OpenTelemetry context propagation. The runtime preserves context across the main-thread → worker-thread boundary via `AsyncResource`, which is the same transport the OTel Node SDK uses under the hood.
+- **No spans emitted from the runtime.** No `tracer.startSpan`, no `span.end()`, no `exporter.flush()`. Users running OTel must wrap their own task fns.
+- **Coverage today** is whatever the user adds: queue-wait, worker-dispatch, recycle, preemption, stream-chunk — none of these are auto-traced.
+
+**Why deferred**: scope decisions dominate the implementation:
+
+- (a) One span per `execute()`, or split into queue-wait / dispatch / worker / result?
+- (b) `dispatch()` (fire-and-forget, ADR-0003) emits a lifetime span that ends on completion / error, or closes at dispatch and relies on the user-internal event chain?
+- (c) Peer-dep pattern (`@opentelemetry/api` optional, only required when the user supplies an exporter) keeps zero-deps while unlocking OTel — but requires the runtime to **not** import the package eagerly.
+
+Without production telemetry to anchor these choices, building first locks us in.
+
+**Workaround today**:
+
+1. User installs `@opentelemetry/api` and `@opentelemetry/sdk-node` themselves.
+2. Wrap task fns in `tracer.startActiveSpan('my-task', async () => {...})`.
+3. The runtime's `AsyncResource` propagation means spans created on the main thread flow into worker execution **without extra wiring** — this is already working today.
+
+**Estimated effort to close**: ~120 LOC adapter + span-boundary spec + 5 tests + ADR. Owner: TBD.
+
+---
+
+### 8.4 Durable queue backend (Postgres `SKIP LOCKED`)
+
+**Goal**: `createWorkerRuntime({ queueBackend: 'postgres', postgres: { connectionString: ... } })` so `dispatch()` writes to a Postgres queue table and workers pull via `SELECT … FOR UPDATE SKIP LOCKED`. Closes the RPO>0 gap on S1 (single-instance crash) for users who already operate Postgres.
+
+**Current state**:
+
+- **Not implemented.** ADR-0020 records the **decision** (Postgres-first; Kafka or SQS acceptable alternatives) and explicitly defers implementation: *"Tracked separately as T7-extension or T12 — this ADR records the decision, not the implementation steps."* (ADR-0020 §Implementation Notes).
+- `src/task-queue.js` is the only backend — well-tested, in-memory, zero deps.
+- §5.2.1 documents the in-memory queue crash-loss behavior and ranks this as the **#1 RPO risk** for production deployments without external durability.
+
+**Why deferred**:
+
+- **Schema design** decisions: queue table shape, indexes for FIFO + worker affinity (`affinityKey`), retention policy for completed rows.
+- **Peer-dep without breaking ADR-0005:** the runtime must work when `pg` is absent (in-memory fallback) but switch to Postgres when present. Non-trivial factory wiring.
+- **Migration story**: existing single-instance users get the new option as additive, but tests / benchmarks must keep both code paths green.
+- **Operational concerns**: queue table needs TTL / vacuum to avoid unbounded growth, plus a way to inspect backlog (`runtime.queueStats()`).
+
+**Workaround today**: per §5.2.1 — front the runtime with a **durable external queue** (SQS / Kafka / Postgres). The caller reads from the external queue and feeds the runtime via `dispatch()` (which becomes the inner, idempotent worker). For RPO=0 with the in-memory queue, ensure callers use ADR-0007 retry semantics with idempotent task fns.
+
+**Estimated effort to close**: ~300–400 LOC across `src/queue/postgres-backend.js` + `pg` peer-dep + tests + migration tooling + ADR. Owner: TBD.
+
+---
+
+### 8.5 Chaos game day playbook
+
+**Goal**: Scheduled drills (chaos-mesh / Gremlin scenarios) that exercise the runtime's failure modes systematically — single-worker kill, `SIGKILL` the whole instance, Postgres primary failover during active dispatch, broadcast-channel storm — with a written playbook so on-call engineers can run them with confidence.
+
+**Current state**: missing. §7 lists the test cadence (weekly / monthly / quarterly) but no executable drill scripts.
+
+**Estimated effort to close**: ~150 LOC bash + ~50 lines of runbook entries. Owner: TBD.
+
+---
+
+### 8.6 Cross-region snapshot automation
+
+**Goal**: Automated snapshot push from the primary region's storage to the standby region (AWS Backup plans, GCP Backup, or equivalent), replacing the manual §4 dance.
+
+**Current state**: missing. §4 §Postgres row documents today's manual cross-region snapshot.
+
+**Estimated effort to close**: depends on cloud choice (Terraform module + AWS Backup plan ≈ 80 LOC; GCP equivalent ≈ 100 LOC). Owner: TBD.
 
 ---
 
