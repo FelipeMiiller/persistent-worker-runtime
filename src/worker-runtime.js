@@ -5,12 +5,41 @@ import { ChannelRegistry } from './broadcast-channel.js';
 import { StreamConfigError, WorkerRuntimeError } from './errors.js';
 import { applyEmitterCompat } from './event-target-compat.js';
 import { scanFnDeps } from './fn-deps-scanner.js';
+import { SqliteTaskQueue } from './queue/sqlite-backend.js';
 import { isGeneratorFunction } from './stream-runner.js';
 import { Stream } from './streaming.js';
 import { Supervisor } from './supervisor.js';
 import { TaskHandle } from './task-handle.js';
 import { TaskQueue } from './task-queue.js';
 import { WorkerHandle } from './worker-handle.js';
+
+/**
+ * Factory for the task queue backend selected via `options.queueBackend`
+ * (ADR-0020). `memory` is the default — preserves the historical in-memory
+ * `TaskQueue` behaviour used by tests and small single-instance workloads.
+ * `sqlite` selects `SqliteTaskQueue` and requires `options.sqlite.path`.
+ */
+function createTaskQueue(options) {
+  const backend = options.queueBackend || 'memory';
+  if (backend === 'memory') {
+    return new TaskQueue({
+      maxQueueSize: options.maxQueueSize || 2000,
+      queueTimeoutMs: options.queueTimeoutMs || 30000,
+    });
+  }
+  if (backend === 'sqlite') {
+    if (!options.sqlite || typeof options.sqlite.path !== 'string') {
+      throw new TypeError('queueBackend: "sqlite" requires options.sqlite.path (string).');
+    }
+    return new SqliteTaskQueue({
+      path: options.sqlite.path,
+      maxQueueSize: options.maxQueueSize || 2000,
+      queueTimeoutMs: options.queueTimeoutMs || 30000,
+    });
+  }
+  throw new TypeError(`Unknown queueBackend: "${backend}". Expected "memory" or "sqlite".`);
+}
+
 import {
   isDefaultSizing,
   resolveAdaptiveEnabled,
@@ -319,10 +348,7 @@ export class WorkerRuntime extends EventTarget {
       }
     }
 
-    this.#queue = new TaskQueue({
-      maxQueueSize: options.maxQueueSize || 2000,
-      queueTimeoutMs: options.queueTimeoutMs || 30000,
-    });
+    this.#queue = createTaskQueue(options);
 
     this.#supervisor = new Supervisor({
       workers: workerCount,

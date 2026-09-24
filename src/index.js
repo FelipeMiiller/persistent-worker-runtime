@@ -14,6 +14,7 @@ export {
   WorkerCrashError,
   WorkerRuntimeError,
 } from './errors.js';
+export { SqliteTaskQueue } from './queue/sqlite-backend.js';
 export { Stream } from './streaming.js';
 export { Supervisor } from './supervisor.js';
 export { TaskHandle } from './task-handle.js';

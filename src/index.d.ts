@@ -234,6 +234,31 @@ export interface WorkerRuntimeOptions {
   queueTimeoutMs?: number;
 
   /**
+   * ADR-0020: selects the task queue backend. `'memory'` (default) is the
+   * historical in-memory queue used by tests and small single-instance
+   * workloads. `'sqlite'` switches to a durable queue backed by
+   * `node:sqlite` (stdlib, Node ≥ 22.13); pending tasks survive a runtime
+   * crash. With `'sqlite'`, `sqlite.path` is required. RPO = 0 for
+   * enqueued tasks (ADR-0020).
+   */
+  queueBackend?: 'memory' | 'sqlite';
+
+  /**
+   * Configuration block for the SQLite queue backend. Ignored unless
+   * `queueBackend: 'sqlite'`.
+   */
+  sqlite?: {
+    /**
+     * Filesystem path to the SQLite file. Use `:memory:` for an
+     * in-process, non-durable SQLite DB (useful for tests). For
+     * production, prefer a stable path under `/var/lib/pwr/` (or
+     * equivalent). The file is created if it does not exist; WAL mode
+     * keeps writes non-blocking.
+     */
+    path: string;
+  };
+
+  /**
    * HARDEN-01 (ADR-0024): default per-task timeout (ms) when caller does not
    * specify `timeoutMs` on a task. Defaults to `5000`. A one-time
    * `PersistentWorkerRuntimeTimeoutMsDefault` process warning fires if the
