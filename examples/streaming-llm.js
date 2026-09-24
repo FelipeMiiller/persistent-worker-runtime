@@ -19,7 +19,10 @@
  *   observers see exactly one abort.
  * - Runtime-level events (`stream:created`, `stream:chunk`,
  *   `stream:end`, `stream:aborted`) are exposed on the runtime's
- *   EventEmitter for observability layers.
+ *   EventTarget (web standard) for observability layers. Listener
+ *   uses `addEventListener`; payload is on `event.detail`. See
+ *   `examples/event-target-pattern.js` for the recommended pattern
+ *   with AbortController cleanup.
  *
  * Run: `node examples/streaming-llm.js`
  */
@@ -57,14 +60,22 @@ async function main() {
   const runtime = await createWorkerRuntime({ workers: 1 });
 
   // Observability — wire runtime-level events before stream() so we
-  // don't miss any. Each event carries { taskId, ... }.
+  // don't miss any. Uses web-standard EventTarget (`addEventListener`);
+  // payload lives on `event.detail` (the runtime dispatches a
+  // CustomEvent per event).
   const eventCounts = { created: 0, chunk: 0, end: 0, aborted: 0 };
-  runtime.on('stream:created', () => eventCounts.created++);
-  runtime.on('stream:chunk', () => eventCounts.chunk++);
-  runtime.on('stream:end', () => eventCounts.end++);
-  runtime.on('stream:aborted', ({ reason }) => {
+  runtime.addEventListener('stream:created', (_event) => {
+    eventCounts.created++;
+  });
+  runtime.addEventListener('stream:chunk', (_event) => {
+    eventCounts.chunk++;
+  });
+  runtime.addEventListener('stream:end', (_event) => {
+    eventCounts.end++;
+  });
+  runtime.addEventListener('stream:aborted', (event) => {
     eventCounts.aborted++;
-    console.log(`  [runtime] stream:aborted — reason: ${reason}`);
+    console.log(`  [runtime] stream:aborted — reason: ${event.detail.reason}`);
   });
 
   // Pre-abort timer — cancels the stream after AUTO_ABORT_MS to

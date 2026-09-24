@@ -14,8 +14,11 @@
  * - As the consumer drains, the buffer drops below HWM / 2 →
  *   `MSG_STREAM_RESUME`, the worker continues.
  * - Both crossings emit `stream:backpressure { state, queueLength }`
- *   on the runtime's EventEmitter. Telemetry observers can graph
- *   these events to detect consumer starvation.
+ *   on the runtime's EventTarget. Telemetry observers can graph
+ *   these events to detect consumer starvation. Listener uses
+ *   `addEventListener` (web standard) and reads payload from
+ *   `event.detail`. See `examples/event-target-pattern.js` for the
+ *   recommended pattern with AbortController cleanup.
  * - `runtime.stats()` reports `activeStreams` while the stream is
  *   in flight.
  *
@@ -38,18 +41,20 @@ async function main() {
   const runtime = await createWorkerRuntime({ workers: 1 });
 
   // Telemetry — count crossing events so we can verify that
-  // backpressure actually engaged.
+  // backpressure actually engaged. Uses web-standard EventTarget
+  // (`addEventListener`); payload lives on `event.detail`.
   const backpressureLog = [];
   let pausedCount = 0;
   let resumedCount = 0;
-  runtime.on('stream:backpressure', (e) => {
+  runtime.addEventListener('stream:backpressure', (event) => {
+    const { state, queueLength } = event.detail;
     backpressureLog.push({
       t: Date.now() - t0,
-      state: e.state,
-      queueLength: e.queueLength,
+      state,
+      queueLength,
     });
-    if (e.state === 'paused') pausedCount++;
-    else if (e.state === 'resumed') resumedCount++;
+    if (state === 'paused') pausedCount++;
+    else if (state === 'resumed') resumedCount++;
   });
 
   // Synthetic CSV producer — yields { row, payload } objects. In a
