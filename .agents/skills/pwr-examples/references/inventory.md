@@ -11,6 +11,9 @@ Last verified: 2026-09-24.
 | `adaptive-concurrency.js` | `[perf-tested]` | totalMs for 50-task CPU burst (auto vs fixed) | 2026-09-24 | Part 1 = telemetry shape; Part 2 = load burst perf |
 | `broadcast-cache-invalidation.js` | `[perf-tested]` | cold vs warm avgLatencyMs per read | 2026-09-24 | 5 phases; cumulative saving printed in take-away |
 | `cancel-on-disconnect.js` | `[perf-tested]` | wall-clock for 5 s task (cancel @100 ms vs run-to-completion) | 2026-09-24 | Scenario C = pre-aborted sync reject |
+| `durable-task-queue.js` | `[perf-tested]` | tasksPreserved (memory=0, sqlite=N) across simulated crash | 2026-09-24 | 200/200 preserved with SQLite, 0/200 with memory |
+| `durable-task-priority.js` | `[perf-tested]` | recoveredSize + firstPriorityDequeued + affinityMatchesFirst after restart | 2026-09-24 | 10/10 preserved with priority + affinity intact |
+| `durable-task-vacuum.js` | `[perf-tested]` | failedRowsPending (no-GC=2000, with-GC=0) + checkpointWalMs | 2026-09-24 | Queue-only (no workers); failed rows are GC-eligible |
 | `event-target-pattern.js` | `[perf-tested]` | cleanup wall-clock + apiCalls (1 vs N) | 2026-09-24 | LISTENER_COUNT capped at 10 (Node EventTarget hard limit) |
 | `express-outbox-email.js` | `[perf-tested]` | httpDurationMs (dispatch vs sequential) | 2026-09-23 | 76× speedup measured |
 | `image-resizer-batch.js` | `[perf-tested]` | setInterval tick count during burst | 2026-09-24 | 27× more ticks with workers |
@@ -21,7 +24,7 @@ Last verified: 2026-09-24.
 | `worker-recycling.js` | `[perf-tested]` | per-cycle overhead (recycling latency, not throughput win) | 2026-09-24 | Event-driven wait replaces polling waitFor |
 | `zero-copy-image.js` | `[perf-tested]` | elapsedMs (transfer vs copy) + sender byteLength | 2026-09-23 | 3.07× speedup measured at 31.64 MB |
 
-**Coverage:** 12/12 examples tagged `[perf-tested]` (with measurable metric). 0 `[correctness]`, 0 `[api-surface]`.
+**Coverage:** 15/15 examples tagged `[perf-tested]` (with measurable metric). 0 `[correctness]`, 0 `[api-surface]`.
 
 ## Re-tagging history
 
@@ -41,7 +44,7 @@ Last verified: 2026-09-24.
 ## Verification commands
 
 ```bash
-# Confirm 12 examples exist
+# Confirm 15 examples exist
 ls examples/*.js | wc -l
 
 # Confirm each has a header tag in the first JSDoc line
@@ -55,4 +58,4 @@ for f in examples/*.js; do
 done
 ```
 
-Expected: 12 lines, 12 tag matches, 0 failures.
+Expected: 15 lines, 15 tag matches, 0 failures.

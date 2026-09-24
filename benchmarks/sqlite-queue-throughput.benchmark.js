@@ -325,6 +325,70 @@ async function runBenchmark() {
     console.log(`    memory/sqlite throughput ratio: ${ratio}×\n`);
   }
 
+  // ──────────────────────────────────────────────────────────────────
+  // [4] Crash recovery cost — restart-on-same-path overhead
+  // ──────────────────────────────────────────────────────────────────
+  console.log('[4/4] Crash recovery cost (enqueue N, destroy, reopen)...\n');
+
+  /**
+   * Simulates a runtime crash: enqueue N tasks into queue A, drop the
+   * reference (no graceful shutdown), then open queue B on the same
+   * path. Measures how long the constructor of B takes (the
+   * `#recoverPending` scan + TaskHandle materialization) and how
+   * many of the N tasks B finds in pending state.
+   *
+   * For the in-memory TaskQueue the second instance finds 0 tasks
+   * (all lost on crash) — that's the baseline cost of "no recovery".
+   */
+  async function recoveryCycle(backend, n, cycleIdx) {
+    const dbPath = join(tmpRoot, `queue-recovery-${backend}-${cycleIdx}.db`);
+    const factory =
+      backend === 'sqlite'
+        ? () => new SqliteTaskQueue({ path: dbPath, maxQueueSize: n + 1000 })
+        : () => new TaskQueue({ maxQueueSize: n + 1000 });
+
+    const q1 = factory();
+    const tasks = [];
+    for (let i = 0; i < n; i++) {
+      tasks.push(makeHandle({ priority: i % 10 }));
+    }
+    const enqStart = performance.now();
+    for (const t of tasks) await q1.enqueue(t);
+    const enqEnd = performance.now();
+    q1.destroy(); // leaves pending rows in place (sqlite); loses everything (memory)
+
+    const reopenStart = performance.now();
+    const q2 = factory();
+    const reopenEnd = performance.now();
+    const recovered = q2.size;
+    const recoveryMs = reopenEnd - reopenStart;
+    q2.destroy();
+
+    return {
+      backend,
+      n,
+      enqMs: enqEnd - enqStart,
+      recoveryMs,
+      recovered,
+      lossPct: (((n - recovered) / n) * 100).toFixed(2),
+    };
+  }
+
+  const recoverySizes = [100, 1000, 10000];
+  for (let i = 0; i < recoverySizes.length; i++) {
+    const n = recoverySizes[i];
+    const memRec = await recoveryCycle('memory', n, i);
+    const sqlRec = await recoveryCycle('sqlite', n, i);
+    console.log(`  ${fmt(n).padStart(6)} tasks enqueued + simulated crash:`);
+    console.log(
+      `    memory: recovered ${memRec.recovered}/${memRec.n}  (${memRec.lossPct}% lost)  recovery time ${fmtMs(memRec.recoveryMs)}`,
+    );
+    console.log(
+      `    sqlite: recovered ${sqlRec.recovered}/${sqlRec.n}  (${sqlRec.lossPct}% lost)  recovery time ${fmtMs(sqlRec.recoveryMs)}`,
+    );
+  }
+  console.log('');
+
   console.log('=====================================================================');
   console.log('CONCLUSION:');
   console.log(`- SqliteTaskQueue round-trip is ~${slowdown}× slower than the in-memory TaskQueue`);
