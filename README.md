@@ -744,6 +744,7 @@ Run any example directly with `node examples/<name>.js`:
 | `broadcast-cache-invalidation.js` | L1 cache invalidation across workers via `context.channel()` + `runtime.broadcast()`. |
 | `streaming-llm.js` | Token-streaming LLM-style consumer — TTFT measurement, `AbortSignal` mid-stream, runtime event counts. |
 | `streaming-csv-export.js` | Fast producer + slow consumer with `highWaterMark: 8` — prints the backpressure timeline (paused / resumed crossings). |
+| `event-target-pattern.js` | EventTarget observation patterns: `addEventListener` with `{ signal }` for AbortController cleanup, bounded-N event collector, manual `removeEventListener`. Recommended for v0.3.x+ code (the runtime now extends web-standard `EventTarget`; the `.on()` / `.off()` compat shim is scheduled for v0.4.x removal). |
 
 ## 🤖 Agent Skill (Embedded)
 
