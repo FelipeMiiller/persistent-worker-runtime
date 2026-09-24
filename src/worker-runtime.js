@@ -55,6 +55,12 @@ export class WorkerRuntime extends EventTarget {
   #supervisor;
   #isStarted = false;
   #isShuttingDown = false;
+  // ADR-0024 / DR §8.2: distinguishes "draining in progress" from "drained
+  // to completion". `isAlive()` returns true mid-drain (process is alive
+  // while workers finish) and false once drain completes. `#isShuttingDown`
+  // alone can't make that distinction because it flips at the START of
+  // `shutdown()` — long before workers finish.
+  #isFullyShutDown = false;
   #maxTasksPerWorker;
   #maxMemoryMb;
   #forceKillOnTimeout;
@@ -692,6 +698,68 @@ export class WorkerRuntime extends EventTarget {
   }
 
   /**
+   * ADR-0024 / DR §8.2: liveness probe.
+   *
+   * Returns `{ ok: true }` when the process is healthy: started, with at
+   * least one worker, and not yet fully drained. Returns `{ ok: false,
+   * reason }` when the process should be considered dead by external
+   * observers (k8s livenessProbe, LB health check, cron watchdog):
+   *
+   *   - `'not-started'`: `createWorkerRuntime()` was bypassed and `start()`
+   *      has not been called.
+   *   - `'no-workers'`: the worker pool is empty after a crash cascade.
+   *   - `'shutting-down'`: `shutdown()` has fully resolved (drain done).
+   *
+   * Mid-drain (between `shutdown()` start and full completion) returns
+   * `{ ok: true }` — the process is still alive while workers finish their
+   * current tasks. SIGTERM is the orchestrator's signal to kill, not a
+   * liveness-probe failure.
+   *
+   * Transport is the caller's responsibility: k8s liveness probe, LB
+   * target-group health check, polling script, sidecar.
+   *
+   * @returns {{ ok: boolean, reason?: string }}
+   */
+  isAlive() {
+    if (!this.#isStarted) return { ok: false, reason: 'not-started' };
+    if (this.#isFullyShutDown) return { ok: false, reason: 'shutting-down' };
+    if (this.#supervisor.totalWorkers === 0) {
+      return { ok: false, reason: 'no-workers' };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * ADR-0024 / DR §8.2: readiness probe.
+   *
+   * Returns `{ ok: true }` when the runtime is ready to accept new work.
+   * Returns `{ ok: false, reason }` when new work should NOT be routed
+   * here:
+   *
+   *   - `'not-started'`: `start()` has not been called.
+   *   - `'shutting-down'`: `shutdown()` is in progress OR has resolved.
+   *      No new work, even mid-drain.
+   *   - `'no-workers'`: pool is empty — dispatching would queue forever.
+   *   - `'queue-full'`: pending queue at capacity (`size >= maxQueueSize`).
+   *
+   * Transport is the caller's responsibility: k8s readinessProbe, LB
+   * target-group membership, deploy gate, capacity planner.
+   *
+   * @returns {{ ok: boolean, reason?: string }}
+   */
+  isReady() {
+    if (!this.#isStarted) return { ok: false, reason: 'not-started' };
+    if (this.#isShuttingDown) return { ok: false, reason: 'shutting-down' };
+    if (this.#supervisor.totalWorkers === 0) {
+      return { ok: false, reason: 'no-workers' };
+    }
+    if (this.#queue.size >= this.#queue.maxQueueSize) {
+      return { ok: false, reason: 'queue-full' };
+    }
+    return { ok: true };
+  }
+
+  /**
    * HARDEN-07 (ADR-0024 C2): forces an immediate recycle check for the
    * given worker. Operators use this to drain a specific worker before
    * a rolling deploy, or to trigger a recycle right after a manual
@@ -785,6 +853,22 @@ export class WorkerRuntime extends EventTarget {
    */
   get adaptiveEnabled() {
     return this.#adaptiveEnabled;
+  }
+
+  /**
+   * ADR-0024 / DR §8.2: explicit shutdown flag getter. Was previously only
+   * observable through side-channels (`getWorkers()` returns `[]` mid-
+   * shutdown). Exposed now because liveness/readiness probes are clearer
+   * when callers can ask the runtime directly.
+   *
+   * Flips to `true` at the START of `shutdown()` and stays `true`
+   * through drain + post-shutdown. For "is the process alive mid-drain",
+   * use `runtime.isAlive()` which distinguishes draining from drained.
+   *
+   * @returns {boolean}
+   */
+  get isShuttingDown() {
+    return this.#isShuttingDown;
   }
 
   /**
@@ -1250,6 +1334,10 @@ export class WorkerRuntime extends EventTarget {
     // do not keep the Event Loop alive after worker shutdown.
     this.#channelRegistry.closeAll();
     await this.#supervisor.shutdown();
+    // ADR-0024 / DR §8.2: `isAlive()` returns false once drain is fully
+    // resolved. Mid-drain (between this line and the previous one) the
+    // process is still alive — workers finish their current tasks.
+    this.#isFullyShutDown = true;
   }
 
   /**

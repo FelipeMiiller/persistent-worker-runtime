@@ -20,6 +20,13 @@ export class TaskQueue {
     return this.#queue.length;
   }
 
+  // ADR-0024 / DR §8.2: capacity ceiling exposed for `runtime.isReady()` so
+  // the readiness probe can flag a saturated queue without `runtime.stats()`
+  // scraping. Mirrors the constructor option.
+  get maxQueueSize() {
+    return this.#maxQueueSize;
+  }
+
   /**
    * Returns the highest-priority task in the queue WITHOUT removing it.
    * Used by `WorkerRuntime.#scheduleNext()` (HARDEN-09 / ADR-0024 D1)

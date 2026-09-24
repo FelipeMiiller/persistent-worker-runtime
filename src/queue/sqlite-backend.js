@@ -334,6 +334,13 @@ export class SqliteTaskQueue {
     return this.#closed ? 0 : this.#size;
   }
 
+  // ADR-0024 / DR §8.2: capacity ceiling exposed for `runtime.isReady()`.
+  // Mirrors the constructor option. Same getter as `TaskQueue.maxQueueSize`
+  // so the runtime can read either backend uniformly.
+  get maxQueueSize() {
+    return this.#maxQueueSize;
+  }
+
   /**
    * Returns the highest-priority pending task WITHOUT claiming it.
    * Mirrors `TaskQueue.peek()`. Materializes a TaskHandle on demand when

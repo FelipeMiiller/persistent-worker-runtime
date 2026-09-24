@@ -639,6 +639,34 @@ export class WorkerRuntime extends EventTarget {
   start(): Promise<this>;
 
   /**
+   * ADR-0024 / DR §8.2: liveness probe. Returns `{ ok: true }` while the
+   * process is healthy (started, pool non-empty, drain in progress).
+   * Returns `{ ok: false, reason }` when the process should be considered
+   * dead by external observers (k8s livenessProbe, LB health check).
+   *
+   * `reason` is set when `ok` is `false`:
+   *   - `'not-started'` — `start()` has not been called.
+   *   - `'no-workers'` — pool is empty after a crash cascade.
+   *   - `'shutting-down'` — drain fully resolved.
+   *
+   * Mid-drain (between `shutdown()` start and full completion) returns
+   * `{ ok: true }`. SIGTERM is the orchestrator's signal to kill, not a
+   * liveness-probe failure.
+   */
+  isAlive(): { ok: boolean; reason?: string };
+
+  /**
+   * ADR-0024 / DR §8.2: readiness probe. Returns `{ ok: true }` when the
+   * runtime is ready to accept new work. Returns `{ ok: false, reason }`
+   * when new work should NOT be routed here:
+   *   - `'not-started'` — `start()` has not been called.
+   *   - `'shutting-down'` — drain in progress OR resolved.
+   *   - `'no-workers'` — pool is empty.
+   *   - `'queue-full'` — pending queue at capacity.
+   */
+  isReady(): { ok: boolean; reason?: string };
+
+  /**
    * HARDEN-03 (ADR-0024): synchronous snapshot of the worker pool. Returns
    * a fresh array each call — callers may mutate without affecting state.
    */
