@@ -45,6 +45,16 @@ jobs:
           fetch-depth: 1
           ref: ${{ github.event.pull_request.head.sha }}
 
+      # commitlint needs both `@commitlint/cli` and the conventional preset
+      # `@commitlint/config-conventional` resolvable on disk. npx --yes with
+      # --ignore-scripts only pulls the top-level package; the preset is a
+      # peer / extends dep, so we install both up front.
+      - name: Install commitlint + config-conventional
+        run: |
+          npm install --no-save --no-audit --no-fund \
+            @commitlint/cli@19.6.0 \
+            @commitlint/config-conventional@19.6.0
+
       - name: Validate first commit message
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
@@ -58,10 +68,10 @@ jobs:
               throw new Error('No commits found in pull request');
             }
             const commit = commits[0];
-            // commitlint reads commit message from `process.argv[2]` (a file
-            // path) in the default CLI flow. In the GitHub Action context the
-            // simplest robust path is to write the message to a temp file
-            // and invoke `commitlint --edit <file>`.
+            // commitlint reads commit message from the file passed to --edit.
+            // In a GitHub Action context we have to materialize the message
+            // to disk because the workspace's first-commit subject is not
+            // available as process.argv[2] without that flag.
             const fs = require('node:fs');
             const path = require('node:path');
             const tmp = path.join(process.cwd(), `.commitlint-msg-${commit.sha}`);
@@ -69,10 +79,8 @@ jobs:
             const { exitCode, stdout, stderr } = await exec.getExecOutput(
               'npx',
               [
-                '-q',
-                '--yes',
-                '--ignore-scripts',
-                '@commitlint/cli@19.6.0',
+                '--no-install',
+                'commitlint',
                 '--config', 'commitlint.config.cjs',
                 '--edit', tmp,
               ],
