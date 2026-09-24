@@ -6,6 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Runtime liveness + readiness probes** (DR §8.2 closure) — `runtime.isAlive()` and
+  `runtime.isReady()` return `{ ok: boolean, reason?: string }`. Reasons:
+  `isAlive` → `not-started | no-workers | shutting-down | (true)`;
+  `isReady` → `not-started | shutting-down | no-workers | queue-full | (true)`.
+  Transport is the caller's responsibility — the runtime stays a library per
+  ADR-0005 (no HTTP server, signal handlers, or timers in `src/`). User wires
+  Fastify/Express routes, k8s probes, cron, or polling scripts around the
+  two methods. Mid-drain `isAlive()` returns `true` (process is alive while
+  workers finish); SIGTERM is the orchestrator's kill signal, not a
+  liveness-probe failure.
+- **`get isShuttingDown()` getter** — closes a long-standing TS↔runtime drift
+  where `get isShuttingDown(): boolean` was declared in `src/index.d.ts` but
+  never implemented. Exposed so observers don't have to infer shutdown state
+  from `getWorkers() === []`.
+- **`get maxQueueSize()` on `TaskQueue` and `SqliteTaskQueue`** — previously
+  private. Required by `runtime.isReady()` to detect the `queue-full`
+  condition without `runtime.stats()` scraping.
+- **`benchmarks/hot-path-micro.benchmark.js` perf gate** — wired into
+  `npm run validate`. Establishes p99 budgets for `dispatch()`, `stats`,
+  `isAlive()` (≤5μs), and `isReady()` (≤5μs); any regression exits 1 in CI.
+  Required to keep the probe-overhead contract honest over time.
+- **`cpu-saturation.benchmark.js` Phase E-4** — exercises the probes under
+  idle / queue-full / draining states with hard assertions on each `reason`.
+
 ### Fixed
 
 - **T13.2 orphan reclaim infinite-loop guard** — `SqliteTaskQueue.reclaimExpired()`

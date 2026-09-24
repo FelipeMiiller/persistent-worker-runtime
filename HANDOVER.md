@@ -85,9 +85,9 @@
 3. **Spec-precision follow-ups** (cheap, non-blocking, ~25 lines total):
    - `RECYCLE-08` — negative-case assertion in `test/worker-recycling.test.js`.
    - `PREEMPT-06` — explicit field-name assertions in `worker_replaced` event payload.
-   - `PREEMPT-08` — shutdown-during-pending-watchdog `unhandledRejection` regression test.
+   - ~~`PREEMPT-08` — shutdown-during-pending-watchdog `unhandledRejection` regression test.~~ **Covered 2026-09-24** in `test/worker-runtime.test.js` ("shutdown during pending watchdog does NOT emit unhandledRejection (PREEMPT-08)").
 4. **`tasks.md` template migration** — pre-existing drift in `.specs/features/adaptive-concurrency/tasks.md` and `.specs/features/persistent-worker-runtime/tasks.md`. Both fail `validate_tasks.py` with 4 structural errors each (missing `## Test Coverage Matrix`, `## Gate Check Commands`, `## Execution Plan`, `## Task Breakdown` + per-task `**Tests**:` / `**Gate**:` fields). Dedicated session with human review.
-5. **DR plan §8 open items** — SIGTERM handler, `/healthz` endpoint, OpenTelemetry, durable queue backend (SQLite via `node:sqlite` per ADR-0020). **3 are deferred, 1 is in-progress** (revised 2026-09-24: external queue backends removed from queue scope; SQLite backend shipping in active branch `feat/sqlite-queue-backend`):
+5. **DR plan §8 open items** (revised 2026-09-24) — SQLite durable queue shipped (T13 / `51f8007` + `181c72c`); `/healthz` closed via `runtime.isAlive()` + `runtime.isReady()` (T8.2 / `e894c69`). Remaining: SIGTERM handler (deferred), OpenTelemetry + Postgres (permanent deferral by rule — ADR-0005, see AGENTS.md cross-ref).
    - **SIGTERM handler** — `runtime.shutdown()` exists and is idempotent, but no built-in `process.on('SIGTERM', ...)` registration in `src/`. Workaround (works today): user wires a 3-line listener; pattern documented in `skills/persistent-worker-runtime/references/observability.md §Lifecycle`.
    - **/healthz endpoint** — zero HTTP server in `src/`. Workaround (works today): caller-side `http.createServer` reads `runtime.stats()` + `isShuttingDown`.
    - **OpenTelemetry** — only `AsyncResource` propagation is in place (the OTel Node SDK's transport); no spans emitted by the runtime. Workaround (works today): user installs `@opentelemetry/api` and wraps their own task fns; context flows into workers automatically.

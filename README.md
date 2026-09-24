@@ -635,7 +635,10 @@ This package is also the **reference implementation** for an open RFC proposing 
 
 The RFC draft §7 enumerates the **current coverage of the reference implementation** (basic tasks, stateful workers, BroadcastChannel, streaming, default pool sizing, adaptive concurrency) and §8 lists the open questions for community discussion (top-level `node:worker_runtime` vs. extension to `node:worker_threads`; functional serialization shape; `AsyncLocalStorage` snapshotting across worker boundaries).
 
-> 📦 **Production deployment guidance** (SIGTERM handler, `/healthz`, OpenTelemetry spans, durable queue backend) is tracked in [`docs/operations/disaster-recovery.md §8`](docs/operations/disaster-recovery.md#8-open-items-gaps-to-close). All four are deferred for the reference implementation today — every item has a user-side workaround that works against current `src/`, plus an effort estimate to close. See §8.1–§8.6 for the per-item detail.
+> 📦 **Production deployment guidance** is tracked in [`docs/operations/disaster-recovery.md §8`](docs/operations/disaster-recovery.md#8-open-items-gaps-to-close):
+> - **`/healthz` / `/readyz` closed (2026-09-24)** — runtime exposes `isAlive()` + `isReady()` (DR §8.2). User wires HTTP / cron / script transport around the two probes — the runtime stays a library per ADR-0005 (no HTTP server in `src/`).
+> - **SIGTERM handler with drain timeout** — user-wired `process.on('SIGTERM', () => runtime.shutdown())` (DR §8.1).
+> - **OpenTelemetry spans + Postgres SKIP LOCKED backend** — **permanently out-of-scope by rule** (ADR-0005 pure vanilla JS, zero external runtime deps). User installs `@opentelemetry/api` themselves; user fronts with their own Postgres queue. See `AGENTS.md` cross-ref.
 
 ---
 
