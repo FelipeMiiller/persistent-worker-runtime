@@ -1,5 +1,5 @@
 /**
- * Example: Streaming CSV export with observable backpressure
+ * [perf-tested] Example: Streaming CSV export with observable backpressure
  *
  * Demonstrates how the runtime throttles a fast generator when the
  * consumer can't keep up — the same shape as exporting rows to a

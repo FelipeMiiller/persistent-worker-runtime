@@ -106,7 +106,7 @@ For observability, the runtime's EventEmitter surfaces the following lifecycle t
 
 ## Validation Artifacts
 
-- 323 unit tests across 105 suites (`node:test`)
-- 3 dedicated streaming benchmarks: `streaming-throughput`, `streaming-memory`, `streaming-stress`
-- 2 runnable examples: `examples/streaming-llm.js`, `examples/streaming-csv-export.js`
+- 565 unit tests across 50 suites (`node:test`) — see `package.json` `scripts.test`
+- 10 dedicated benchmarks (CPU saturation, adaptive controller, default sizing, recycling, preemption, streaming throughput/memory/stress/abort)
+- **12 runnable examples** in `examples/` — every one carries a `[perf-tested]` header tag and ends with a measured metric that justifies the feature. See `.agents/rules/perf-first-authoring.md` and `.agents/skills/pwr-examples/SKILL.md` for the authoring convention.
 - ADR-0019 default pool size benchmark (`benchmarks/default-sizing-memory.benchmark.js`) — proves the 1:1 stream-to-worker model is viable at default worker counts

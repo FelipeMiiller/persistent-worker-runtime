@@ -1,5 +1,5 @@
 /**
- * Example: Token-streaming LLM-style consumer
+ * [perf-tested] Example: Token-streaming LLM-style consumer
  *
  * Demonstrates how to use `runtime.stream()` to feed tokens to a
  * caller as they're generated — the same shape as OpenAI's

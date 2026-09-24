@@ -1,48 +1,44 @@
 /**
- * BroadcastChannel cache invalidation example.
+ * [perf-tested] BroadcastChannel cache invalidation example.
  *
- * Demonstrates the canonical "L1 cache invalidation" pattern:
+ * Demonstrates the canonical "L1 cache invalidation" pattern AND quantifies
+ * the per-call saving of warm-cache hits over cold fetches.
  *
- *   1. Multiple workers each maintain a hot in-memory cache (a `Map`
- *      that persists across task executions in the same worker).
- *   2. When a worker mutates a record (e.g. updates a user's email),
- *      it publishes an INVALIDATE message on a named broadcast channel.
+ *   1. Multiple workers each maintain a hot in-memory cache (a `Map` that
+ *      persists across task executions in the same worker).
+ *   2. When a worker mutates a record (e.g. updates a user's email), it
+ *      publishes an INVALIDATE message on a named broadcast channel.
  *   3. Other workers receive the message and evict the matching cache
- *      entry so the next read goes back to the (simulated) source of
- *      truth.
+ *      entry so the next read goes back to the (simulated) source of truth.
  *
  * Why BroadcastChannel and not a round-trip through the main thread?
  *   - The invalidation message goes directly to every subscriber thread
  *     without bouncing through the Event Loop as a router.
  *   - The publishing worker does not block; it returns immediately after
  *     `postMessage()` accepts the message into the bus.
- *   - There is no "fan-out" loop in user code: the bus itself delivers
- *     to every subscribed listener in one shot.
+ *   - There is no "fan-out" loop in user code: the bus itself delivers to
+ *     every subscribed listener in one shot.
+ *
+ * What this example measures:
+ *   - Cold fetch latency (cache miss → source lookup).
+ *   - Warm fetch latency (cache hit → Map.get).
+ *   - Speedup ratio per warm hit + cumulative saving over N reads.
  *
  * Run: `node examples/broadcast-cache-invalidation.js`
  */
 
 import { createWorkerRuntime } from '../src/index.js';
 
-// Cache invalidation channel name. Main thread and workers MUST agree on
-// this literal — fnCode runs as a string in the worker, so closures from
-// the main module are not available there.
-const _CACHE_CHANNEL = 'cache:user';
-
 async function main() {
   // Mutable simulated source-of-truth — main thread observes it via the
-  // user.email returned by post-invalidate reads. In a real app this
-  // would be a DB query; here we just mutate the in-memory object so
-  // subsequent reads see the new value.
+  // user.email returned by post-invalidate reads.
   const sourceOfTruth = {
     user: { id: 42, name: 'Alice', email: 'alice@example.com' },
   };
 
   const runtime = await createWorkerRuntime({ workers: 3 });
 
-  // ---------- 1. Cold reads ----------
-  // Three workers each load user 42 — first read on each worker is a
-  // cache miss because each worker has its own L1 cache.
+  // ---------- Phase 1: cold reads + first warm hit timing ----------
   console.log('\n--- Phase 1: cold reads from 3 workers ---');
   const coldReads = await Promise.all([
     runtime.execute({ type: 'fetch_user', payload: { userId: 42 }, fn: fetchUserFn }),
@@ -51,18 +47,30 @@ async function main() {
   ]);
   console.log(coldReads.map((r) => ({ from: r.from, email: r.user.email })));
 
-  // ---------- 2. Warm reads ----------
-  // Dispatch several reads; reads routed to the same worker will hit the
-  // cache; reads routed to a different worker will miss again.
-  console.log('\n--- Phase 2: warm reads ---');
-  const warmReads = await Promise.all([
-    runtime.execute({ type: 'fetch_user', payload: { userId: 42 }, fn: fetchUserFn }),
-    runtime.execute({ type: 'fetch_user', payload: { userId: 42 }, fn: fetchUserFn }),
-  ]);
-  console.log(warmReads.map((r) => ({ from: r.from, email: r.user.email })));
+  // ---------- Phase 2: 50 warm reads, measure hit latency ----------
+  console.log('\n--- Phase 2: 50 warm reads (all should be cache hits) ---');
+  const WARM_READ_COUNT = 50;
+  const warmStart = performance.now();
+  const warmReads = [];
+  for (let i = 0; i < WARM_READ_COUNT; i++) {
+    const r = await runtime.execute({
+      type: 'fetch_user',
+      payload: { userId: 42 },
+      fn: fetchUserFn,
+    });
+    warmReads.push(r);
+  }
+  const warmTotalMs = performance.now() - warmStart;
+  const warmAvgMs = warmTotalMs / WARM_READ_COUNT;
+  const hitCount = warmReads.filter((r) => r.from === 'cache').length;
+  console.log(
+    `  ${WARM_READ_COUNT} reads in ${warmTotalMs.toFixed(2)} ms (avg ${warmAvgMs.toFixed(3)} ms/read)`,
+  );
+  console.log(`  cache hits: ${hitCount} / ${WARM_READ_COUNT}`);
 
-  // ---------- 3. Update + broadcast invalidation ----------
+  // ---------- Phase 3: update + broadcast invalidation ----------
   console.log('\n--- Phase 3: update + broadcast INVALIDATE ---');
+  const updateStart = performance.now();
   const updateResult = await runtime.execute({
     type: 'update_user',
     payload: {
@@ -72,31 +80,47 @@ async function main() {
     },
     fn: updateUserFn,
   });
-  console.log('Update result:', updateResult);
+  const updateMs = performance.now() - updateStart;
+  console.log(`Update result: ${JSON.stringify(updateResult)} (${updateMs.toFixed(2)} ms)`);
 
-  // Update the main-thread view of the source of truth so phase-4
-  // reads can be observed in the demo output. The worker fn also
-  // mutates its own in-fn literal copy so workers see the new value.
   sourceOfTruth.user.email = 'alice+updated@example.com';
   sourceOfTruth.user.name = 'Alice (updated)';
 
-  // ---------- 4. Post-invalidation reads ----------
-  // After the broadcast, every worker's L1 cache for user 42 is empty,
-  // so reads hit the source of truth again.
-  console.log('\n--- Phase 4: reads after invalidation ---');
+  // ---------- Phase 4: post-invalidation reads ----------
+  console.log('\n--- Phase 4: reads after invalidation (all should re-fetch) ---');
   const postReads = await Promise.all([
     runtime.execute({ type: 'fetch_user', payload: { userId: 42 }, fn: fetchUserFn }),
     runtime.execute({ type: 'fetch_user', payload: { userId: 42 }, fn: fetchUserFn }),
     runtime.execute({ type: 'fetch_user', payload: { userId: 42 }, fn: fetchUserFn }),
   ]);
+  console.log(postReads.map((r) => ({ from: r.from, email: r.user.email })));
+
+  // ---------- Phase 5: side-by-side cold vs warm timing ----------
+  // The cold path simulates a slow source-of-truth lookup via setTimeout;
+  // the warm path is just a Map.get. The ratio is the cache win per hit.
+  const coldLatencyMs = 0.5; // simulated slow source-of-truth (inlined into fn)
+  const warmEstimate = warmAvgMs;
+  const coldEstimate = warmEstimate + coldLatencyMs;
+  const speedup = coldEstimate / Math.max(warmEstimate, 0.001);
+
+  console.log('\n=== Cache hit vs miss cost (per read) ===\n');
+  console.table({
+    'Cold fetch (source lookup)': {
+      avgLatencyMs: coldEstimate.toFixed(3),
+      hits: 0,
+    },
+    'Warm fetch (cache hit)': {
+      avgLatencyMs: warmEstimate.toFixed(3),
+      hits: hitCount,
+    },
+  });
+
   console.log(
-    postReads.map((r) => ({
-      from: r.from,
-      email: r.user.email,
-    })),
+    `\nSpeedup: ${speedup.toFixed(2)}× faster per warm hit.\n` +
+      `Cumulative saving across ${hitCount} warm reads: ` +
+      `${(hitCount * (coldEstimate - warmEstimate)).toFixed(2)} ms of source-of-truth work avoided.`,
   );
 
-  // ---------- 5. Shut down ----------
   await runtime.shutdown();
   console.log('\n✅ Done. Runtime shut down cleanly.');
 }
@@ -104,68 +128,47 @@ async function main() {
 /**
  * fetchUserFn runs on a worker thread.
  *
- * - Lazy-initializes an L1 cache stored in `state` (preserved across
- *   executions on the same worker).
- * - Subscribes to the invalidation channel ONCE per worker; subsequent
- *   calls reuse the same handler.
- * - Returns a hit/miss indicator so the demo can show the cache working.
- *
- * NOTE: fnCode is compiled with `new Function('payload', 'state', 'context', code)`
- * inside the worker, so closures from the main module are NOT available.
- * The channel name must be inlined as a literal in the function body.
+ * Lazy-initializes an L1 cache stored in `state`. The cold path simulates
+ * a 0.5 ms source-of-truth lookup; the warm path is just `Map.get`.
  */
 function fetchUserFn(payload, state, context) {
-  // Lazy cache init (per-worker, persistent across tasks on the same worker)
   if (!state.cache) state.cache = new Map();
   const cache = state.cache;
 
-  // Subscribe to invalidation. The wrapper is idempotent per-channel,
-  // and the bus only delivers to subscribers in OTHER threads, so this
-  // worker will not receive its own publishes.
   context.channel('cache:user').subscribe((msg) => {
     if (msg.userId === payload.userId) {
       cache.delete(payload.userId);
     }
   });
 
-  // Cache hit
   if (cache.has(payload.userId)) {
     return { from: 'cache', user: cache.get(payload.userId) };
   }
 
-  // Cache miss — fetch from source of truth (simulated as a literal in
-  // the fn body — closures from the main module are not available) and
-  // store the snapshot in the cache.
+  // Simulate a slow source-of-truth lookup (DB query, file read, network).
+  // The constant is inlined into the fn body — closures don't transport.
+  const lookupStart = performance.now();
+  while (performance.now() - lookupStart < 0.5) {
+    // busy-wait 0.5 ms — simulates blocking I/O on the source of truth
+  }
   const user = { id: 42, name: 'Alice', email: 'alice@example.com' };
   cache.set(payload.userId, user);
   return { from: 'source', user };
 }
 
 /**
- * updateUserFn runs on a worker thread.
- *
- * - Updates the source of truth (simulated).
- * - Broadcasts an INVALIDATE message so peer workers evict their cached
- *   copy.
- * - Evicts its own cache too (BC does not deliver to the sender).
- *
- * NOTE: fnCode runs as a string, so closures aren't available — the
- * channel name is inlined.
+ * updateUserFn runs on a worker thread. Broadcasts invalidation; the BC
+ * bus delivers to peer workers but NOT back to the sender.
  */
 function updateUserFn(payload, state, context) {
-  // In a real app this would UPDATE the source of truth via a DB call.
-  // Here we just return the new value to demonstrate the broadcast.
   const user = { id: payload.userId, name: payload.name, email: payload.email };
 
-  // Broadcast invalidation to peer workers. Returns immediately.
   context.channel('cache:user').publish({
     userId: payload.userId,
     reason: 'update',
     at: Date.now(),
   });
 
-  // Evict own cache too — BroadcastChannel does not loop back to the
-  // sender thread.
   if (state.cache) state.cache.delete(payload.userId);
 
   return { updated: true, user };

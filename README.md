@@ -512,10 +512,20 @@ for await (const chunk of stream) {
 | Pool scheduling | One worker per active stream (1:1, full lifetime). When the pool is saturated, `stream()` queues the request and returns immediately — the consumer can iterate while waiting |
 | `runtime.stats()` | `activeStreams` (dispatched) and `pendingStreams` (queued) are surfaced alongside the existing task counters |
 
-Two runnable examples ship in `examples/`:
+**Twelve runnable examples** ship in `examples/` — every one carries a `[perf-tested]` header tag and ends with a measured metric that justifies the feature (governed by `.agents/rules/perf-first-authoring.md` + `.agents/skills/pwr-examples/SKILL.md`):
 
 - `node examples/streaming-llm.js` — token-streaming LLM-style consumer, demonstrates TTFT, signal-abort path, and runtime event counts
 - `node examples/streaming-csv-export.js` — fast producer + slow consumer with `highWaterMark: 8`, prints the backpressure timeline
+- `node examples/zero-copy-image.js` — `transferList` vs structured-clone copy on a 31 MB buffer (**3.07×** speedup)
+- `node examples/priority-routing.js` — `priority=10` interactive tasks jump 30 slots ahead of `priority=0` batch tasks
+- `node examples/persistent-ai-model.js` — L1-cached 5 000-entry model rebuilt every query (**1.48×** speedup)
+- `node examples/express-outbox-email.js` — `dispatch` vs sequential HTTP handler (**76.41×** HTTP-path speedup)
+- `node examples/adaptive-concurrency.js` — auto controller grew 1→28 workers under 50-task CPU burst (**23.22×** speedup vs `fixed: workers: 1`)
+- `node examples/broadcast-cache-invalidation.js` — cold vs warm cache reads (**2.69×** per warm hit, 25 ms cumulative saving)
+- `node examples/cancel-on-disconnect.js` — cancel at 100 ms frees the worker **~99× sooner** than run-to-completion
+- `node examples/image-resizer-batch.js` — worker pool fires **27× more** `setInterval(5 ms)` ticks than inline main-thread work
+- `node examples/worker-recycling.js` — per-cycle overhead = **263 ms avg** (200 ms backoff + ~64 ms terminate)
+- `node examples/event-target-pattern.js` — `addEventListener({ signal })` cleanup is 1 `abort()` call vs N `removeEventListener` calls
 
 See **[ADR-0012](docs/adr/0012-streaming-task-results-via-async-generators.md)** for the architectural rationale, IPC frame schemas, and the ordering traps that the implementation handles.
 

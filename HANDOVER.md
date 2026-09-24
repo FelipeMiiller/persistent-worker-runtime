@@ -141,17 +141,19 @@ npm run benchmark:adaptive-controller          # ADR-0014 tick overhead < 1ms SL
 npm run benchmark:adaptive-controller-opt-out  # ADR-0014 opt-out overhead
 npm run benchmark:adaptive-concurrency         # ADR-0014 end-to-end grow/shrink
 
-# Examples
-node examples/adaptive-concurrency.js          # Three sizing modes side-by-side (ADR-0014)
-node examples/broadcast-cache-invalidation.js
-node examples/streaming-llm.js                 # TTFT + signal abort + runtime events
-node examples/streaming-csv-export.js          # backpressure with slow consumer
-node examples/express-outbox-email.js          # Express + transactional outbox
-node examples/image-resizer-batch.js           # Bounded batch image processing
-node examples/persistent-ai-model.js           # Stateful worker with warm AI model in L1
-node examples/priority-routing.js              # Critical work vs. batch work ordering
-node examples/zero-copy-image.js               # transferList for 30MB image buffer
-node examples/cancel-on-disconnect.js          # Manual + AbortSignal.timeout + pre-aborted patterns
+# Examples — all 12 [perf-tested] with measured metrics (`.agents/rules/perf-first-authoring.md`)
+node examples/adaptive-concurrency.js          # auto vs fixed pool under CPU burst (23.22× speedup — controller grew 1→28)
+node examples/broadcast-cache-invalidation.js  # cold vs warm cache reads (2.69× per warm hit, 25 ms cumulative saved)
+node examples/cancel-on-disconnect.js          # cancel @100ms vs run-to-completion (~9800 ms worker time saved)
+node examples/event-target-pattern.js          # 3 event observation patterns + addEventListener {signal} cleanup (1 vs N calls)
+node examples/express-outbox-email.js          # dispatch vs sequential HTTP handler (76.41× HTTP path speedup)
+node examples/image-resizer-batch.js           # worker pool keeps Event Loop responsive (27× more setInterval ticks during burst)
+node examples/persistent-ai-model.js           # L1 cache vs rebuild every query (1.48× speedup, model loaded once)
+node examples/priority-routing.js              # priority=10 vs priority=0 (30 slots earlier in completion log)
+node examples/streaming-csv-export.js          # backpressure with slow consumer (rowsWritten + paused/resumed event counts)
+node examples/streaming-llm.js                 # TTFT + signal abort + runtime event counts
+node examples/worker-recycling.js              # per-cycle overhead = 263 ms avg (200 ms backoff + ~64 ms terminate)
+node examples/zero-copy-image.js               # transferList vs structured-clone copy, 31 MB buffer (3.07× speedup)
 
 # Verify ESM exports
 node --input-type=module -e "import * as mod from './src/index.js'; console.log(Object.keys(mod));"

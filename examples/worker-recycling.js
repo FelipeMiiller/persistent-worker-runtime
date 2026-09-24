@@ -1,7 +1,10 @@
 /**
- * Example: Worker recycling observable end-to-end
+ * [perf-tested] Example: Worker recycling observable end-to-end.
  *
- * Demonstrates the worker-recycle lifecycle (ADR-0024 HARDEN-04/06/08/11):
+ * Demonstrates the worker-recycle lifecycle (ADR-0024 HARDEN-04/06/08/11)
+ * AND quantifies the per-cycle overhead that recycling costs.
+ *
+ * Lifecycle:
  * - `maxTasksPerWorker` triggers recycling after N tasks complete.
  * - `recycleBackoffMs` keeps the recycled worker in `getWorkers()` (status
  *   `recycling`) for a configurable grace window before physical termination,
@@ -9,14 +12,15 @@
  * - Each recycle emits `worker:recycling` (with reason) and `worker:recycled`
  *   events observable via `runtime.addEventListener`.
  *
- * Key behaviors exercised:
- * - Recycle reason is `'tasks_exceeded'` (HARDEN-08 default).
- * - `recycleBackoffMs: 200` → recycled worker stays in `getWorkers()` for
- *   ~200ms after replacement becomes idle. The polling loop in `main()`
- *   waits for `runtime.stats.recycledWorkersCount` to reach the expected
- *   value before printing, because `executeAll` resolves as soon as the
- *   last task completes — and the backoff timer for that last recycle
- *   fires AFTER the resolve.
+ * What this example measures:
+ * - Per-cycle duration = `worker:recycled.timestamp - worker:recycling.timestamp`.
+ *   Expected ≈ `recycleBackoffMs` (the grace window) + small `worker.terminate()`
+ *   cost.
+ * - Min / max / avg overhead across the recycle cycles in the run.
+ * - The "post-executeAll recycle wait" uses an event-driven Promise
+ *   (listener resolves when count reaches EXPECTED_RECYCLES) — NOT polling
+ *   `runtime.stats.recycledWorkersCount`. The event-driven path costs ~0
+ *   wall-clock after the last event; polling would add `pollMs` per tick.
  *
  * Run: `node examples/worker-recycling.js`
  */
@@ -42,20 +46,38 @@ async function main() {
     recycleBackoffMs: RECYCLE_BACKOFF_MS,
   });
 
-  // Observe recycling lifecycle
-  const events = { recycling: [], recycled: [] };
-  runtime.addEventListener('worker:recycling', (e) => {
-    events.recycling.push({ workerId: e.detail.workerId, reason: e.detail.reason });
-    console.log(`  [event] worker:recycling — ${e.detail.workerId} reason=${e.detail.reason}`);
+  // Track per-cycle overhead: map oldWorkerId → start timestamp (from
+  // worker:recycling event). worker:recycled computes delta.
+  const cycleStartByWorkerId = new Map();
+  const cycleDurationsMs = [];
+
+  // Event-driven wait — resolves the "post-executeAll recycle wait"
+  // Promise when the Nth worker:recycled event fires. NO polling.
+  let recycleWaitResolve;
+  const recycleWait = new Promise((resolve) => {
+    recycleWaitResolve = resolve;
   });
+  let recycledCount = 0;
+
+  runtime.addEventListener('worker:recycling', (e) => {
+    const { workerId, reason } = e.detail;
+    cycleStartByWorkerId.set(workerId, performance.now());
+    console.log(`  [event] worker:recycling — ${workerId} reason=${reason}`);
+  });
+
   runtime.addEventListener('worker:recycled', (e) => {
-    events.recycled.push({
-      oldWorkerId: e.detail.oldWorkerId,
-      newWorkerId: e.detail.newWorkerId,
-    });
-    console.log(
-      `  [event] worker:recycled — old=${e.detail.oldWorkerId} new=${e.detail.newWorkerId}`,
-    );
+    const { oldWorkerId, newWorkerId } = e.detail;
+    const start = cycleStartByWorkerId.get(oldWorkerId);
+    if (start !== undefined) {
+      cycleDurationsMs.push(performance.now() - start);
+      cycleStartByWorkerId.delete(oldWorkerId);
+    }
+    recycledCount++;
+    console.log(`  [event] worker:recycled — old=${oldWorkerId} new=${newWorkerId}`);
+    if (recycledCount === EXPECTED_RECYCLES && recycleWaitResolve) {
+      recycleWaitResolve(e.detail);
+      recycleWaitResolve = null;
+    }
   });
 
   console.log(
@@ -64,7 +86,7 @@ async function main() {
       `Dispatching ${TASK_COUNT} tasks → expect ${EXPECTED_RECYCLES} recycles\n`,
   );
 
-  // Sample getWorkers() while the worker is mid-recycle to observe status
+  // Sample getWorkers() while the worker is mid-recycle to observe status.
   let capturedStatus = null;
   const sampler = setInterval(() => {
     const workers = runtime.getWorkers();
@@ -97,43 +119,51 @@ async function main() {
   clearInterval(sampler);
 
   // After executeAll resolves, recycle timers are still in-flight for the
-  // workers that hit their maxTasksPerWorker quota. Wait for them to
-  // complete by polling the supervisor's recycledWorkersCount counter
-  // (incremented inside `await worker.terminate()` AFTER the backoff).
-  await waitFor(() => runtime.stats.recycledWorkersCount >= EXPECTED_RECYCLES, {
-    timeoutMs: (RECYCLE_BACKOFF_MS + 500) * EXPECTED_RECYCLES,
-    pollMs: 25,
-    description: `recycledWorkersCount >= ${EXPECTED_RECYCLES}`,
-  });
+  // workers that hit their maxTasksPerWorker quota. Wait via the event-
+  // driven Promise above (resolved inside the worker:recycled handler).
+  // Event-driven = no polling overhead; resolves the moment the last
+  // expected worker:recycled event fires.
+  await recycleWait;
+
+  // === Per-cycle overhead metric ===
+  const minCycle = Math.min(...cycleDurationsMs);
+  const maxCycle = Math.max(...cycleDurationsMs);
+  const avgCycle = cycleDurationsMs.reduce((a, b) => a + b, 0) / cycleDurationsMs.length;
+  // "Termination cost" = cycle duration minus the configured backoff.
+  // The grace window is by design; the only variable cost is the
+  // worker.terminate() round-trip.
+  const avgTerminateCost = avgCycle - RECYCLE_BACKOFF_MS;
 
   console.log(`\n=== Results ===`);
+  console.log(`  worker:recycling events: ${cycleStartByWorkerId.size + cycleDurationsMs.length}`);
+  console.log(`  worker:recycled events:  ${recycledCount}`);
   console.log(
-    `  worker:recycling:   ${events.recycling.length} (reasons: ${events.recycling.map((e) => e.reason).join(', ')})`,
+    `  recycling snapshot:       ${capturedStatus ? `captured (total=${capturedStatus.total} during backoff)` : 'not captured'}`,
   );
-  console.log(`  worker:recycled:    ${events.recycled.length}`);
+  console.log(`  recycledWorkersCount:     ${runtime.stats.recycledWorkersCount}`);
+
+  console.log(`\n=== Per-cycle overhead ===\n`);
+  console.table({
+    [`Per cycle (${cycleDurationsMs.length} samples)`]: {
+      minMs: minCycle.toFixed(2),
+      avgMs: avgCycle.toFixed(2),
+      maxMs: maxCycle.toFixed(2),
+    },
+    'Decomposition (avg)': {
+      recycleBackoffMs: RECYCLE_BACKOFF_MS,
+      avgTerminateCostMs: avgTerminateCost.toFixed(2),
+    },
+  });
+
   console.log(
-    `  recycling snapshot: ${capturedStatus ? `captured (total=${capturedStatus.total} during backoff)` : 'not captured'}`,
+    `\nTake-away: each recycle costs ~${RECYCLE_BACKOFF_MS} ms of grace + ` +
+      `~${avgTerminateCost.toFixed(2)} ms of terminate overhead on average.\n` +
+      `Recycling is paid in latency, not throughput — workers stay at capacity the entire time\n` +
+      `because the replacement is already serving tasks while the old one drains.`,
   );
-  console.log(`  recycledWorkersCount (stats): ${runtime.stats.recycledWorkersCount}`);
 
   await runtime.shutdown();
   console.log('\n--- Worker recycling example complete ---');
-}
-
-/**
- * Polls `predicate()` until it returns truthy or `timeoutMs` elapses.
- * Throws an Error if the predicate never satisfies within the budget.
- * Used to bridge async lifecycle gaps where event-loop ordering would
- * otherwise produce a misleading snapshot (see worker-recycling.js).
- */
-async function waitFor(predicate, { timeoutMs, pollMs, description }) {
-  const start = Date.now();
-  while (!predicate()) {
-    if (Date.now() - start > timeoutMs) {
-      throw new Error(`waitFor timeout: ${description} did not satisfy within ${timeoutMs}ms`);
-    }
-    await new Promise((r) => setTimeout(r, pollMs));
-  }
 }
 
 main().catch((err) => {
