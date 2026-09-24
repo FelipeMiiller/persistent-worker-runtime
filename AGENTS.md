@@ -27,7 +27,7 @@ persistent-worker-runtime/
 ├── package.json                        # Node.js >= 22, pure ESM, zero external dependencies
 ├── LICENSE                             # MIT License
 ├── .github/workflows/ci.yml            # Multi-OS matrix CI (Ubuntu, macOS, Windows)
-├── .agents/rules/                      # Always-on rules (test-before-commit, MADR, zero-deps, end-of-spec hardening)
+├── .agents/rules/                      # Always-on rules (test-before-commit, MADR, zero-deps, end-of-spec hardening, perf-first-authoring)
 ├── docs/
 │   └── adr/                            # Architecture Decision Records (MADR format, 0001..0014)
 ├── src/                                # Core implementation (pure JavaScript ESM)

@@ -1,6 +1,6 @@
 ---
 name: pwr-testing
-description: Write robust unit + integration tests for persistent-worker-runtime that catch regressions in obscure behaviors — live-reference stats, off-heap memory measurement, watchdog preemption, async-activity-after-test-end CI flakes, setImmediate chain traps, and silent no-op controllers. Use after every task completion (mandatory) and when designing new test suites. Triggers on "write tests", "add a test for", "test the watchdog", "measure memory", "test preemption", "validate stats", "live-mirror", "burst-then-idle", "P5/P1/P2 ordering". Do NOT use for benchmarks (those use bench:* scripts) or for non-runtime Node projects. Test infrastructure (mustCall, mustNotCall, expectWarning) lives in test/common.js, lifted from nodejs/node test/common/.
+description: Write robust unit + integration tests for persistent-worker-runtime that catch regressions in obscure behaviors — live-reference stats, off-heap memory measurement, watchdog preemption, async-activity-after-test-end CI flakes, setImmediate chain traps, and silent no-op controllers. Use after every task completion (mandatory) and when designing new test suites. Triggers on "write tests", "add a test for", "test the watchdog", "measure memory", "test preemption", "validate stats", "live-mirror", "burst-then-idle", "P5/P1/P2 ordering", "new benchmark", "perf-test". For creating `examples/*.js` (not tests), load `.agents/skills/pwr-examples/SKILL.md` instead. Do NOT use for non-runtime Node projects. Test infrastructure (mustCall, mustNotCall, expectWarning) lives in test/common.js, lifted from nodejs/node test/common/. Always-on companion rule: `.agents/rules/perf-first-authoring.md` (examples/benchmarks/perf-tests must demonstrate the perf win with a measurable number — never trust "the API runs" alone).
 license: MIT
 metadata:
   author: Felipe Miiller
@@ -23,6 +23,8 @@ This skill is **mandatory after every task**. The rule from `.agents/rules/end-o
 - Reviewing an existing test for hidden flakes.
 - Replacing ad-hoc event counters with `common.mustCall(fn, exact)` to catch "fired twice" bugs.
 - Asserting runtime warnings (e.g. `PersistentWorkerRuntimeDefaultSizing`) with `common.expectWarning`.
+- **Creating a new example** — load `perf-first-authoring.md` companion to make sure the example justifies the perf feature it motivates.
+- **Creating a new benchmark** — same as above; benchmarks exist to measure the perf win, not to time an empty loop.
 
 ## The 4 mandatory commands — run after every task
 
@@ -277,6 +279,12 @@ Adopt as `process.on('exit', () => assert.equal(getLeakedGlobals().length, 0))` 
 - [ ] `py .agents/skills/tlc-spec-driven/scripts/validate_tasks.py` clean (if tasks.md touched)
 - [ ] `py .agents/skills/tlc-spec-driven/scripts/validate_spec.py` clean (if spec.md touched)
 - [ ] Cross-platform: at least one path validated on Windows + Linux + macOS (CI matrix)
+
+**Perf-first (companion rule `.agents/rules/perf-first-authoring.md`):**
+- [ ] Example / benchmark / perf-relevant test demonstrates the perf win with a measurable number
+- [ ] Baseline present (sequential, with-copy, no-priority, no-cache, etc.) OR the artifact is explicitly marked `[correctness]` / `[api-surface]` in its header
+- [ ] Numbers are in user units (ms saved, ops/sec, MB transferred cheaply) with hardware/config notes (workers / concurrency / HWM)
+- [ ] `console.table` used for side-by-side comparisons when more than one configuration runs
 ```
 
 ## References
