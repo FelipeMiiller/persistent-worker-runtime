@@ -84,6 +84,9 @@
   "lint-staged": {
     "*.{js,mjs,cjs,json}": [
       "biome check --write"
+    ],
+    "!*.skill-meta.json": [
+      "biome check --write"
     ]
   }
 }
