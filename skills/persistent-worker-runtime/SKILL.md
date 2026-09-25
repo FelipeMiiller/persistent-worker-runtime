@@ -1,10 +1,10 @@
 ---
 name: persistent-worker-runtime
-description: Use the persistent-worker-runtime library to offload CPU-bound work to persistent Node.js worker threads while keeping the Event Loop responsive. Load when the user wants to set up a worker pool (fixed or adaptive), execute tasks on workers, stream results via runtime.stream(), handle cancellations, transfer binary data with zero copy, set up stateful workers with warm L1 memory, implement transactional outbox patterns, run persistent background jobs, use BroadcastChannel for inter-worker communication (e.g. L1 cache invalidation), tune hard preemption via workerPollIntervalMs, configure worker recycling (maxTasksPerWorker, maxMemoryMb, accumulationRateMbPerSec, minRecycleIntervalMs, recycleOnTasksExhausted), set dispatchStrategy (fifo / lru / random), set recycleBackoffMs for drain grace, observe per-worker memory via observeWorkerMemory, or read runtime.getWorkers() / runtime.stats.workers / runtime.stats.adaptive for observability. Triggers on "persistent-worker-runtime", "worker pool", "worker_threads", "execute a task on a worker", "dispatch background job", "streaming results", "L1 worker memory", "transactional outbox", "zero-copy transfer", "abort a worker task", "priority task queue", "broadcast channel", "inter-worker communication", "cache invalidation across workers", "adaptive concurrency", "rate-based recycling", "watchdog", "preemption". DO NOT load for unrelated concurrency topics like Promise.all scaling or general multi-threading tutorials.
+description: Use the persistent-worker-runtime library to offload CPU-bound work to persistent Node.js worker threads while keeping the Event Loop responsive. Load when the user wants to set up a worker pool (fixed or adaptive), execute tasks on workers, stream results via runtime.stream(), handle cancellations, transfer binary data with zero copy, set up stateful workers with warm L1 memory, implement transactional outbox patterns, run persistent background jobs, use a durable SQLite-backed queue (SqliteTaskQueue via queueBackend: 'sqlite' with lease-based orphan recovery + retry budget), wire liveness/readiness probes via runtime.isAlive() + runtime.isReady(), use BroadcastChannel for inter-worker communication (e.g. L1 cache invalidation), tune hard preemption via workerPollIntervalMs, configure worker recycling (maxTasksPerWorker, maxMemoryMb, accumulationRateMbPerSec, minRecycleIntervalMs, recycleOnTasksExhausted), set dispatchStrategy (fifo / lru / random), set recycleBackoffMs for drain grace, observe per-worker memory via observeWorkerMemory, or read runtime.getWorkers() / runtime.stats.workers / runtime.stats.adaptive for observability. Triggers on "persistent-worker-runtime", "worker pool", "worker_threads", "execute a task on a worker", "dispatch background job", "streaming results", "L1 worker memory", "transactional outbox", "zero-copy transfer", "abort a worker task", "priority task queue", "broadcast channel", "inter-worker communication", "cache invalidation across workers", "adaptive concurrency", "rate-based recycling", "watchdog", "preemption", "SqliteTaskQueue", "durable queue", "queueBackend sqlite", "lease reclaim", "retry budget", "runtime.isAlive", "runtime.isReady", "liveness probe", "readiness probe", "k8s livenessProbe", "k8s readinessProbe", "/healthz", "/readyz", "DR §8.2". DO NOT load for unrelated concurrency topics like Promise.all scaling or general multi-threading tutorials.
 license: MIT
 metadata:
   author: Felipe Miiller
-  version: 0.2.1
+  version: 0.3.0
   package: persistent-worker-runtime
 ---
 
@@ -30,7 +30,7 @@ Offload CPU-bound work to persistent Node.js worker threads without blocking the
 npm install persistent-worker-runtime
 ```
 
-Requires **Node.js >= 22**. Pure ESM, **zero external dependencies** (only `node:worker_threads`).
+Requires **Node.js >= 22.13** (`node:sqlite` stdlib is the new minimum; stable on all current LTS lines). Pure ESM, **zero external dependencies** (only `node:*` built-ins — `node:worker_threads`, `node:sqlite`, `node:async_hooks`, `node:broadcast_channel`).
 
 ---
 
@@ -77,7 +77,7 @@ The runtime has many features; load the reference that matches the task.
 | Need | Read |
 | --- | --- |
 | Step-by-step first-use walkthrough | `references/quickstart.md` |
-| Full TypeScript API surface | `references/api-reference.md` |
+| Full TypeScript API surface (incl. `isAlive` / `isReady` / `SqliteTaskQueue`) | `references/api-reference.md` |
 | **Stateful workers, L1 cache, bounded batch, affinity** | `references/stateful-l1.md` |
 | **Cancellation (AbortSignal) and priority queue** | `references/cancellation-priority.md` |
 | **Zero-copy transfer, retries with backoff, hard preemption** | `references/zero-copy-preemption.md` |
@@ -106,6 +106,6 @@ The runtime has many features; load the reference that matches the task.
 This skill teaches the **shipped API surface**. For production-readiness gaps that are **deliberately deferred** in the reference implementation, see:
 
 - **AGENTS.md → [`.agents/issues/`](../../AGENTS.md#-tracked-issues--known-drift-agentsissues)** — canonical links to tracked issues (supervisor.start idempotency, Wave 4 review findings, macOS benchmark portability).
-- **[`docs/operations/disaster-recovery.md` §8](../../docs/operations/disaster-recovery.md#8-open-items-gaps-to-close)** — production gaps deferred: SIGTERM handler (user wires `process.on('SIGTERM')`), `/healthz` endpoint (user wires `http.createServer` reading `runtime.stats()`), OpenTelemetry spans (user installs `@opentelemetry/api`; runtime provides `AsyncResource` transport only), durable queue backend (ADR-0020 records the decision; user fronts runtime with external queue per §5.2.1). Each item has a workaround that works against current `src/` and an effort estimate to close.
+- **[`docs/operations/disaster-recovery.md` §8](../../docs/operations/disaster-recovery.md#8-open-items-gaps-to-close)** — production-readiness gaps. **§8.2 `/healthz` is closed (2026-09-24)** — runtime exposes `runtime.isAlive()` + `runtime.isReady()` (transport wiring is user-side: HTTP route / k8s probe / cron / polling script). The runtime stays a library per ADR-0005 (no HTTP server, signal handlers, or timers in `src/`). **`§8.3 OpenTelemetry` and `§8.4 Postgres SKIP LOCKED backend` are permanently out-of-scope by rule** (ADR-0005 pure vanilla JS, zero external runtime deps — see AGENTS.md cross-ref). User installs `@opentelemetry/api` themselves; user fronts with their own Postgres queue. **`§8.1 SIGTERM` is still user-wired**: `process.on('SIGTERM', () => runtime.shutdown())`. **`§8.5 / §8.6` are still open.**
 
 If you're writing a skill or doc that claims a feature is "implemented", verify against `src/` + `STATE.md` + the relevant ADR before stating it as fact — tracked drift has shipped in the past (see `HANDOVER.md` lines 90-95 for the 2026-09-23 correction).

@@ -1,12 +1,12 @@
 {
   "name": "persistent-worker-runtime",
-  "version": "0.1.0",
-  "description": "Use the persistent-worker-runtime library to offload CPU-bound work to persistent Node.js worker threads while keeping the Event Loop responsive. Covers pool setup, request-response vs outbox modes, L1 state, cancellation, priority routing, zero-copy transfer, retries, preemption, and inter-worker BroadcastChannel for L1 cache invalidation.",
+  "version": "0.3.0",
+  "description": "Use the persistent-worker-runtime library to offload CPU-bound work to persistent Node.js worker threads while keeping the Event Loop responsive. Covers pool setup, request-response vs outbox modes, L1 state, cancellation, priority routing, zero-copy transfer, retries, preemption, inter-worker BroadcastChannel for L1 cache invalidation, durable queue via node:sqlite (SqliteTaskQueue with lease-based orphan recovery + retry budget), and liveness/readiness probes (runtime.isAlive() + runtime.isReady()) for k8s/LB/cron transport wiring.",
   "author": "Felipe Miiller",
   "license": "MIT",
   "package": "persistent-worker-runtime",
-  "packageMinVersion": "0.1.0",
-  "runtime": "node >= 22",
+  "packageMinVersion": "0.3.0",
+  "runtime": "node >= 22.13",
   "triggers": [
     "persistent-worker-runtime",
     "worker pool setup",
@@ -21,7 +21,20 @@
     "broadcast channel",
     "inter-worker communication",
     "cache invalidation across workers",
-    "createWorkerRuntime"
+    "createWorkerRuntime",
+    "SqliteTaskQueue",
+    "durable queue",
+    "node:sqlite backend",
+    "queueBackend sqlite",
+    "lease-based orphan recovery",
+    "retry budget",
+    "runtime.isAlive",
+    "runtime.isReady",
+    "liveness probe",
+    "readiness probe",
+    "k8s livenessProbe",
+    "k8s readinessProbe",
+    "DR §8.2"
   ],
   "files": [
     "SKILL.md",

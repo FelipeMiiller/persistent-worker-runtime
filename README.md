@@ -113,10 +113,12 @@ We do not fight the Event Loop; we protect it:
 | **Resilient Supervisor** | Detects worker thread crashes and automatically spins up replacements to preserve capacity. |
 | **Adaptive Concurrency Controller** (v0.2.0 / ADR-0014) | Dual-signal ELU + `monitorEventLoopDelay` controller tunes the pool band live; grow + drain-shrink (no terminate); pool band `[minWorkers, maxWorkers]`; first-class `runtime.stats.adaptive` telemetry. |
 | **Runtime Hardening** (v0.2.0 / ADR-0024) | `accumulationRateMbPerSec`, `minRecycleIntervalMs`, `recycleOnTasksExhausted`, `dispatchStrategy`, `workerPollIntervalMs`, `recycleBackoffMs`, `observeWorkerMemory`, `timeoutMs` default 5000ms; `runtime.getWorkers()` snapshot; expanded `runtime.stats` block. |
+| **Durable Queue Backend** (v0.3.0 / ADR-0020) | `SqliteTaskQueue` — zero-deps persistent queue via `node:sqlite` (Node ≥ 22.13 stdlib). Lease-based orphan recovery + retry budget enforcement (`max_retries`) so a worker that consistently crashes mid-task cannot trigger an infinite reclaim oscillation. Public `reclaimExpired()` for cron / scheduler sweeps. `queueBackend: 'memory' \| 'sqlite'` discriminator; no migrations required. |
+| **Liveness + Readiness Probes** (v0.3.0 / DR §8.2) | `runtime.isAlive()` and `runtime.isReady()` return `{ ok: boolean, reason?: string }` with `reason` ∈ `{'not-started', 'no-workers', 'shutting-down', 'queue-full'}`. p99 ≤ 0.20μs in our benchmarks. Transport (HTTP route / cron / script) is the caller's responsibility — the runtime stays a library per ADR-0005. |
 | **Streaming API** (ADR-0012) | `runtime.stream()` for async-generator tasks with native backpressure, queued dispatch, and 5 runtime events (`stream:created` / `chunk` / `end` / `aborted` / `backpressure`). |
-| **Zero External Dependencies** | Written strictly using Node.js built-in modules (`node:worker_threads`, `node:async_hooks`, `node:events`, `node:perf_hooks`, `node:os`, `node:broadcast_channel`). |
+| **Zero External Dependencies** | Written strictly using Node.js built-in modules (`node:worker_threads`, `node:async_hooks`, `node:events`, `node:perf_hooks`, `node:os`, `node:broadcast_channel`, `node:sqlite`). |
 | **Inter-Worker BroadcastChannel** | Named-channel pub/sub between main thread and workers via Node's native `BroadcastChannel` — bus-style O(1) fan-out with no main-thread Event Loop routing. Canonical use case: L1 cache invalidation across workers. |
-| **Pure ESM, Zero Dependencies** | `"type": "module"` with explicit `exports` map. Works with `import` on Node 22.0+; `require()` of the package works on Node 22.12+ (stable `require(esm)`) without any CJS shim. |
+| **Pure ESM, Zero Dependencies** | `"type": "module"` with explicit `exports` map. Works with `import` on Node 22.13+; `require()` of the package works on Node 22.13+ (stable `require(esm)`) without any CJS shim. |
 
 ---
 
@@ -708,7 +710,7 @@ Every major architectural choice is documented following the **MADR** format in 
 
 ```bash
 # ── Quality gates ──────────────────────────────────────────────────────
-npm test                # 323 tests across 105 suites (native node:test)
+npm test                # 621 tests across 170 suites (native node:test)
 npm run test:coverage   # >95% line coverage report
 npm run lint            # biome check (lint src/test/examples/benchmarks)
 npm run lint:fix        # biome check --write --unsafe (auto-fix what's safe)
@@ -728,6 +730,9 @@ npm run benchmark:scaling      # Throughput scaling vs worker count
 npm run benchmark:preemption   # Hard preemption watchdog + pool healing
 npm run benchmark:recycling    # Automatic worker recycling
 npm run benchmark:broadcast    # BroadcastChannel fan-out vs. per-worker dispatch
+npm run benchmark:io-throughput # ADR-0024 sustained-rate (50k tasks, ~30s)
+npm run benchmark:cpu-saturation # Phase E — CPU saturation knee
+npm run benchmark:hot-path      # DR §8.2 probe perf contract (≤5μs p99) — wired into `npm run validate`
 ```
 
 ### Pre-commit hooks
@@ -737,7 +742,7 @@ This repo uses **husky 9** + **lint-staged 15**:
 | Hook | Runs |
 | --- | --- |
 | `pre-commit` | `lint-staged` (biome auto-fix on staged files) + `npm test` |
-| `pre-push` | `npm run validate` (full lint + test) |
+| `pre-push` | `npm run validate` (lint + test + hot-path-micro benchmark) |
 | `prepublish` | `npm run validate` |
 
 Lint violations that can't be auto-fixed (e.g. `debugger`, suspicious code) **block the commit**.
@@ -756,6 +761,9 @@ Run any example directly with `node examples/<name>.js`:
 | `cancel-on-disconnect.js` | Manual cancellation, `AbortSignal.timeout()`, and pre-aborted signals. |
 | `broadcast-cache-invalidation.js` | L1 cache invalidation across workers via `context.channel()` + `runtime.broadcast()`. |
 | `streaming-llm.js` | Token-streaming LLM-style consumer — TTFT measurement, `AbortSignal` mid-stream, runtime event counts. |
+| `durable-task-recovery-runtime.js` | T13 — submit tasks to `SqliteTaskQueue`, kill the runtime mid-flight, restart it, watch lease-based orphan recovery reclaim the in-flight tasks. Demonstrates the retry budget too: tasks with `retries: 0` land in `failed` instead of leaking into an infinite reclaim loop. |
+| `durable-queue-shutdown-recovery.js` | Companion to the recovery example — exercises the full T13.1 hardening surface: atomic check, corrupt envelope quarantine, WAL checkpoint. |
+| `durable-queue-throughput.js` | Throughput benchmark for the SQLite backend vs the in-memory `TaskQueue` (memory backend is faster but ephemeral; SQLite is durable). |
 | `streaming-csv-export.js` | Fast producer + slow consumer with `highWaterMark: 8` — prints the backpressure timeline (paused / resumed crossings). |
 | `event-target-pattern.js` | EventTarget observation patterns: `addEventListener` with `{ signal }` for AbortController cleanup, bounded-N event collector, manual `removeEventListener`. Recommended for v0.3.x+ code (the runtime now extends web-standard `EventTarget`; the `.on()` / `.off()` compat shim is scheduled for v0.4.x removal). |
 

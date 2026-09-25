@@ -40,6 +40,21 @@ interface WorkerRuntimeOptions {
   maxQueueSize?: number;                    // queue capacity; default: 2000
   queueTimeoutMs?: number;                  // default wait timeout; default: 30000
 
+  // v0.3.0 — durable queue backend discriminator (ADR-0020).
+  // 'memory' (default) keeps the in-process TaskQueue. 'sqlite' selects
+  // SqliteTaskQueue via node:sqlite and requires `options.sqlite`.
+  queueBackend?: 'memory' | 'sqlite';
+
+  // v0.3.0 — required when queueBackend: 'sqlite'. `path` is the SQLite
+  // file. `leaseMs` controls how long a `state='processing'` claim holds
+  // before another instance can reclaim (default 30000). `workerId` is
+  // recorded in diagnostic warnings for multi-instance tracing.
+  sqlite?: {
+    path: string;
+    leaseMs?: number;                       // default: 30000
+    workerId?: string;
+  };
+
   workerScript?: string;                    // path to a custom worker entry; default: built-in
   handlerPath?: string;                     // path to an ES module exporting custom task handlers
   resourceLimits?: ResourceLimits;          // V8 memory/stack limits per worker isolate
@@ -168,7 +183,60 @@ interface WorkerSnapshot {
 
 ### `runtime.recycleWorker(workerId) → boolean`
 
-Forces an immediate recycle-check for a specific worker, bypassing the normal `task_completed` / poll trigger. Useful for operators who want to drain a worker before a rolling deploy. Returns `false` if the worker is not in the pool.
+Forces an immediate recycle-check for a specific worker, bypassing the normal `task_completed` / poll trigger. Useful for operators who want to drain a worker before a rolling deploy. Returns `false` if the worker is not in pool.
+
+### `runtime.isAlive() → { ok: boolean, reason?: string }` (v0.3.0, DR §8.2)
+
+**Liveness probe.** External observers (k8s `livenessProbe`, LB target-group health check, cron watchdog, polling script) call this to decide if the process is alive.
+
+| `reason` | When |
+| --- | --- |
+| `not-started` | `start()` has not been called (only reachable via direct `new WorkerRuntime(...)` — the factory auto-starts) |
+| `no-workers` | Worker pool is empty after a crash cascade (no respawn candidates) |
+| `shutting-down` | `shutdown()` has fully resolved (drain complete) |
+| _(none)_ | `{ ok: true }` — process is healthy and accepting work |
+
+**Mid-drain returns `{ ok: true }`** — the process is alive while workers finish their current tasks. SIGTERM is the orchestrator's kill signal, not a liveness-probe failure.
+
+**Transport is the caller's responsibility.** Wire it to a Fastify route, a k8s probe, or a polling script. The runtime stays a library (ADR-0005) — no HTTP server in `src/`.
+
+**Perf contract:** p99 ≤ 0.20μs on a modern workstation (budget 5μs in `npm run validate`); safe to call at 1–10 Hz from orchestrators.
+
+```js
+const a = runtime.isAlive();
+if (!a.ok) {
+  console.warn('LIVENESS FAILED:', a.reason);
+  // LB drains this instance from rotation
+}
+```
+
+### `runtime.isReady() → { ok: boolean, reason?: string }` (v0.3.0, DR §8.2)
+
+**Readiness probe.** External observers call this to decide if the runtime can accept new work right now.
+
+| `reason` | When |
+| --- | --- |
+| `not-started` | `start()` has not been called |
+| `shutting-down` | `shutdown()` is in progress OR has resolved (no new work, even mid-drain) |
+| `no-workers` | Pool is empty — dispatching would queue forever |
+| `queue-full` | Pending queue at capacity (`size >= maxQueueSize`) |
+| _(none)_ | `{ ok: true }` — ready to dispatch |
+
+**Liveness ≠ readiness.** A draining runtime is alive (mid-drain returns `{ ok: true }` on `isAlive()`) but NOT ready (returns `{ ok: false, reason: 'shutting-down' }` on `isReady()`). Use both — k8s `livenessProbe` reads `isAlive()`, `readinessProbe` reads `isReady()`.
+
+**Perf contract:** same as `isAlive()` — p99 ≤ 0.20μs.
+
+```js
+// k8s readinessProbe handler
+fastify.get('/readyz', async () => runtime.isReady());
+// → 503 with { ok: false, reason: 'queue-full' } when saturated
+```
+
+### `get runtime.isShuttingDown` (v0.3.0)
+
+Explicit shutdown-state getter. Was previously only observable through `getWorkers() === []`. Closes a TS↔runtime drift where `get isShuttingDown(): boolean` was declared in `src/index.d.ts` but never implemented.
+
+Flips to `true` at the START of `shutdown()` and stays `true` through drain + post-shutdown. For "is the process alive mid-drain", use `runtime.isAlive()` (which distinguishes draining from drained).
 
 ### `runtime.stream(taskFn, payload?, options?) → Stream` (ADR-0012)
 
@@ -283,6 +351,91 @@ runtime.on('stream:end',         ({ taskId, totalChunks, returnValue }) => {});
 runtime.on('stream:aborted',     ({ taskId, reason }) => {});
 runtime.on('stream:backpressure',({ taskId, state, queueLength }) => {});
 ```
+
+---
+
+## Durable Queue Backend (`SqliteTaskQueue`) — v0.3.0
+
+Opt-in durable queue via `node:sqlite` (stdlib, zero external deps). Tasks survive process restarts and worker crashes. Selected by `queueBackend: 'sqlite'` in `WorkerRuntimeOptions` plus a `sqlite.path` (required).
+
+### What it solves
+
+- **Process restart recovery** — in-flight tasks whose worker died are reclaimed on the next startup.
+- **Multi-instance coordination** — only one instance claims each task; lease-based atomic claim prevents two workers from doing the same work.
+- **Retry budget enforcement** — a worker that consistently crashes mid-task on the same row cannot trigger an infinite reclaim oscillation. Each reclaim counts as an attempt; budget exhaustion routes the row straight to `failed`.
+
+### Schema
+
+```sql
+CREATE TABLE queue_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT UNIQUE NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  affinity_key TEXT,
+  payload BLOB NOT NULL,            -- JSON.stringify(task envelope)
+  state TEXT NOT NULL DEFAULT 'pending',  -- pending | processing | done | failed
+  attempt INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 0,
+  enqueued_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  claimed_by TEXT,                  -- workerId when state='processing'
+  claim_expires_at INTEGER          -- ms-epoch lease expiry
+);
+```
+
+### Operational semantics
+
+| Event | State transition | Note |
+| --- | --- | --- |
+| `runtime.execute()` / `dispatch()` | `pending` (insert) | Honors `maxQueueSize`. |
+| Worker claims via `BEGIN IMMEDIATE` + UPDATE | `pending → processing` | Atomic; sets `claimed_by = workerId`, `claim_expires_at = now() + leaseMs`. |
+| Worker calls `markDone()` / `markFailed()` | `processing → done` or `processing → failed` | Final state. |
+| `claim_expires_at < now()` AND `state = 'processing'` | `processing → pending` OR `processing → failed` | **Reclaim sweep.** Runs automatically on every constructor invocation; can also be triggered via `queueBackend.reclaimExpired()`. |
+
+### Reclaim sweep — `queueBackend.reclaimExpired() → { reclaimed, exhausted }`
+
+```typescript
+interface ReclaimResult {
+  reclaimed: number;    // rows returned to `pending` (retry still under budget)
+  exhausted: number;    // rows marked `failed` (post-reclaim attempt > max_retries)
+}
+```
+
+BC break: `number` → `{ reclaimed, exhausted }` from v0.2.1. Callers need both counts to emit distinct warnings — `PersistentWorkerRuntimeSqliteOrphanReclaim` (recovered rows) and `PersistentWorkerRuntimeSqliteOrphanBudgetExhausted` (budget-exhausted rows). The internal caller (`#recoverOrphans`) is updated.
+
+### Recommended cadence
+
+- **On startup**: `createWorkerRuntime()` already runs the reclaim sweep once (`#recoverOrphans`). No extra work needed.
+- **Periodic sweep (cron / scheduler)**: **not exposed via the runtime surface in v0.3.0.** The internal queue is private to the runtime; there's no public `runtime.queueBackend` getter or `runtime.reclaimExpired()` proxy. To run a manual sweep, construct a sibling `SqliteTaskQueue` instance over the same file path and call `.reclaimExpired()` there (idempotent). A public proxy on `WorkerRuntime` is tracked as a follow-up — until then, the on-startup sweep is the canonical recovery path.
+
+For background sweep utilities (vacuum, WAL checkpoint) the same pattern applies: construct a sibling queue if you need them before a public proxy lands.
+
+### Pattern — recovery over a restart
+
+```js
+import { createWorkerRuntime } from 'persistent-worker-runtime';
+
+// First boot — enqueues 20 tasks, processes 12, gets killed.
+const a = await createWorkerRuntime({
+  workers: 4, maxQueueSize: 50,
+  queueBackend: 'sqlite',
+  sqlite: { path: './queue.db', workerId: 'instance-A' },
+});
+for (let i = 0; i < 20; i++) {
+  await a.execute({ type: 'work', payload: { i }, fn: slowFn });
+}
+// SIGKILL mid-run — 8 tasks remain in 'processing'.
+
+// Second boot — recovers the 8 orphans and finishes them.
+const b = await createWorkerRuntime({
+  workers: 4, maxQueueSize: 50,
+  queueBackend: 'sqlite',
+  sqlite: { path: './queue.db', workerId: 'instance-B' },
+});
+// runtime.stats.completedTasks + the 12 from instance-A = 20. ✓
+```
+
+See `examples/durable-task-recovery-runtime.js` for the full runnable demo.
 
 ---
 
