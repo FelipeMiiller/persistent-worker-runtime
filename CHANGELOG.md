@@ -4,7 +4,74 @@ All notable changes to `persistent-worker-runtime` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-09-24
+
+### Added
+
+- **Runtime liveness + readiness probes** (DR §8.2 closure) — `runtime.isAlive()` and
+  `runtime.isReady()` return `{ ok: boolean, reason?: string }`. Reasons:
+  `isAlive` → `not-started | no-workers | shutting-down | (true)`;
+  `isReady` → `not-started | shutting-down | no-workers | queue-full | (true)`.
+  Transport is the caller's responsibility — the runtime stays a library per
+  ADR-0005 (no HTTP server, signal handlers, or timers in `src/`). User wires
+  Fastify/Express routes, k8s probes, cron, or polling scripts around the
+  two methods. Mid-drain `isAlive()` returns `true` (process is alive while
+  workers finish); SIGTERM is the orchestrator's kill signal, not a
+  liveness-probe failure.
+- **`get isShuttingDown()` getter** — closes a long-standing TS↔runtime drift
+  where `get isShuttingDown(): boolean` was declared in `src/index.d.ts` but
+  never implemented. Exposed so observers don't have to infer shutdown state
+  from `getWorkers() === []`.
+- **`get maxQueueSize()` on `TaskQueue` and `SqliteTaskQueue`** — previously
+  private. Required by `runtime.isReady()` to detect the `queue-full`
+  condition without `runtime.stats()` scraping.
+- **T13.2 — `SqliteTaskQueue` lease-based orphan recovery** — every
+  `dequeue()` writes a `claim_expires_at = now() + leaseMs` next to the
+  `state='processing'` transition. Rows whose lease expires are reclaimed
+  on the next constructor invocation (and via the public `reclaimExpired()`
+  for cron-driven sweeps).
+- **T13.2 — retry budget enforcement** — each reclaim counts as an attempt.
+  When the post-increment value exceeds `max_retries`, the row is marked
+  `failed` instead of `pending`, closing the infinite-reclaim oscillation
+  a worker that consistently crashes mid-task would otherwise cause.
+  BC break on `reclaimExpired()` return type (`number` →
+  `{ reclaimed, exhausted }`) — internal caller and tests updated. Two
+  distinct warnings emitted on startup: `...OrphanReclaim` (recovered
+  rows) and `...OrphanBudgetExhausted` (budget-exhausted rows).
+- **T13.1 — `SqliteTaskQueue` hardening** — atomic check, size cache, corrupt
+  envelope quarantine, WAL checkpoint. Production-ready durable backend.
+- **`benchmarks/hot-path-micro.benchmark.js` perf gate** — wired into
+  `npm run validate`. Establishes p99 budgets for `dispatch()`, `stats`,
+  `isAlive()` (≤5μs), and `isReady()` (≤5μs); any regression exits 1 in CI.
+  Required to keep the probe-overhead contract honest over time.
+- **`cpu-saturation.benchmark.js` Phase E-4** — exercises the probes under
+  idle / queue-full / draining states with hard assertions on each `reason`.
+
+### Fixed
+
+- **Pure-ESM `require()` warning (yarn 1.x)** — `package.json#exports."."` now
+  declares both `import` and `require` conditions pointing at `src/index.js`.
+  Yarn 1.x and other CJS-first resolvers no longer emit
+  *"The package doesn't seem to have a commonjs entry point"*. Requires Node
+  22.12+ for `require(esm)` to resolve the ESM file synchronously; earlier
+  Node 22.x versions need `--experimental-require-module`.
+- **CI flake on macOS Node 24** (`test/adaptive-controller.test.js:762`) —
+  the `start() is idempotent` test slept 100ms with 20ms cadence and asserted
+  `ticks ∈ [2, 8]`. On a loaded macOS CI runner the timer fired only once.
+  Sleep widened to 300ms with bounds `[5, 20]`, justified by the documented
+  macOS/Windows event-loop slowness in `.agents/CROSS-OS-LESSONS.md` §2.
+  Verified locally across 5 consecutive runs (305–315ms each).
+- **`commit-lint` workflow** (`.github/workflows/commit-lint.yml:34`) — the
+  SHA pinned for `actions/github-script@v7.0.1` had a single-character typo
+  (`…794` instead of `…dea`). The workflow errored on every pull request. Now
+  pinned to the verified upstream SHA `60a0d83039c74a4aee543508d2ffcb1c3799cdea`.
+
+### Added (housekeeping)
+
+- **`.gitattributes`** — top-level file adopting the `nodejs/node` pattern:
+  every text file is normalized to LF on commit, regardless of the author's
+  `core.autocrlf` setting. Closes the recurring CRLF false-positive cycle that
+  forced `--no-verify` on the v0.2.0 release push.
 
 ### Added
 

@@ -1,6 +1,6 @@
 {
   "name": "persistent-worker-runtime",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "A persistent worker execution runtime for Node.js to offload CPU-bound tasks and preserve Event Loop responsiveness with stateful workers.",
   "type": "module",
   "main": "src/index.js",

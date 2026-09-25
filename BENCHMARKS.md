@@ -370,6 +370,18 @@ This is what `WEB_CONCURRENCY` and Heroku dyno sizing assume: workers-per-host i
 Run: `npm run benchmark:cpu-saturation`
 File: `benchmarks/cpu-saturation.benchmark.js`
 
+### 1️⃣8️⃣a — Phase E-4: Health probes under load (DR §8.2)
+
+Exercises `runtime.isAlive()` + `runtime.isReady()` (DR §8.2 closure, 2026-09-24) under three runtime states with **hard assertions** on each `reason`:
+
+| State | Expected `isAlive()` | Expected `isReady()` |
+| --- | --- | --- |
+| **idle** (4 workers, no load) | `{ ok: true }` | `{ ok: true }` |
+| **queue-full** (1 worker, `maxQueueSize: 2`, 3 blocking tasks) | `{ ok: true }` | `{ ok: false, reason: 'queue-full' }` |
+| **draining** (`shutdown()` in flight, workers finishing) | `{ ok: true }` | `{ ok: false, reason: 'shutting-down' }` |
+
+Why this matters: external observers (k8s livenessProbe / readinessProbe, LB target-group health check, deploy gates) consume the two probes. A regression that flips the wrong reason silently breaks production traffic routing. The benchmark exists so any such regression fails CI before merge.
+
 ---
 
 ## 1️⃣9️⃣ I/O Throughput + Memory Recycling + Preemption (ADR-0024 sustained-rate)
@@ -442,6 +454,33 @@ File: `benchmarks/adaptive-concurrency.benchmark.js`
 
 ---
 
+## 2️⃣1️⃣ Hot-Path Micro-Benchmark — Perf Contracts for External Probes (DR §8.2)
+
+**What it proves**: Every hot path the runtime exposes to external observers has a measurable perf contract. The benchmark is **wired into `npm run validate`** (pre-push + pre-commit hook), so any regression exits 1 in CI. This is the contract that keeps probe overhead honest over time as the runtime evolves.
+
+**Why "micro"**: 10k samples per measurement, microsecond-scale. Designed to surface p99 regressions — not to measure throughput. The benchmark is a regression guard, not a workload simulator.
+
+**Headline numbers** (measured in `benchmarks/hot-path-micro.benchmark.js`):
+
+| Path | Budget (p99) | Measured (p99) | Budget headroom |
+| --- | --- | --- | --- |
+| `TaskHandle` constructor | ≤ 200 μs | 0.40 μs | **500×** |
+| `runtime.dispatch()` (sync part) | ≤ 500 μs | 17.80 μs | **28×** |
+| `WorkerHandle.snapshot()` | ≤ 50 μs | 0.10 μs | **500×** |
+| `runtime.stats` getter | ≤ 100 μs | 2.70 μs | **37×** |
+| `supervisor.findWorkerForTask` | ≤ 100 μs | 5.00 μs | **20×** |
+| **`runtime.isAlive()` (k8s livenessProbe)** | **≤ 5 μs** | **0.20 μs** | **25×** |
+| **`runtime.isReady()` (k8s readinessProbe)** | **≤ 5 μs** | **0.20 μs** | **25×** |
+
+The two probe rows (`isAlive`, `isReady`) are the most important: orchestrator probes run at 1-10 Hz and budget the call against the Event Loop budget. A 5μs p99 ceiling leaves room for ~50 other probe-style reads per probe cycle before saturating a 1ms Event Loop slice.
+
+**Hard assertion**: any budget breach causes `process.exit(1)`. The benchmark cannot pass "soft" — it's a gate, not a measurement.
+
+Run: `npm run benchmark:hot-path` (also runs as part of `npm run validate`)
+File: `benchmarks/hot-path-micro.benchmark.js`
+
+---
+
 ## How to Reproduce All Results
 
 ```bash
@@ -468,6 +507,7 @@ npm run benchmark:streaming-stress           # Concurrency + size + abort latenc
 npm run benchmark:default-sizing-memory      # ADR-0019 default pool RSS comparison
 npm run benchmark:cpu-saturation             # Phase E — CPU saturation knee (T6 prep)
 npm run benchmark:io-throughput              # ADR-0024 sustained-rate (50k tasks, ~30s)
+npm run benchmark:hot-path                   # Section 21 — DR §8.2 probe perf contract (in `npm run validate`)
 npm run benchmark:adaptive-controller        # ADR-0014 tick overhead < 1 ms SLA
 npm run benchmark:adaptive-controller-opt-out # ADR-0014 opt-out overhead
 npm run benchmark:adaptive-concurrency       # ADR-0014 end-to-end grow/shrink
