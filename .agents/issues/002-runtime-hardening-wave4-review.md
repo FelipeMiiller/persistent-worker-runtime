@@ -3,7 +3,7 @@
 **Severity:** low-to-medium (1 hygiene fix, 1 cosmetic, 3 docs)
 **Found by:** post-implementation review of Wave 4 commits (`3882ee8` T9, `cdb8ce4` T10, `35cec8f` T11)
 **Date:** 2026-09-21
-**Closed:** 2026-09-22 (all 3 findings + Track 2 chunk leak fixed and shipped in **v0.2.0**)
+**Closed:** 2026-09-22 (Findings 1+2 + Track 2 chunk leak fixed and shipped in **v0.2.0**). Finding 3 closed 2026-09-25 alongside **v0.3.0** (doc-only).
 **Component:** `src/supervisor.js`, `src/worker-handle.js`, `src/worker-runtime.js`
 
 > Companion handoff for the "next chat" to pick up before declaring
@@ -205,7 +205,14 @@ worth duplicating in the user-facing getter for discoverability.
 
 ### Tracking
 
-- **Status:** ⏳ docs only — handle when T12 README updates land.
+- **Status:** ✅ done — 2026-09-25. `dispatchStrategy` getter in
+  `src/supervisor.js` and `src/worker-runtime.js` updated with an explicit
+  note that **fresh workers (`tasksCompleted === 0`) — whether newly
+  spawned OR just recycled — get priority in ALL strategies**, and that
+  the strategies only diverge once at least one task has completed. The
+  prior wording ("Recycled-fresh workers...") implied recycled was the
+  only path to fresh, missing the more common newly-spawned case. Pre
+  v0.3.0 documentation gap closed alongside the v0.3.0 release.
 
 ---
 
@@ -267,7 +274,7 @@ poll never blocks event loop shutdown.
 |---|------|--------|
 | 1 | Finding 1 — T11 backoff Promise leak fix | ✅ fixed (`714f1e6`) |
 | 2 | Finding 2 — T10 `#startWorkerPoll` simplification | ✅ fixed (`12f7603`) |
-| 3 | Finding 3 — T9 fresh-priority doc note in getter | ⏳ docs |
+| 3 | Finding 3 — T9 fresh-priority doc note in getter | ✅ fixed (2026-09-25) |
 | 4 | Track 2 (chunk leak) — un-skip the `streaming-edge-cases` test, add guard | ✅ fixed (`b5c4bde`) |
 | 5 | Track 5 (hot-path CI gate) — wire `benchmarks/hot-path-micro.benchmark.js` into `npm run validate` or pre-push | ⏳ queue |
 | 6 | T12 docs — README § / BENCHMARKS § / HANDOVER refresh / STATE.md final + ADR-0024 status `Proposed` → `Accepted` | ⏳ queue |

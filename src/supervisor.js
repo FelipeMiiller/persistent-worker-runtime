@@ -289,8 +289,12 @@ export class Supervisor extends EventTarget {
   // HARDEN-09 (ADR-0024 D1): exposes the configured dispatch strategy.
   // `'lru'` (default) round-robins through idle workers in spawn order;
   // `'fifo'` preserves the pre-HARDEN-09 first-idle-wins behavior;
-  // `'random'` picks uniformly among idle workers. Recycled-fresh
-  // workers (`tasksCompleted === 0`) get priority in ALL strategies.
+  // `'random'` picks uniformly among idle workers. **Fresh workers
+  // (`tasksCompleted === 0`) — whether newly spawned OR just recycled —
+  // get priority in ALL strategies.** Strategies only diverge once a
+  // worker has completed at least one task, so the first `workers`
+  // dispatches of a fresh pool observe identical behavior across
+  // `lru`/`fifo`/`random`. See `.agents/issues/002-...md` Finding 3.
   get dispatchStrategy() {
     return this.#dispatchStrategy;
   }

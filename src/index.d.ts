@@ -596,7 +596,14 @@ export class WorkerRuntime extends EventTarget {
   get minRecycleIntervalMs(): number;
   /** HARDEN-08: whether to recycle on `maxTasksPerWorker`. Default `true`. */
   get recycleOnTasksExhausted(): boolean;
-  /** HARDEN-09: dispatch strategy. Default `'lru'`. */
+  /** HARDEN-09: dispatch strategy. Default `'lru'`.
+   *
+   * Fresh workers (`tasksCompleted === 0`) — whether newly spawned OR
+   * just recycled — get priority in ALL strategies. The strategies only
+   * diverge once at least one worker has completed a task, so the first
+   * `workers` dispatches of a fresh pool observe identical behavior
+   * across `lru`/`fifo`/`random`. See `.agents/issues/002-...md` Finding 3.
+   */
   get dispatchStrategy(): 'fifo' | 'lru' | 'random';
   /** HARDEN-05: whether `worker:memory` events are emitted. Default `false`. */
   get observeWorkerMemory(): boolean;
