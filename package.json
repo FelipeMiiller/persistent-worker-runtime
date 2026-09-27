@@ -82,10 +82,10 @@
     "lint-staged": "^17.5.1"
   },
   "lint-staged": {
-    "*.{js,mjs,cjs,json}": [
+    "+(src|test|examples|benchmarks)/**/*.{js,mjs,cjs,json}": [
       "biome check --write"
     ],
-    "!*.skill-meta.json": [
+    "*.{js,mjs,cjs,json}": [
       "biome check --write"
     ]
   }
