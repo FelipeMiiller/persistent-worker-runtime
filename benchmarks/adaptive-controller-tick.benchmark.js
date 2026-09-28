@@ -81,6 +81,27 @@ function measureTicks(n, perTick) {
   };
 }
 
+/**
+ * Warm up, then keep the best (lowest) p50 across several rounds.
+ *
+ * Same rationale as `measureTicksStable` in
+ * `adaptive-controller-opt-out.benchmark.js`: a single unwarmed pass of a
+ * microsecond-scale body measures the OS scheduler as much as the code.
+ * The first configuration measured in a sweep is systematically
+ * penalised because the JIT has not settled yet, which here would
+ * inflate the 1-listener baseline and make the scaling ratio
+ * misleadingly favourable.
+ */
+function measureTicksStable(n, perTick, { rounds = 5, warmup = 2_000 } = {}) {
+  for (let i = 0; i < warmup; i++) perTick();
+  let best = null;
+  for (let r = 0; r < rounds; r++) {
+    const result = measureTicks(n, perTick);
+    if (best === null || result.p50 < best.p50) best = result;
+  }
+  return best;
+}
+
 async function phase1SingleTickCost() {
   console.log('── Phase D-1: tick() overhead (median + tail) ─────────────────────');
   const controller = createAdaptiveController({
@@ -95,7 +116,7 @@ async function phase1SingleTickCost() {
   });
 
   const N = 10_000;
-  const result = measureTicks(N, () => controller.tick());
+  const result = measureTicksStable(N, () => controller.tick());
   const avg = result.total / N;
 
   console.log(`  iterations:         ${N.toLocaleString()}`);
@@ -136,7 +157,7 @@ async function phase2ListenerScaling() {
         /* noop listener — exists only to grow the snapshot set */
       });
     }
-    const result = measureTicks(N, () => controller.tick());
+    const result = measureTicksStable(N, () => controller.tick());
     rows.push({ count, p50: result.p50, p99: result.p99 });
   }
 
