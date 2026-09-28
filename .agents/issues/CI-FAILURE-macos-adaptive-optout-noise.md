@@ -101,6 +101,15 @@ The 2.15× outlier is gone; the spread is now ~±2% instead of swinging past the
   reporting a tail. If p50 is identical but p99 differs, you are measuring jitter.
 - **When a matrix leg fails alone, compare p50 across the paths before theorising about a
   regression.** An identical p50 with a divergent p99 is a near-certain noise diagnosis.
-- This is the same family as the other two benchmark bugs fixed this week (see
+- **A missing warmup biases a sweep, not just a single measurement.** A follow-up audit of all 23
+  benchmarks found `adaptive-controller-tick.benchmark.js` had the same unwarmed pass across a
+  sweep of `{0, 1, 10}` listeners. Because the *first* configuration measured is systematically
+  penalised, the 1-listener baseline was inflated and the scaling ratio looked artificially
+  favourable — a permissive gate, not a flaky one, and just as wrong. Fixed in `ec49558` with the
+  same `measureTicksStable` helper.
+- `hot-path-micro.benchmark.js` was the control case: it already had a 1000-iteration warmup,
+  consistent with it being the one benchmark wired into `npm run validate` and the one that never
+  flaked.
+- This is the same family as the other benchmark bugs fixed this week (see
   `io-throughput-preempted-accounting.md` and `CI-FAILURE-windows-broadcast-fanout.md`): a
   benchmark assertion that was not reproducible before it was made a gate.
