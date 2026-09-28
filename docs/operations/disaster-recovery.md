@@ -278,7 +278,7 @@ Quick reference (full detail follows):
 | 8.1  | SIGTERM handler with drain timeout         | deferred | User-wired `process.on('SIGTERM', () => runtime.shutdown())` — see `skills/.../references/observability.md §Lifecycle`           |
 | 8.2  | Health-check endpoint (`/healthz`, `/readyz`) | closed (2026-09-24) | Runtime exposes `isAlive()` + `isReady()` (ADR-0024); user wires HTTP / cron / script transport — see `src/worker-runtime.js:712–762` |
 | 8.3  | OpenTelemetry traces                       | deferred | User installs `@opentelemetry/api`; runtime preserves `AsyncResource` context across the main → worker boundary (transport only)|
-| 8.4  | Durable queue backend (SQLite via `node:sqlite`) | in-progress | `queueBackend: 'memory'` is the v0.2.x default; production users enable `queueBackend: 'sqlite'` (ADR-0020) for RPO=0 |
+| 8.4  | Durable queue backend (SQLite via `node:sqlite`) | **shipped (2026-09-24)** | `queueBackend: 'sqlite'` ships in v0.3.0 (`a515998`); T13 + T13.1 + T13.2. See `src/queue/sqlite-backend.js` |
 | 8.5  | Chaos game day playbook                    | missing  | —                                                                                                                                  |
 | 8.6  | Cross-region snapshot automation           | missing  | —                                                                                                                                  |
 
@@ -293,6 +293,7 @@ Quick reference (full detail follows):
   ```js
   process.on('SIGTERM', () => runtime.shutdown());
   ```
+- **A runnable recipe now exists**: `examples/sigterm-drain.js` (commit `4c9471a`, 2026-09-27). It implements the full pattern — an idempotent handler guard so a second `SIGTERM` mid-drain is a no-op, plus a hard-timeout fallback (`process.exit(1)` after 30 s) so a stuck worker cannot leave a zombie process under an orchestrator deadline. Measured drain: ~9 ms for 4 in-flight 100 ms tasks.
 - **No built-in signal-listener registration** in `src/`. Installing the listener inside `createWorkerRuntime()` is currently the user's responsibility.
 
 **Why deferred**: requires settling API shape across three boundaries — (a) supervisor / runtime / process-lifecycle ownership (who owns the `process` listener when the runtime is one of many in a process?), (b) re-entrancy (a second `SIGTERM` mid-shutdown must not start a parallel drain), and (c) k8s-style grace-period semantics (`terminationGracePeriodSeconds` ≈ 30s default). All three are spec decisions rather than code; deferring avoids baking in an opinion before a production deployment exposes the real constraints.
@@ -377,7 +378,7 @@ Without production telemetry to anchor these choices, building first locks us in
 
 ---
 
-### 8.4 Durable queue backend (SQLite via `node:sqlite`) — **in-progress**
+### 8.4 Durable queue backend (SQLite via `node:sqlite`) — **shipped (v0.3.0)**
 
 **Goal**: `createWorkerRuntime({ queueBackend: 'sqlite', sqlite: { path: '/var/lib/pwr/queue.db' } })` so `dispatch()` writes to a SQLite queue table and workers pull via `BEGIN IMMEDIATE TRANSACTION` + `SELECT … ORDER BY priority DESC, enqueued_at ASC LIMIT 1` + `UPDATE state='processing'`. Closes the RPO>0 gap on S1 (single-instance crash) for typical workloads without an external dependency.
 
@@ -395,9 +396,9 @@ Without production telemetry to anchor these choices, building first locks us in
 - **TaskHandle ↔ envelope deserialization**: the live `TaskHandle` carries live `Promise`s and `AbortSignal` subscribers that must not be serialized. The SQLite backend persists just the *envelope* (id, type, payload, fn source, transferList-compatible fields, priority, affinity, retry config) and reconstructs a fresh `TaskHandle` on dispatch — the original dispatch Promise becomes dangling on crash, matching the existing in-memory behavior (DR §5.2.1 surfaces this honestly).
 - **Migration story**: existing single-instance users get the new option as additive, but tests / benchmarks must keep both code paths green.
 
-**Workaround today** (while §8.4 ships): per §5.2.1 — front the runtime with an external queue (SQS, Kafka, etc.). The runtime does not ship drivers for any of them; callers own the integration. For users not on a managed-queue tier, the default `queueBackend: 'memory'` continues to work as the v0.2.x floor.
+**Workaround today** (for users who need cross-process or multi-instance coordination): per §5.2.1 — front the runtime with an external queue (Postgres, SQS, Kafka). The runtime does not ship drivers for any of them; callers own the integration. For single-instance deployments, `queueBackend: 'sqlite'` is the shipped answer and needs no external service.
 
-**Estimated effort to close**: ~250 LOC across `src/queue/sqlite-backend.js` + schema migration + tests + benchmarking. **This work is the active branch** (`examples/recycle-retry-preemption` evolved into `feat/sqlite-queue-backend` — T13). Owner: Felipe Miiller.
+**Status: SHIPPED in v0.3.0** (2026-09-24, release commit `a515998`). T13 base `92b6c0e`, T13.1 hardening `876d5f7`, T13.2 lease reclaim + retry budget `181c72c`. The estimated "~250 LOC / active branch" note that previously sat here was stale by one release cycle — the work landed and the `feat/sqlite-queue-backend` branch is historical. Implementation notes: `src/queue/sqlite-backend.js`; spec at `.specs/features/durable-queue/spec.md`; examples at `examples/durable-task-*.js`.
 
 > Note: ADR-0020 originally chose an **RDBMS-backed** queue as the primary recommendation (2026-09-18). The choice was **revised to SQLite on 2026-09-24** because `node:sqlite` is now stable in Node ≥ 22.13 — no peer dependency, ADR-0005 preserved. External backends were then explicitly removed as alternatives on 2026-09-24 per project direction.
 
@@ -409,7 +410,9 @@ Without production telemetry to anchor these choices, building first locks us in
 
 **Current state**: missing. §7 lists the test cadence (weekly / monthly / quarterly) but no executable drill scripts.
 
-**Estimated effort to close**: ~150 LOC bash + ~50 lines of runbook entries. Owner: TBD.
+**Scope note**: this is **deployment-side** work, not library code. The runtime's failure modes are already exercisable without any external tooling — `examples/durable-task-recovery-runtime.js` covers the crash-mid-dispatch case, and `benchmarks/preemption-recovery.benchmark.js` covers watchdog preemption. What is missing is the *drill harness* (chaos-mesh / Gremlin wiring plus a written playbook), which only exists once someone runs this runtime in production and picks a chaos vendor.
+
+**Estimated effort to close**: ~150 LOC bash + ~50 lines of runbook entries. Owner: TBD — blocked on a production deployment existing, not on library work.
 
 ---
 
@@ -419,7 +422,9 @@ Without production telemetry to anchor these choices, building first locks us in
 
 **Current state**: missing. §4 §SQLite row documents today's manual cross-region snapshot (Litestream target is the next step).
 
-**Estimated effort to close**: depends on cloud choice (Terraform module + AWS Backup plan ≈ 80 LOC; GCP equivalent ≈ 100 LOC). Owner: TBD.
+**Scope note**: **infrastructure-as-code**, not library code. It is only actionable once a deployment has a region pair and a storage backend chosen. The `node:sqlite` queue file is a single file, so the snapshot story is "copy one file" — Litestream (continuous WAL shipping) is the natural fit and needs no application change.
+
+**Estimated effort to close**: depends on cloud choice (Terraform module + AWS Backup plan ≈ 80 LOC; GCP equivalent ≈ 100 LOC). Owner: TBD — blocked on deployment topology, not on library work.
 
 ---
 
