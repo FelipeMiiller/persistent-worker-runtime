@@ -78,15 +78,24 @@ async function runBenchmark() {
   await new Promise((r) => setTimeout(r, 50));
 
   const dispatchStart = performance.now();
+  // Collect the handles so we can (a) keep the timing loop free of
+  // extra work and (b) await real completion before shutdown. Without
+  // this, `shutdown()` destroys the queue while tasks are still in
+  // flight, every pending TaskHandle rejects, and the unhandled
+  // rejection kills the process (exit 1). This is exactly what
+  // happened on windows-latest / Node 22.x in CI run 36178398974.
+  const pending = [];
   for (let i = 0; i < dispatchIterations; i++) {
-    // 4 dispatch() calls per "broadcast" — one per worker. We use small
-    // synchronous tasks that settle immediately so shutdown drains cleanly.
+    // 4 dispatch() calls per "broadcast" — one per worker. Small
+    // synchronous tasks that settle quickly.
     for (let w = 0; w < 4; w++) {
-      r2.dispatch({
-        type: 'invalidate',
-        payload: { workerIdx: w, n: i },
-        fn: () => 'ack',
-      });
+      pending.push(
+        r2.dispatch({
+          type: 'invalidate',
+          payload: { workerIdx: w, n: i },
+          fn: () => 'ack',
+        }).promise,
+      );
     }
   }
   const dispatchDuration = performance.now() - dispatchStart;
@@ -99,8 +108,10 @@ async function runBenchmark() {
     `  -> Effective throughput: ${(dispatchIterations / (dispatchDuration / 1000) / 1000).toFixed(1)}k fan-outs/s`,
   );
 
-  // Drain pending invalidates before shutdown so the queue doesn't block
-  await new Promise((r) => setTimeout(r, 200));
+  // Await real completion instead of a fixed sleep. The queue depth at
+  // 2000 tasks / 4 workers means a 200ms wait was not enough on
+  // windows-latest, so shutdown raced the drain.
+  await Promise.allSettled(pending);
   await r2.shutdown();
 
   // ---------- Conclusion ----------
