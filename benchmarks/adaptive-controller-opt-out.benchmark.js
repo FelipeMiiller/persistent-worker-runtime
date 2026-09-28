@@ -69,6 +69,30 @@ function measureTicks(n, perTick) {
 }
 
 /**
+ * Repeatedly measure `perTick` and keep the best (lowest) p99.
+ *
+ * A single measured run of a few-microsecond body is dominated by
+ * scheduler jitter, not by the code under test: on windows-latest /
+ * Node 24 one OS preemption inflates p99 from ~35us to ~75us, which
+ * turned a 2.0x-parity assertion into a 2.15x failure even though p50
+ * was byte-identical between the two paths (0.024 ms each).
+ *
+ * Taking the minimum p99 across several rounds rejects those outliers:
+ * a real cost difference shows up in EVERY round, while a scheduling
+ * hiccup shows up in at most one. The warmup pass lets the JIT settle
+ * before any round is recorded.
+ */
+function measureTicksStable(n, perTick, { rounds = 5, warmup = 2_000 } = {}) {
+  for (let i = 0; i < warmup; i++) perTick();
+  let best = null;
+  for (let r = 0; r < rounds; r++) {
+    const result = measureTicks(n, perTick);
+    if (best === null || result.p99 < best.p99) best = result;
+  }
+  return best;
+}
+
+/**
  * Phase C-1: runtime-level opt-out overhead.
  * Constructs one runtime with adaptive enabled (concurrency: 'auto') and
  * one with adaptive disabled (concurrency: 'fixed'), then compares the
@@ -234,19 +258,21 @@ async function phaseC3CostParity() {
 
   const N = 5_000;
 
-  const enabledCtrl = createAdaptiveController({
-    minWorkers: 1,
-    maxWorkers: 4,
-    enabled: true,
-  });
-  const enabledResult = measureTicks(N, () => enabledCtrl.tick());
+  // Identical measurement for both paths: same warmup, same round count.
+  // The controllers are built identically so neither is favoured by
+  // construction order.
+  const makeCtrl = (enabled) =>
+    createAdaptiveController({
+      minWorkers: 1,
+      maxWorkers: 4,
+      enabled,
+    });
 
-  const disabledCtrl = createAdaptiveController({
-    minWorkers: 1,
-    maxWorkers: 4,
-    enabled: false,
-  });
-  const disabledResult = measureTicks(N, () => disabledCtrl.tick());
+  const enabledCtrl = makeCtrl(true);
+  const enabledResult = measureTicksStable(N, () => enabledCtrl.tick());
+
+  const disabledCtrl = makeCtrl(false);
+  const disabledResult = measureTicksStable(N, () => disabledCtrl.tick());
 
   console.log(
     `  enabled:true  p50 = ${formatMs(enabledResult.p50)}  p99 = ${formatMs(enabledResult.p99)}`,
@@ -259,11 +285,30 @@ async function phaseC3CostParity() {
   // (We don't assert strict equality because the fire handler runs
   //  occasionally on enabled:true, and a fire allocates a snapshot.)
   const ratio = disabledResult.p99 / enabledResult.p99;
+  const p50Ratio = disabledResult.p50 / enabledResult.p50;
   console.log(`  p99 ratio (disabled / enabled): ${ratio.toFixed(2)}x`);
+  console.log(
+    `  p50 ratio (disabled / enabled): ${p50Ratio.toFixed(2)}x  (best of 5 rounds, after warmup)`,
+  );
+
+  // p50 is the load-bearing signal here. Both paths run the identical
+  // sample + classify + debounce.note body; the only difference is the
+  // fire handler, which fires at most every `debounceTicks` ticks. So the
+  // real per-tick cost must match, and p50 reflects that directly. p99 is
+  // reported for tail visibility but a single p99 ratio is scheduler-noise
+  // sensitive at the ~35us scale, which is what made this fail spuriously.
+  if (p50Ratio > 1.5) {
+    console.error(
+      `  FAIL: disabled controller costs ${p50Ratio.toFixed(2)}× the enabled one on p50 ` +
+        `(budget: 1.5×) — the opt-out path is doing extra work per tick.`,
+    );
+    return false;
+  }
 
   if (ratio > 2.0) {
     console.error(
-      `  FAIL: disabled controller costs ${ratio.toFixed(2)}× the enabled one (budget: 2×).`,
+      `  FAIL: disabled controller costs ${ratio.toFixed(2)}× the enabled one on p99 (budget: 2×). ` +
+        `p50 ratio was ${p50Ratio.toFixed(2)}×, so this is a tail outlier, not a per-tick cost regression.`,
     );
     return false;
   }
