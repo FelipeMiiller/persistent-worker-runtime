@@ -448,6 +448,19 @@ export class WorkerRuntime extends EventTarget {
       this.emit('worker:memory', data);
     });
 
+    // Preemption fans out `task:preempted` but deliberately does NOT emit
+    // `task:failed` for the same task. ADR-0011 (Decision Driver #4) makes
+    // the distinction the contract: `TaskTimeoutError.preempted === true`
+    // separates a forced kill from a cooperative timeout, and folding
+    // preemption into `task:failed` would erase it. Consumers that want
+    // "the task did not succeed" read `runtime.stats().failedTasks`, which
+    // DOES include preemption; consumers that want to know *why* read the
+    // `task:preempted` event or catch `TaskTimeoutError.preempted`.
+    //
+    // Note: the handle is already rejected by `WorkerHandle.#preemptWorker`
+    // (`src/worker-handle.js`) before this handler runs, so the caller's
+    // promise and `onError` callbacks are settled — this handler only
+    // updates counters and fans out the public event.
     this.#supervisor.on('task_preempted', (data) => {
       this.#stats.preemptedTasksCount++;
       this.#stats.failedTasks++;

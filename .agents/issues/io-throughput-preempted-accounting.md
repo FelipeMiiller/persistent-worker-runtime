@@ -71,16 +71,54 @@ plus memory-driven recycling appears to produce extra preemptions on Windows. It
 the accounting fix, and the benchmark only warns (`⚠`) when `preemptedCount < 1`, so it is not a
 gate.
 
-## Why the runtime was NOT changed
+## Why the runtime was NOT changed — resolved 2026-09-27, it is correct as written
 
-The gap is arguably a runtime observability decision — should a preempted task also emit
-`task:failed`? Changing the event surface would affect every consumer, is not covered by a test
-(`grep 'task:preempted' test/` returns nothing), and has no ADR or spec requirement mandating it.
-Per the project's "verify before formalizing" rule, there is no evidence the omission is a defect
-rather than a deliberate distinction between "the task failed" and "the worker was killed under the
-task". The benchmark is where the knowledge lives (it already tracks the counter and prints it), so
-the fix belongs there. If the omission *is* in fact a defect, that is a separate change needing an
-ADR plus test coverage.
+Investigated on 2026-09-27 and **closed**: the current behaviour is deliberate and correct. The
+premature worry was that a preempted task's `TaskHandle` might be left unsettled. It is not.
+
+The rejection happens one layer down, in `WorkerHandle.#preemptWorker` (`src/worker-handle.js`):
+
+```js
+currentTask.reject(timeoutErr);                    // line 564 — handle IS rejected
+
+this.emit('task_preempted', {                      // line 566 — and only then
+  workerId: this.id,
+  taskId: currentTask.id,
+  timeoutMs: currentTask.timeoutMs,
+  preempted: true,
+});
+```
+
+`TaskHandle.reject()` (`src/task-handle.js:221-241`) sets `#settled`, calls `this._reject(error)`,
+and invokes every registered `onError` callback inside the task's `AsyncResource`. So the caller's
+promise settles promptly and `handle.onError(...)` fires — **there is no hung handle**. By the time
+the runtime's `task_preempted` handler runs, the task is already terminal at the handle level; that
+handler only updates counters and fans out the public event.
+
+Three independent sources confirm that emitting only `task:preempted` is the intended contract:
+
+1. **ADR-0011** (the ADR that introduced preemption), Decision Driver #4: *"Must provide explicit
+   error classification (`TaskTimeoutError` with `preempted: true`) to distinguish cooperative
+   timeouts from forced preemptive kills."* The distinction **is** the point. If preemption also
+   emitted `task:failed`, it would be diluted into the same stream consumers already use for
+   ordinary failures.
+2. **`TaskTimeoutError.preempted` is an explicit discriminator** (see `src/index.d.ts`), covered by
+   `test/preemption.test.js:32` (`false`) and `:40` (`true`). A separate event would make that flag
+   redundant.
+3. **The telemetry test asserts the two counters independently** —
+   `test/preemption.test.js:478-479` asserts `preemptedTasksCount === 1` **and**
+   `failedTasks === 1` for the same task. The aggregates and the event stream answer different
+   questions on purpose.
+
+**The actual lesson is the one that caused this bug:** `stats.failedTasks` and the `task:failed`
+event are *not* two views of the same fact. The counter is an aggregate that *includes* preemption;
+the event is the stream of task-level failures. Assuming they correspond is what produced the
+flawed benchmark assertion in the first place — and it is why the fix counts distinct `taskId`s
+instead of doing arithmetic on the counters.
+
+**No ADR is needed**: the existing ADR-0011 already mandates the current behaviour, and
+`test/preemption.test.js` already covers it. The docstring in `src/worker-runtime.js:451` was the
+one place lacking that context; see the note added there.
 
 ## Resolution
 

@@ -451,6 +451,84 @@ describe('Hard Preemption - Supervisor Autonomous Pool Healing (T3)', () => {
 });
 
 describe('Hard Preemption - Telemetry & Types (T4)', () => {
+  // Regression guard for ADR-0011 Decision Driver #4.
+  //
+  // Preemption fans out `task:preempted` but must NOT emit `task:failed`
+  // for the same task — that distinction is what lets a consumer tell a
+  // forced kill from a cooperative timeout. `runtime.stats().failedTasks`
+  // DOES include preemption, so the counter and the event stream are
+  // intentionally not two views of the same fact.
+  //
+  // This previously had no test. `benchmarks/io-throughput.benchmark.js`
+  // wrongly assumed the counter and the event correspond, and its Phase 1
+  // accounting assertion failed by exactly the number of preemptions
+  // (see .agents/issues/io-throughput-preempted-accounting.md).
+  it('emits task:preempted but NOT task:failed, and still settles the handle', async () => {
+    const runtime = await createWorkerRuntime({
+      workers: 1,
+      forceKillOnTimeout: true,
+      killGracePeriodMs: 0,
+    });
+
+    const preemptedEvents = [];
+    const failedEvents = [];
+    runtime.on('task:preempted', (d) => preemptedEvents.push(d));
+    runtime.on('task:failed', (d) => failedEvents.push(d));
+
+    try {
+      // The handle must settle with a preempted-flagged TaskTimeoutError —
+      // proving the rejection happens in WorkerHandle before the runtime
+      // handler runs, so no caller is left hanging.
+      await assert.rejects(
+        runtime.execute({
+          timeoutMs: 30,
+          fn: () => {
+            while (true) {}
+          },
+        }),
+        (err) => {
+          assert.equal(err.name, 'TaskTimeoutError');
+          assert.equal(err.preempted, true, 'error carries the preemption discriminator');
+          return true;
+        },
+      );
+
+      // onError must fire too — dispatch() users rely on this callback
+      // instead of the promise.
+      let onErrorSeen = null;
+      const handle = runtime.dispatch({
+        timeoutMs: 30,
+        forceKillOnTimeout: true,
+        killGracePeriodMs: 0,
+        fn: () => {
+          while (true) {}
+        },
+      });
+      handle.onError((err) => {
+        onErrorSeen = err;
+      });
+      await assert.rejects(handle.promise);
+
+      const deadline = Date.now() + 3000;
+      while (runtime.stats.preemptedTasksCount < 2 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      assert.ok(onErrorSeen, 'onError callback fired for the preempted task');
+      assert.equal(onErrorSeen.preempted, true);
+
+      // The contract: preemption is reported, but NOT as a task:failed.
+      assert.equal(preemptedEvents.length, 2, 'both preemptions emitted task:preempted');
+      assert.equal(failedEvents.length, 0, 'preemption must NOT emit task:failed');
+
+      // The aggregate counter, by contrast, DOES include preemption.
+      assert.equal(runtime.stats.failedTasks, 2);
+      assert.equal(runtime.stats.preemptedTasksCount, 2);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
   it('exposes and increments preemptedTasksCount in runtime.stats', async () => {
     const runtime = await createWorkerRuntime({
       workers: 1,
