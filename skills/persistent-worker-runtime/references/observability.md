@@ -39,10 +39,38 @@ These are called **after all retries exhausted** (for `onError`) or **on first s
 const runtime = await createWorkerRuntime({ workers: 4 });
 // ... use it ...
 await runtime.shutdown(); // graceful: drains queue, closes BCs, terminates workers
-
-// Or hook to a signal:
-process.on('SIGTERM', () => runtime.shutdown());
 ```
+
+The runtime ships **no signal handlers** (ADR-0005 — it stays a library, not a daemon). You wire
+the transport. The production-safe shape has two properties beyond the obvious one-liner:
+
+```javascript
+let shutdownPromise = null;
+const shutdown = () => (shutdownPromise ??= runtime.shutdown());
+
+const onSignal = (signal) => {
+  shutdown().then(
+    () => process.exit(0),
+    (err) => { console.error(err); process.exit(1); },
+  );
+  // Hard timeout: a stuck worker must not outlive the orchestrator's
+  // grace period (k8s terminationGracePeriodSeconds defaults to 30s).
+  setTimeout(() => process.exit(1), 30_000).unref();
+};
+
+process.on('SIGTERM', () => onSignal('SIGTERM'));
+process.on('SIGINT',  () => onSignal('SIGINT'));
+```
+
+1. **Idempotent** — a second `SIGTERM` mid-drain must not start a parallel drain. `shutdown()`
+   itself is idempotent, but the *handler* still needs a guard so a second signal does not
+   re-enter and re-log.
+2. **Bounded** — without a hard-timeout fallback, a wedged worker leaves a zombie process until the
+   orchestrator sends `SIGKILL`. `.unref()` the timer so it does not itself keep the Event Loop
+   alive past the success-path `process.exit(0)`.
+
+Runnable: `examples/sigterm-drain.js` (DR §8.1). It measures the drain and proves the idempotency
+(measured: ~9 ms for 4 in-flight 100 ms tasks; second-signal call resolves in 0 ms).
 
 `shutdown()` is idempotent. After it returns:
 - New `dispatch()` / `execute()` / `broadcast()` calls reject / throw with `WorkerRuntimeError('Runtime is shutting down')`

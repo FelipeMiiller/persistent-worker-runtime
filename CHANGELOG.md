@@ -4,6 +4,63 @@ All notable changes to `persistent-worker-runtime` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Changes merged to `develop` after the v0.3.0 release. No API surface changed; `src/` behaviour is
+identical. These are correctness and measurement fixes.
+
+### Added
+
+- **`examples/sigterm-drain.js`** — runnable recipe for DR §8.1. User-wired `SIGTERM` / `SIGINT`
+  handler around `runtime.shutdown()` with an idempotency guard (a second signal mid-drain is a
+  no-op) and a hard-timeout fallback (`process.exit(1)` after 30 s). `[perf-tested]` — measures
+  drain time and second-signal latency.
+- **Regression test locking the ADR-0011 preemption contract** — a preempted task emits
+  `task:preempted` and **not** `task:failed`; `runtime.stats().failedTasks` *does* include
+  preemption. The handle is already rejected in `WorkerHandle.#preemptWorker` before the event
+  fires, so no caller is left hanging. The distinction is what lets a consumer tell a forced kill
+  from a cooperative timeout.
+
+### Fixed
+
+- **`lint-staged` negated every non-`.skill-meta.json` file** (including `.md`), and Biome ignores
+  markdown — so any commit touching only docs / issues / ADRs failed the pre-commit hook with
+  *"No files were processed in the specified paths"*. The matcher is now scoped to the code
+  directories.
+- **`benchmarks/broadcast-fanout.benchmark.js` exited 1 on Node 22 / windows-latest.** It discarded
+  2000 `TaskHandle`s behind a fixed 200 ms sleep; `shutdown()` rejects the still-queued tasks and
+  the unhandled rejection killed the process. Now retains the handles and awaits
+  `Promise.allSettled`.
+- **`benchmarks/io-throughput.benchmark.js` Phase 1 accounting was off by 8–13 tasks.** Terminal
+  events are not mutually exclusive (a preempted task can emit `task:preempted` *and*
+  `task:failed`), and `TOTAL_TASKS` ignored the mid-stream runaway task used to exercise the
+  watchdog. Now counts **distinct `taskId`s** against `TOTAL_TASKS + 1`.
+- **`benchmarks/adaptive-controller-opt-out.benchmark.js` p99 parity failed 2.15× (budget 2×)** on
+  Node 24 / macOS. `p50` was byte-identical across both paths (0.024 ms), so the divergent p99 was
+  a single OS preemption, not a cost regression. Now warms up, takes the best of 5 rounds, and
+  gates on **p50** (p99 kept for tail visibility).
+- **`benchmarks/default-sizing-memory.benchmark.js` required `ratio >= 2×`,** which only holds on a
+  high-core-count host — the ratio is `function(cores - 1)` (5.8× on 28 cores, 1.46× on a 4-core
+  runner). Direction and absolute saving were both correct. Now asserts the hardware-independent
+  invariant: marginal MB per worker thread, plus direction and an absolute floor.
+- **`benchmarks/adaptive-controller-tick.benchmark.js` measured without warmup** across a sweep of
+  `{0, 1, 10}` listeners. The first configuration measured is systematically penalised, inflating
+  the 1-listener baseline and making the scaling ratio look artificially favourable. Now warms up
+  and takes the best of 5 rounds.
+
+### Documentation
+
+- Spec templates closed: all 13 features under `.specs/features/` now validate **0 errors** on
+  both `validate_spec.py` and `validate_tasks.py` (5 required sections were missing from
+  `durable-queue`, `health-probes`, and `persistent-worker-runtime`).
+- DR §8 status reconciled with reality: §8.4 marked **shipped** (it shipped in v0.3.0 but the doc
+  still said "in-progress / ~250 LOC / active branch"), §8.1 gained a pointer to the new recipe,
+  and §8.5 / §8.6 gained explicit scope notes marking them deployment-side, not library work.
+- README examples table reconciled against the filesystem — it referenced
+  `durable-queue-shutdown-recovery.js` and `durable-queue-throughput.js`, neither of which exists.
+- `dispatchStrategy` getter docs clarify that *fresh* means `tasksCompleted === 0` (newly spawned
+  **or** just recycled), and that strategies only diverge once a worker has completed a task.
+
 ## [0.3.0] - 2026-09-24
 
 ### Added

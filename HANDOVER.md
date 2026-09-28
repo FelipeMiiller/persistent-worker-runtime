@@ -69,14 +69,21 @@
 
 ### Tracked work (`.agents/issues/`)
 - **`001-supervisor-start-not-idempotent.md`** — ✅ FIXED (`5c4069c` + `205c384`).
-- **`002-runtime-hardening-wave4-review.md`** — ✅ CLOSED 2026-09-22 (all 3 findings + Track 2 chunk leak shipped in v0.2.0).
-- **`CI-FAILURE-macos-benchmarks.md`** — 🟡 TRACKED — pre-existing macOS-Latest ARM64 benchmark failure (T13+ portable benchmarks). Not blocking merge/release.
+- **`002-runtime-hardening-wave4-review.md`** — ✅ CLOSED (Findings 1+2 + Track 2 shipped in v0.2.0; Finding 3 doc note closed 2026-09-27).
+- **`003-spec-validation-drift.md`** — ✅ FIXED 2026-09-27. All 13 features validate 0 errors on both `validate_spec.py` and `validate_tasks.py`.
+- **`CI-FAILURE-macos-benchmarks.md`** — ✅ RESOLVED 2026-09-23 (platform-aware threshold in `cpu-saturation.benchmark.js`).
+- **`CI-FAILURE-windows-broadcast-fanout.md`** — ✅ FIXED 2026-09-27. `broadcast-fanout` discarded 2000 `TaskHandle`s behind a fixed sleep; the unhandled rejection on `shutdown()` exited 1.
+- **`CI-FAILURE-macos-adaptive-optout-noise.md`** — ✅ FIXED 2026-09-28. Single unwarmed p99 pass was scheduler noise; now warmup + best-of-5, gated on p50.
+- **`CI-FAILURE-macos-default-sizing-hardware-calibration.md`** — ✅ FIXED 2026-09-28. Ratio threshold was calibrated to the author's 28-core host; now asserts marginal MB per worker.
+- **`io-throughput-preempted-accounting.md`** — ✅ FIXED 2026-09-27. Now counts distinct terminal `taskId`s against `TOTAL_TASKS + 1`.
 
 ---
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Current state**: v0.2.1 is shipped. All feature ADRs complete. No urgent release work pending.
+**Current state**: v0.3.0 is shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix. No urgent release work pending.
+
+**Only remaining repo action**: promote `develop` → `main` (fast-forward, currently ~33 commits). That is a deliberate maintainer decision, not library work.
 
 ### Open follow-ups (in priority order)
 

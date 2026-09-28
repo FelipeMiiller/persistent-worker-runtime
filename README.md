@@ -761,11 +761,16 @@ Run any example directly with `node examples/<name>.js`:
 | `cancel-on-disconnect.js` | Manual cancellation, `AbortSignal.timeout()`, and pre-aborted signals. |
 | `broadcast-cache-invalidation.js` | L1 cache invalidation across workers via `context.channel()` + `runtime.broadcast()`. |
 | `streaming-llm.js` | Token-streaming LLM-style consumer — TTFT measurement, `AbortSignal` mid-stream, runtime event counts. |
-| `durable-task-recovery-runtime.js` | T13 — submit tasks to `SqliteTaskQueue`, kill the runtime mid-flight, restart it, watch lease-based orphan recovery reclaim the in-flight tasks. Demonstrates the retry budget too: tasks with `retries: 0` land in `failed` instead of leaking into an infinite reclaim loop. |
-| `durable-queue-shutdown-recovery.js` | Companion to the recovery example — exercises the full T13.1 hardening surface: atomic check, corrupt envelope quarantine, WAL checkpoint. |
-| `durable-queue-throughput.js` | Throughput benchmark for the SQLite backend vs the in-memory `TaskQueue` (memory backend is faster but ephemeral; SQLite is durable). |
 | `streaming-csv-export.js` | Fast producer + slow consumer with `highWaterMark: 8` — prints the backpressure timeline (paused / resumed crossings). |
+| `worker-recycling.js` | Automatic worker recycling observable end-to-end — `worker:recycling` / `worker:recycled` events. |
+| `adaptive-concurrency.js` | Adaptive pool sizing (ADR-0014) — `runtime.stats.adaptive` block as the pool grows and shrinks. |
 | `event-target-pattern.js` | EventTarget observation patterns: `addEventListener` with `{ signal }` for AbortController cleanup, bounded-N event collector, manual `removeEventListener`. Recommended for v0.3.x+ code (the runtime now extends web-standard `EventTarget`; the `.on()` / `.off()` compat shim is scheduled for v0.4.x removal). |
+| `sigterm-drain.js` | **DR §8.1 recipe** — user-wired `SIGTERM` / `SIGINT` handler around `runtime.shutdown()` with an idempotency guard (a second signal mid-drain is a no-op) and a hard-timeout fallback (`process.exit(1)` after 30 s) so a stuck worker cannot leave a zombie under an orchestrator deadline. The runtime ships no signal handlers (ADR-0005); you wire the transport. |
+| `durable-task-queue.js` | Durable queue across runtime restarts — enqueue to `SqliteTaskQueue`, restart, and see the rows survive. |
+| `durable-task-recovery-runtime.js` | T13 — submit tasks to `SqliteTaskQueue`, kill the runtime mid-flight, restart it, watch lease-based orphan recovery reclaim the in-flight tasks. Demonstrates the retry budget too: tasks with `retries: 0` land in `failed` instead of leaking into an infinite reclaim loop. |
+| `durable-task-priority.js` | Priority ordering and `affinityKey` routing preserved across a restart — the ordering guarantees of the in-memory `TaskQueue` hold on disk. |
+| `durable-task-multi-instance.js` | Two runtime instances sharing one SQLite queue file — lease-based claiming means only one instance ever holds a given row. |
+| `durable-task-vacuum.js` | T13.1 hardening surface — `vacuumCompleted()` row reclaim plus `checkpointWal()` (`PRAGMA wal_checkpoint(TRUNCATE)`) to stop a long-lived queue file from growing without bound. |
 
 ## 🤖 Agent Skill (Embedded)
 
