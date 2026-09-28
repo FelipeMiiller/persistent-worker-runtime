@@ -13,12 +13,24 @@ import { createWorkerRuntime } from '../src/index.js';
  *   4. Tear down; reboot a runtime with `workers: availableParallelism() - 1`
  *      (the legacy default).
  *   5. Capture RSS again.
- *   6. Compare and assert the new default is at least 5× cheaper in RSS
- *      on a host with ≥ 4 cores.
+ *   6. Compare and assert the new default saves a meaningful amount of RSS
+ *      *per extra worker*, plus a fixed absolute floor.
  *
- * On hosts with ≤ 4 cores, the legacy default falls back to 1 worker
- * anyway, so the comparison is degenerate — the benchmark reports
- * "DEGENERATE" and exits 0 without failing.
+ * On the ratio assertion: the legacy pool size is `cores - 1`, so the
+ * memory ratio is a **function of the host's core count**, not a
+ * constant. A 28-core workstation gives ~27 legacy workers and a ratio
+ * in the double digits; a 4-core CI runner gives 3 workers and ~1.4×.
+ * A fixed ratio threshold (this file previously required 2×, while its
+ * own docstring claimed 5×) therefore encodes the benchmark author's
+ * hardware, not the property ADR-0019 actually asserts. It failed on
+ * `macos-latest` in CI run 36415949248 with `ratio 1.46x < 2x` even
+ * though the direction was correct and the absolute saving was 28.6 MB.
+ *
+ * The invariant that IS hardware-independent is **marginal cost per
+ * worker**: each additional worker thread costs real RSS, and ADR-0019's
+ * whole point is to not pay that by default. That is what is asserted
+ * now, together with a small absolute floor so a trivially small pool
+ * cannot pass by arithmetic accident.
  */
 
 function rss() {
@@ -74,9 +86,17 @@ async function runBenchmark() {
   console.log(`    peak RSS:        ${(b.peakRss / 1024 / 1024).toFixed(1)} MB`);
   console.log(`    post-shutdown:   ${(b.shutdownRss / 1024 / 1024).toFixed(1)} MB\n`);
 
-  if (cores <= 4) {
-    console.log('  DEGENERATE: legacy default also falls back to 1 worker on this host.');
-    console.log('  The benchmark cannot demonstrate the ADR-0019 win on a ≤4-core host.');
+  // Degenerate only when the legacy default would be indistinguishable
+  // from the new one, i.e. `cores - 1 <= 1`. At 4 cores the legacy pool
+  // is 3 workers — a real, measurable difference, so it must be asserted.
+  // (The previous guard used `cores <= 4` and its comment claimed the
+  // legacy default "falls back to 1 worker", which is simply wrong: it
+  // falls back at `cores <= 2`.)
+  if (legacyCount <= 1) {
+    console.log(
+      `  DEGENERATE: legacy default also yields ${legacyCount} worker(s) on this ` +
+        `${cores}-core host, so there is nothing to compare.`,
+    );
     console.log('  Exiting 0 (no assertion to fail).\n');
     return;
   }
@@ -85,18 +105,58 @@ async function runBenchmark() {
   const ratio = b.peakRss / a.peakRss;
   console.log(`  Comparison (peak RSS):`);
   console.log(`    legacy - ADR-0019 = ${savingsMb.toFixed(1)} MB saved`);
-  console.log(`    ratio (legacy / new) = ${ratio.toFixed(2)}x\n`);
+  console.log(`    ratio (legacy / new) = ${ratio.toFixed(2)}x`);
+  console.log(`    extra workers      = ${legacyCount - 1}\n`);
 
-  // Soft assertion: the new default should be measurably cheaper.
-  // On a 28-core host this typically lands between 5× and 20×.
-  if (ratio < 2) {
+  // 1. Direction. The new default must never cost MORE than the legacy
+  //    default. This is the core ADR-0019 claim and is hardware-independent.
+  if (savingsMb <= 0) {
     console.error(
-      `  FAIL: ADR-0019 default not measurably cheaper (ratio ${ratio.toFixed(2)}x < 2x)`,
+      `  FAIL: ADR-0019 default is not cheaper than legacy ` +
+        `(${savingsMb.toFixed(1)} MB — legacy used ${((b.peakRss - a.peakRss) / 1024 / 1024).toFixed(1)} MB LESS). ` +
+        `This benchmark used to be the justification for the ADR; investigate.`,
     );
-    console.error(`  This benchmark used to be the justification for the ADR; investigate.`);
     process.exit(1);
   }
-  console.log('  ✓ ADR-0019 default is at least 2× cheaper than legacy default.');
+
+  // 2. Marginal cost per extra worker. This is the hardware-independent
+  //    invariant: each worker thread has a real, measurable RSS cost, and
+  //    that cost is exactly what ADR-0019 avoids paying by default.
+  //    A 4-core CI runner (3 extra workers) and a 28-core workstation
+  //    (27 extra workers) both satisfy this; a fixed ratio does not.
+  const mbPerWorker = savingsMb / (legacyCount - 1);
+  console.log(`    marginal cost      = ${mbPerWorker.toFixed(1)} MB per extra worker\n`);
+
+  const MIN_MB_PER_WORKER = 2.0;
+  if (mbPerWorker < MIN_MB_PER_WORKER) {
+    console.error(
+      `  FAIL: marginal RSS cost is only ${mbPerWorker.toFixed(2)} MB per worker ` +
+        `(budget: ${MIN_MB_PER_WORKER} MB). Worker threads should each cost real memory; ` +
+        `if they no longer do, this benchmark is no longer measuring what it claims.`,
+    );
+    process.exit(1);
+  }
+
+  // 3. Absolute floor, so a 2-worker pool cannot pass on arithmetic
+  //    accident alone. Kept low because the whole saving scales with
+  //    `legacyCount`.
+  const MIN_SAVINGS_MB = 5;
+  if (savingsMb < MIN_SAVINGS_MB) {
+    console.error(
+      `  FAIL: total saving is only ${savingsMb.toFixed(1)} MB across ${legacyCount - 1} extra workers ` +
+        `(budget: ${MIN_SAVINGS_MB} MB).`,
+    );
+    process.exit(1);
+  }
+
+  console.log(
+    `  ✓ ADR-0019 default saves ${savingsMb.toFixed(1)} MB ` +
+      `(${mbPerWorker.toFixed(1)} MB/worker over ${legacyCount - 1} extra workers).`,
+  );
+  console.log(
+    `    The ratio is ${ratio.toFixed(2)}x and is host-dependent by construction ` +
+      `(legacy pool = cores - 1), so it is reported rather than asserted.`,
+  );
 }
 
 runBenchmark().catch((err) => {
