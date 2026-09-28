@@ -502,14 +502,24 @@ async function main() {
       `    [event] worker:preempted workerId=${data.workerId} exitCode=${data.exitCode} (cumulative=${preemptedCount})`,
     );
   });
-  runtime.on('task:completed', () => {
+  // Distinct taskIds that reached ANY terminal state. Event *counts* are not
+  // a safe proxy: a preempted task can emit `task:preempted` and then also
+  // `task:failed` when its handle is rejected, so summing counters both
+  // under-counts (preempted-but-never-failed tasks) and over-counts
+  // (preempted-then-failed tasks) depending on the path taken. Counting
+  // distinct ids is correct under either behaviour.
+  const terminalTaskIds = new Set();
+  runtime.on('task:completed', (data) => {
     taskCompletedCount++;
+    terminalTaskIds.add(data.taskId);
   });
-  runtime.on('task:failed', () => {
+  runtime.on('task:failed', (data) => {
     taskFailedCount++;
+    terminalTaskIds.add(data.taskId);
   });
-  runtime.on('task:preempted', () => {
+  runtime.on('task:preempted', (data) => {
     taskPreemptedCount++;
+    terminalTaskIds.add(data.taskId);
   });
   runtime.on('error', (err) => {
     errorCount++;
@@ -688,8 +698,21 @@ async function main() {
   );
   // Snapshot Phase 1 counters so the post-Phase-3 recovery tasks
   // don't contaminate them.
+  //
+  // NOTE: `taskPreemptedCount` is tracked separately from
+  // `taskFailedCount` on purpose. When the watchdog kills a runaway
+  // task, WorkerRuntime increments `stats.failedTasks` and emits
+  // `task:preempted` — it does NOT emit `task:failed` for that task
+  // (see the `task_preempted` handler in src/worker-runtime.js).
+  // Summing only completed + failed therefore left a hole exactly
+  // the size of the preemption count, and summing all three
+  // over-counted when a preempted task's handle was also rejected.
+  // `phase1TerminalIds` is the authoritative measure: the number of
+  // DISTINCT taskIds observed in any terminal event by Phase 1 close.
   const phase1CompletedCount = taskCompletedCount;
   const phase1FailedCount = taskFailedCount;
+  const phase1PreemptedCount = taskPreemptedCount;
+  const phase1TerminalIds = new Set(terminalTaskIds);
 
   // ── PHASE 2: Idle drain ──────────────────────────────────────────────
   logLine(
@@ -849,14 +872,33 @@ async function main() {
   // ── Hard assertions ───────────────────────────────────────────────────
   logLine(formatHeader('Hard assertions'));
 
-  if (phase1CompletedCount + phase1FailedCount !== TOTAL_TASKS) {
+  // Every task dispatched during Phase 1 must reach exactly one terminal
+  // state. Measured by DISTINCT taskIds rather than by summing event
+  // counters: a preempted task can emit `task:preempted` alone or
+  // `task:preempted` + `task:failed` depending on whether its handle
+  // gets rejected, so counter arithmetic is wrong in both directions.
+  //
+  // The expected total is TOTAL_TASKS **+ 1**: on top of the sustained
+  // load, Phase 1 mid-stream injects one runaway `while (true) {}` task
+  // to exercise the watchdog (see `dispatchRunawayTask`). It is a real
+  // dispatched task and legitimately lands in a terminal state, so it
+  // belongs in this accounting. The original assertion compared against
+  // TOTAL_TASKS alone, which is unreachable once the watchdog fires.
+  const phase1Expected = TOTAL_TASKS + 1; // +1 for the injected runaway task
+  const phase1Accounted = phase1TerminalIds.size;
+  if (phase1Accounted !== phase1Expected) {
     throw new Error(
-      `FAIL: expected ${TOTAL_TASKS} total accounted in Phase 1, got ${phase1CompletedCount + phase1FailedCount} ` +
-        `(completed=${phase1CompletedCount}, failed=${phase1FailedCount})`,
+      `FAIL: expected ${phase1Expected} distinct tasks in a terminal state after Phase 1 ` +
+        `(${TOTAL_TASKS} sustained + 1 injected runaway), got ${phase1Accounted} ` +
+        `(completed=${phase1CompletedCount}, failed=${phase1FailedCount}, preempted=${phase1PreemptedCount} — ` +
+        `counters may double-count a task that was both preempted and failed)`,
     );
   }
   logLine(
-    `  ✓ Phase 1: all ${TOTAL_TASKS.toLocaleString()} tasks accounted for (completed + failed)`,
+    `  ✓ Phase 1: all ${phase1Expected.toLocaleString()} tasks reached a terminal state ` +
+      `(distinct ids; ${TOTAL_TASKS.toLocaleString()} sustained + 1 runaway; ` +
+      `completed ${phase1CompletedCount.toLocaleString()}, ` +
+      `failed ${phase1FailedCount.toLocaleString()}, preempted ${phase1PreemptedCount.toLocaleString()})`,
   );
 
   if (recycledCount < MIN_RECYCLING_EVENTS) {
