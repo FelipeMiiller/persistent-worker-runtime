@@ -37,6 +37,7 @@
 import { existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { SqliteTaskQueue } from '../src/queue/sqlite-backend.js';
 import { TaskHandle } from '../src/task-handle.js';
 

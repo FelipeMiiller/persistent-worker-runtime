@@ -47,6 +47,10 @@ identical. These are correctness and measurement fixes.
   `{0, 1, 10}` listeners. The first configuration measured is systematically penalised, inflating
   the 1-listener baseline and making the scaling ratio look artificially favourable. Now warms up
   and takes the best of 5 rounds.
+- **`examples/durable-task-vacuum.js` crashed with `ReferenceError: DatabaseSync is not defined`.**
+  The example opened the queue database directly to count terminal rows but never imported
+  `DatabaseSync` from `node:sqlite`. The example was documented in the README examples table while
+  being unable to run; all 18 examples are now verified to exit 0.
 
 ### Documentation
 
