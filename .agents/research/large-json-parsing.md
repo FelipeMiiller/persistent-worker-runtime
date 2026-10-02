@@ -74,32 +74,76 @@ OOM-crashing. That refusal is the finding, not a limitation.
 **3.95× tax** purely for moving data that the consumer did not need in full. If you only need
 counts, sums, or filtered records, do the reduction *inside* the worker.
 
-## 4. Scaling is near-linear to 4 workers on small files, disk-bound on large ones
+## 4. The 10 GB slowdown is I/O, not CPU — and the CPU never was the problem
 
-512 MB file (disk cache warm):
+At 10 GB the example reported 1.97× on 4 workers, and *total parse CPU rose* from 75 s to 94 s.
+That looks like a CPU ceiling, so the obvious suspects were memory bandwidth (H2) and GC
+interference between isolates (H3). **Both are wrong.** See
+`benchmarks/parse-parallelism-probe.benchmark.js`.
 
-| workers | wall | speedup |
-| --- | --- | --- |
-| 1 | 6.38 s | 1.00× |
-| 2 | 3.21 s | 1.99× |
-| 4 | 1.84 s | 3.46× |
+### The harness lied first
 
-**10 GB file (cold, 28-core host, 35 296 907 records):**
+The first version of the probe reported `base / slowest` as "effective" and printed:
 
-| workers | chunks | wall | MB/s | speedup |
+```
+chunk 120 MB × 4 worker(s): base 774 ms → slowest 896 ms  effective 0.86×
+=> H2/H3 CONFIRMED: running parses concurrently makes each one measurably SLOWER
+```
+
+0.86× means "four concurrent parses finish slower than one alone" — which cannot be true of a
+throughput comparison and pointed straight at a nonexistent bandwidth wall. The metric was
+per-parse *slowdown*, not speedup. The correct form is:
+
+```js
+speedup = (workerCount * baseMs) / slowestMs
+```
+
+Re-derived from the same data:
+
+| chunk | 2 workers | 4 workers | 6 workers | 8 workers |
 | --- | --- | --- | --- | --- |
-| 1 | 25 | 127.7 s | 80 | 1.00× |
-| 2 | 26 | 75.4 s | 136 | 1.69× |
-| 4 | 28 | 64.9 s | 158 | 1.97× |
+| 24 MB | 1.85× | 3.74× | — | 6.11× |
+| 60 MB | 2.05× | 3.85× | — | 6.26× |
+| 120 MB | 1.87× | 3.46× | 5.29× | 6.14× |
+| 240 MB | 1.89× | 3.76× | 4.82× | 6.19× |
 
-The 10 GB run scales **1.97×, not 3.5×**. The difference is I/O: 10 GB does not fit in page cache,
-so the workers spend their time waiting on the disk. Note `CPU ms` *rises* with worker count
-(75 s → 94 s) — the machine is doing more total CPU work, not less, because four threads
-interleave four independent read streams and thrash the device.
+**`JSON.parse` parallelises near-linearly: 6.64× on 8 workers**, and chunk size is irrelevant
+(sensitivity 0.084 across a 10× size range). H2 and H3 are refuted.
 
-**Practical reading:** parallelism wins big when the data is cached or the parse dominates; on a
-cold multi-GB file you are partly parallelising the disk, not the CPU, and the ceiling is the
-device. Measure both — `wall` and `CPU ms` — before concluding a worker count is helping.
+### What the probe actually shows
+
+Same file, read-backed instead of memory-backed, splitting wall time into parse vs everything
+else:
+
+| workers | wall | parse/worker | not-parse | I/O share |
+| --- | --- | --- | --- | --- |
+| 1 | 0.73 s | — | — | ~6% |
+| 2 | 0.71 s | 0.62 s | 0.09 s | 12% |
+| 4 | 0.45 s | 0.36 s | 0.10 s | 21% |
+| 8 | 0.32 s | 0.21 s | 0.11 s | 34% |
+
+Parse time falls roughly linearly with worker count. The **non-parse share climbs from ~6% to
+~34%** as workers are added — that is the disk queueing, and it is what flattens the curve on a
+10 GB cold file. The total-CPU rise in the original 10 GB run is the same phenomenon seen from the
+other side: more workers spend proportionally more of their time blocked in the I/O path, so the
+"CPU ms" summed across workers is no longer a clean measure of parse work.
+
+### The conclusion that matters
+
+**Do not tune worker count against a cold multi-GB file.** You will optimise for the disk, not the
+CPU, and read a disappointing number that says nothing about the parser. The knobs that actually
+move it:
+
+1. **Fewer, larger sequential reads.** The queue depth is the bottleneck, not the parser. A single
+   sequential reader on this machine sustains far more MB/s than four interleaved readers.
+2. **Warm the page cache** when the file fits in RAM, or place it on a faster device. The
+   difference between the warm 512 MB run (3.46×) and the cold 10 GB run (1.97×) is almost entirely
+   this.
+3. **Only then add workers**, and re-measure both `wall` and `CPU ms`.
+
+If the file does not fit in RAM, the honest architecture is not "N workers parsing chunks" but
+**NDJSON + a streaming pipeline**, which keeps a sequential read pattern and O(1) memory instead of
+materialising 2–5× the file size as objects.
 
 ## 4b. The 5-second default task timeout is shorter than a large chunk
 
