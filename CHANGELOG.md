@@ -11,6 +11,12 @@ identical. These are correctness and measurement fixes.
 
 ### Added
 
+- **`examples/cpu-io-split.js`** — measures whether CPU-bound work delays I/O-bound work, and
+  whether a dedicated I/O worker is worth it. Three architectures under the same load. Result
+  (5 runs, 28-core host): main-thread I/O keeps **p50 flat** while its **p99 rises ~45%** under
+  burst; a dedicated I/O worker degrades **both** p50 (+35%) and p99. The tail effect is per-task
+  `postMessage` bookkeeping on the main thread, not a blocked event loop — the common "main-thread
+  I/O is unaffected" claim is wrong at the tail.
 - **`examples/sigterm-drain.js`** — runnable recipe for DR §8.1. User-wired `SIGTERM` / `SIGINT`
   handler around `runtime.shutdown()` with an idempotency guard (a second signal mid-drain is a
   no-op) and a hard-timeout fallback (`process.exit(1)` after 30 s). `[perf-tested]` — measures
