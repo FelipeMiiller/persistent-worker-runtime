@@ -145,6 +145,33 @@ If the file does not fit in RAM, the honest architecture is not "N workers parsi
 **NDJSON + a streaming pipeline**, which keeps a sequential read pattern and O(1) memory instead of
 materialising 2–5× the file size as objects.
 
+## 4b. …but the NDJSON recommendation is WRONG (measured, refuted)
+
+The sentence above was a claim inherited from prior reading and never tested here.
+`benchmarks/json-strategy-compare.benchmark.js` runs the SAME records — both files are generated
+from one record stream, so they hold byte-identical record content — through three shapes. At
+4 GB (14 277 885 records, every variant cross-checked on both count and `sum(price)`):
+
+| variant | wall | MB/s | peak heap |
+| --- | --- | --- | --- |
+| A chunk-parallel ×1 | 43.2 s | 95 | — |
+| A chunk-parallel ×2 | 25.6 s | 160 | — |
+| **A chunk-parallel ×4** | **18.0 s** | **227** | — |
+| C NDJSON streaming | 36.6 s | 111 | 229 MB |
+
+**NDJSON streaming is 2.03× SLOWER than 4-way chunk-parallel** at 4 GB, and was 2.94× slower at
+512 MB. The gap narrows as the file grows (per-record overhead amortises against fewer, larger
+`JSON.parse` calls plus amortised I/O), but chunk-parallel wins at every size tested.
+
+Why the folklore is wrong: `readline` yields one line at a time, and each line costs a
+`JSON.parse` call plus a stream event. At 14 M records that per-record overhead is large.
+NDJSON's genuine win is **memory** — 229 MB peak versus a chunk-parallel run that must hold a
+~400 MB slice plus its parsed graph — not speed. It is the right answer when RAM is the binding
+constraint, and the wrong answer when you have memory to spare.
+
+Also note that "parse the whole file in one `JSON.parse`" is not an available option above
+~512 MB. That is exactly the limit variant A exists to work around.
+
 ## 4b. The 5-second default task timeout is shorter than a large chunk
 
 HARDEN-01 defaults `timeoutMs` to **5000 ms**. A 10 GB file split 4 ways gives 2.5 GB chunks,

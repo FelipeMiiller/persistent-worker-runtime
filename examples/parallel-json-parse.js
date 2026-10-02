@@ -468,6 +468,23 @@ async function main() {
   }
   console.log('');
 
+  // ── How to read the speedup number ─────────────────────────────────────────
+  // A sub-linear speedup here is NOT a limitation of the worker pool.
+  // benchmarks/parse-parallelism-probe.benchmark.js shows JSON.parse itself
+  // parallelises near-linearly (6.6× on 8 workers, in memory, no disk). The
+  // ceiling on a large cold file is the disk: the same probe shows the
+  // non-parse share of wall time climbing from ~12% at 2 workers to ~33% at 8.
+  // More workers interleave more read streams, which queues worse on one device.
+  //
+  // So: do NOT tune the worker count against a cold multi-GB file. Prefer fewer
+  // larger sequential reads, warm the page cache or use a faster device, and add
+  // workers only after. See .agents/research/large-json-parsing.md.
+  console.log('  Reading the speedup column:');
+  console.log('    A sub-linear number on a large COLD file is the disk, not the pool.');
+  console.log('    Parse alone scales ~6.6× on 8 workers; the gap is I/O queueing.');
+  console.log('    Warm the page cache (or use NDJSON — see the strategy benchmark)');
+  console.log('    before concluding the pool is underperforming.');
+
   const keep = process.env.PWR_JSON_KEEP === '1';
   if (!keep) {
     await unlink(file).catch(() => undefined /* best-effort cleanup */);
