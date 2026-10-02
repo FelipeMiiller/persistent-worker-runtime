@@ -11,6 +11,16 @@ identical. These are correctness and measurement fixes.
 
 ### Added
 
+- **`examples/parallel-json-parse.js`** — parses a ~10 GB JSON array across a worker pool.
+  Verified at 10 240 MB / 35 296 907 records on a 28-core host: 1 worker 127.7 s (80 MB/s),
+  4 workers 64.9 s (158 MB/s). Includes the two constraints that make the design
+  non-obvious: the V8 string limit (`0x1fffffe8`, ~512 MB) is enforced by `Buffer.toString()`
+  *before* `JSON.parse` runs, so chunking is mandatory even with one worker and the chunk count
+  must be derived from file size rather than worker count; and `timeoutMs: 0` is required because
+  the HARDEN-01 5 s default preempts a multi-hundred-MB chunk. Compares SUMMARY-ONLY workers
+  (reduce in the worker) against RETURN-ALL (clone the graph back) — the latter carries a ~4×
+  transfer tax at 512 MB and is refused outright at 10 GB, where it would need ~100 GB of live
+  objects. Size is configurable via `PWR_JSON_MB`.
 - **`examples/cpu-io-split.js`** — measures whether CPU-bound work delays I/O-bound work, and
   whether a dedicated I/O worker is worth it. Three architectures under the same load. Result
   (5 runs, 28-core host): main-thread I/O keeps **p50 flat** while its **p99 rises ~45%** under
