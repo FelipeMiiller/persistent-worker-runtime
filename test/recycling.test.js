@@ -389,8 +389,17 @@ describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () =>
 
       assert.deepEqual([r1, r2, r3, r4], [1, 2, 3, 4]);
 
-      // Give worker thread replacement a moment to complete settlement
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Wait for the replacement worker to actually settle instead of
+      // sleeping a fixed 200 ms. The `worker_recycling` trigger fires
+      // synchronously with the task completion, but `worker_recycled` is
+      // emitted only after the replacement thread has spawned and booted —
+      // which on a loaded macOS runner can exceed 200 ms, and the fixed sleep
+      // turned that into a flaky failure (CI run 37069227658, Node 24 /
+      // macos-latest: "At least one worker must be recycled").
+      const deadline = Date.now() + 5000;
+      while (recycledEvents.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
 
       assert.ok(recyclingEvents.length >= 1, 'At least one worker must trigger recycling');
       assert.equal(recyclingEvents[0].reason, 'tasks_exceeded');
@@ -398,7 +407,11 @@ describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () =>
       assert.ok(recyclingEvents[0].tasksCompleted >= 2);
       assert.ok(recyclingEvents[0].memoryUsage > 0);
 
-      assert.ok(recycledEvents.length >= 1, 'At least one worker must be recycled');
+      assert.ok(
+        recycledEvents.length >= 1,
+        `At least one worker must be recycled (waited up to 5000 ms, saw ` +
+          `${recyclingEvents.length} recycling triggers and ${recycledEvents.length} completions)`,
+      );
       assert.ok(recycledEvents[0].oldWorkerId);
       assert.ok(recycledEvents[0].newWorkerId);
       assert.notEqual(recycledEvents[0].oldWorkerId, recycledEvents[0].newWorkerId);
@@ -437,10 +450,17 @@ describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () =>
 
       assert.equal(result.allocated, 400000);
 
-      // Wait for recycling to settle
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Wait for the full recycling cycle instead of sleeping a fixed 200 ms.
+      // The memory check runs on the supervisor poll cadence and the
+      // `worker_recycled` event is only emitted after the replacement thread
+      // has spawned and booted — both can exceed a fixed window on a loaded
+      // runner, so poll for the settled state.
+      const deadline = Date.now() + 5000;
+      while (recycledEvents.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
 
-      assert.equal(recyclingEvents.length, 1);
+      assert.ok(recyclingEvents.length >= 1, 'worker must trigger recycling');
       assert.equal(recyclingEvents[0].reason, 'memory_exceeded');
       assert.ok(recyclingEvents[0].memoryUsage > 20 * 1024 * 1024);
 

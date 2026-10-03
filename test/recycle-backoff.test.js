@@ -2,6 +2,30 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createWorkerRuntime } from '../src/index.js';
 
+/**
+ * Poll until `predicate()` is true or the deadline passes.
+ *
+ * Recycling is asynchronous: `task_completed` → supervisor decides →
+ * spawn replacement thread → terminate old. The spawn dominates and it is
+ * routinely slower on a loaded CI runner than on a developer machine. These
+ * tests previously used fixed sleeps and the constants kept having to be
+ * raised after each flake (see the 50 ms → 200 ms notes below), which is the
+ * anti-pattern: a sleep encodes a guess about the slowest machine, not a
+ * statement about the behaviour under test.
+ *
+ * A deadline-based poll states the real requirement — "this must happen
+ * within 5 s" — and returns as soon as it does, so the suite is both faster
+ * on a good machine and stable on a bad one.
+ */
+async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 20, what = 'condition' } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error(`Timed out after ${timeoutMs} ms waiting for ${what}`);
+}
+
 // HARDEN-11 (ADR-0024 D3) — `recycleBackoffMs` drain grace.
 //
 // When a worker is recycled (maxTasksPerWorker / maxMemoryMb / accumulation
@@ -45,11 +69,14 @@ describe('WorkerRuntime — recycleBackoffMs (HARDEN-11)', () => {
       // Trigger a recycle by exhausting maxTasksPerWorker on the only worker.
       await runtime.execute({ fn: () => 42 });
 
-      // Wait for the recycle to complete (spawn + immediate terminate).
-      // Bump to 200 ms to absorb CI timer noise on slow runners — the
-      // recycle flow is `task_completed` event → spawn replacement (~50-150
-      // ms) → terminate old. 200 ms gives headroom for the spawn.
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Wait for the replacement to spawn and the old worker to terminate.
+      await waitFor(
+        () => {
+          const ws = runtime.getWorkers();
+          return ws.length === 1 && ws[0].status === 'idle';
+        },
+        { what: 'pool back to 1 idle worker after immediate recycle' },
+      );
 
       const workers = runtime.getWorkers();
       // Total pool size should be back to 1 (the new replacement).
@@ -77,12 +104,17 @@ describe('WorkerRuntime — recycleBackoffMs (HARDEN-11)', () => {
       // Trigger a recycle by exhausting maxTasksPerWorker on the only worker.
       await runtime.execute({ fn: () => 42 });
 
-      // Wait briefly for the replacement to spawn and the OLD worker to
-      // enter 'recycling' state. Pool size is now N+1 (old + new).
-      // Bump to 200 ms to absorb CI timer noise on Windows Node 22
-      // (slower worker startup than Linux/macOS — the 50 ms window was
-      // too tight and caused Windows Node 22 to flake on this test).
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Wait until the replacement is fully ready (pool N+1 AND one worker
+      // 'idle'). Polling only on `length === 2` returns too early — the
+      // replacement is still in status 'starting' at that point, so the
+      // assertions about an idle replacement would race it.
+      await waitFor(
+        () => {
+          const ws = runtime.getWorkers();
+          return ws.length === 2 && ws.some((w) => w.status === 'idle');
+        },
+        { what: 'pool of 2 with an idle replacement during backoff' },
+      );
 
       const midWorkers = runtime.getWorkers();
       assert.equal(
@@ -103,9 +135,10 @@ describe('WorkerRuntime — recycleBackoffMs (HARDEN-11)', () => {
       // id, NOT the same one.
       const recyclingWorkerId = recyclingWorker.id;
 
-      // Wait for the backoff to fully elapse (600 ms total + buffer for
-      // timer noise + replacement ready time).
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      // Wait for the backoff timer to fire and the old worker to be removed.
+      await waitFor(() => runtime.getWorkers().length === 1, {
+        what: 'old worker removed after backoff elapsed',
+      });
 
       const finalWorkers = runtime.getWorkers();
       assert.equal(
@@ -139,8 +172,19 @@ describe('WorkerRuntime — recycleBackoffMs (HARDEN-11)', () => {
       // Task 1 triggers recycle (w0 → recycling, w1 spawned as replacement).
       await runtime.execute({ fn: () => 42 });
 
-      // Wait for the replacement to be ready.
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      // Wait for the replacement to be ready AND the old worker to be
+      // 'recycling' — that is the N+1 state this test is about.
+      await waitFor(
+        () => {
+          const ws = runtime.getWorkers();
+          return (
+            ws.length === 2 &&
+            ws.some((w) => w.status === 'recycling') &&
+            ws.some((w) => w.status === 'idle')
+          );
+        },
+        { what: 'pool of 2 with one recycling and one idle worker' },
+      );
 
       // Pool should be N+1 (w0 recycling, w1 idle).
       const midWorkers = runtime.getWorkers();
@@ -153,7 +197,9 @@ describe('WorkerRuntime — recycleBackoffMs (HARDEN-11)', () => {
       assert.deepEqual(statuses, ['idle', 'recycling']);
 
       // Wait for the backoff to elapse.
-      await new Promise((resolve) => setTimeout(resolve, 900));
+      await waitFor(() => runtime.getWorkers().length === 1, {
+        what: 'pool to return to 1 after backoff',
+      });
 
       // Pool is back to N.
       assert.equal(runtime.getWorkers().length, 1);
@@ -197,9 +243,11 @@ describe('WorkerRuntime — recycleBackoffMs (HARDEN-11)', () => {
       // Trigger a recycle by exhausting maxTasksPerWorker on the only worker.
       await runtime.execute({ fn: () => 42 });
 
-      // Wait briefly for the replacement to spawn and the OLD worker
-      // to enter 'recycling' state — we are now mid-backoff.
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      // Wait for the replacement to spawn and the OLD worker to enter
+      // 'recycling' — we are now mid-backoff.
+      await waitFor(() => runtime.getWorkers().some((w) => w.status === 'recycling'), {
+        what: "a worker in 'recycling' status during backoff",
+      });
 
       const midWorkers = runtime.getWorkers();
       assert.ok(
