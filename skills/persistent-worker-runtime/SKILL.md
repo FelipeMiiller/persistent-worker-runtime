@@ -85,6 +85,45 @@ The runtime has many features; load the reference that matches the task.
 | **Observability, lifecycle, memory recycling, error hierarchy** | `references/observability.md` |
 | Runnable end-to-end patterns | `references/patterns.md` |
 
+### Runnable examples
+
+All 20 live in [`examples/`](../../examples) and run directly with `node examples/<name>.js`.
+
+**Core patterns**
+
+| Example | Shows |
+| --- | --- |
+| `express-outbox-email.js` | Transactional outbox over HTTP |
+| `image-resizer-batch.js` | Bounded batch processing |
+| `persistent-ai-model.js` | Warm L1 model cache |
+| `priority-routing.js` | Tiered priority ordering |
+| `zero-copy-image.js` | 30 MB buffer via `transferList` |
+| `cancel-on-disconnect.js` | `AbortController` + `AbortSignal.timeout()` |
+| `broadcast-cache-invalidation.js` | L1 invalidation via `runtime.broadcast()` |
+| `streaming-llm.js` | Token streaming, TTFT, mid-stream abort |
+| `streaming-csv-export.js` | Backpressure timeline (`highWaterMark`) |
+| `event-target-pattern.js` | `addEventListener` + `{ signal }` cleanup (v0.3.x+ style) |
+| `worker-recycling.js` | Recycling observable end-to-end |
+| `adaptive-concurrency.js` | Adaptive pool sizing, `stats.adaptive` |
+
+**Durable queue (`queueBackend: 'sqlite'`)**
+
+| Example | Shows |
+| --- | --- |
+| `durable-task-queue.js` | Rows survive a runtime restart |
+| `durable-task-recovery-runtime.js` | Crash mid-flight → lease-based orphan recovery |
+| `durable-task-priority.js` | Priority + `affinityKey` preserved across restart |
+| `durable-task-multi-instance.js` | Two instances sharing one file, only one claims a row |
+| `durable-task-vacuum.js` | `vacuumCompleted()` + `checkpointWal()` disk reclaim |
+
+**Operations**
+
+| Example | Shows |
+| --- | --- |
+| `sigterm-drain.js` | DR §8.1 recipe — idempotent SIGTERM handler + hard timeout |
+| `cpu-io-split.js` | Does CPU work delay I/O? Do you need a dedicated I/O worker? |
+| `parallel-json-parse.js` | Chunk-parallel parse of a multi-GB JSON file |
+
 ---
 
 ## 4. Common Mistakes
@@ -98,6 +137,48 @@ The runtime has many features; load the reference that matches the task.
 7. **Don't `subscribe()` after `runtime.shutdown()`** — the underlying BC has been closed; `subscribe()` will throw. Subscribe BEFORE shutdown if you need to receive late messages.
 8. **Don't assume worker affinity is permanent** — recycled workers lose their `affinityKey` mapping; re-dispatch with the same key to re-pin.
 9. **Don't use `runtime.execute()` fire-and-forget** — `execute()` returns a Promise that MUST be awaited or `.catch()`-handled. A discarded Promise becomes a worker crash error after the calling scope returns, surfacing as a CI flake ("async activity after the test ended") on slower runners (macOS Node 22). Use `dispatch()` for intentional fire-and-forget. See ADR-0018.
+10. **Don't treat `task:failed` as "every task that didn't succeed"** — a **preempted** task emits `task:preempted` and **never** `task:failed`, so a `task:failed`-only listener silently misses every watchdog kill. `stats.failedTasks` *does* include preemption; the event stream deliberately does not (ADR-0011, Decision Driver #4). Listen to both. The handle itself settles with `TaskTimeoutError { preempted: true }`, so `await` / `onError` are unaffected. See `references/observability.md`.
+11. **Don't close over module scope inside a task `fn`** — `fn` is serialised and re-evaluated in the worker isolate (`new Function` in `worker-thread-entry.js`), so module-level `const`s are simply *undefined* there. Pass everything through `payload`; reach Node builtins with `await import('node:fs')` or the injected `fnDeps` manifest. This is the same class of bug as #3 and bites hardest in helpers that "obviously" have their config nearby.
+
+---
+
+## 4b. Large files: the bottleneck is usually the disk, not the parser
+
+Measured on this repo (28 cores, cold SATA SSD — full write-up in
+[`research/README.md`](../../research/README.md)):
+
+| workload | 1 worker | 4 workers | ceiling |
+| --- | --- | --- | --- |
+| `JSON.parse` alone, in memory | 1.00× | **6.6×** | CPU |
+| 10 GB file from disk | 1.00× | **1.97×** | **disk** |
+
+`JSON.parse` itself parallelises near-linearly. A large *cold* file does not, because the
+non-parse share of wall time climbs from ~12% (2 workers) to ~33% (8 workers) — more workers
+interleave more read streams and queue worse on one device. **Do not tune worker count against a
+cold multi-GB file**; you are optimising the disk. Warm the page cache, or use fewer/larger
+sequential reads, first.
+
+**Two hard constraints when parsing big JSON:**
+
+1. **V8 refuses a string over `0x1fffffe8` chars (~512 MB).** It fails in `Buffer.toString()`,
+   *before* `JSON.parse` runs. So you must read byte ranges, and the chunk count comes from file
+   size — never from worker count, because the limit applies to a single slice no matter how many
+   workers exist.
+2. **Batch tasks need `timeoutMs: 0`.** The default is 5000 ms, and a multi-hundred-MB chunk
+   blows straight through it.
+
+**The time/memory trade** (4 GB file, peak RSS measured in a separate process per variant):
+
+| approach | wall | peak RSS |
+| --- | --- | --- |
+| chunk-parallel ×1 | 48.7 s | 2.30 GB |
+| chunk-parallel ×4 | 18.8 s | 7.42 GB |
+| NDJSON streaming | 39.6 s | **0.34 GB** |
+
+RAM scales linearly with worker count, so it is a straight trade, not a free win. Note that
+NDJSON **beats single-worker chunk-parallel on both axes** — chunk-parallel only wins by adding
+workers, and each costs ~1.9× the file size in RAM. Rule of thumb: chunk-parallel needs about
+`1.9 × fileSize` of free RAM. Runnable: `examples/parallel-json-parse.js`.
 
 ---
 

@@ -22,6 +22,36 @@ runtime.on('worker_recycled', ({ oldId, newId }) => {});
 
 Subscribe to events for metrics emission, log aggregation, or custom health checks. The runtime emits events on the EventEmitter base class.
 
+### A preempted task emits `task:preempted`, NOT `task:failed`
+
+This is the single most common integration mistake, because the failure is silent: a
+`task:failed` listener simply never fires for preempted tasks.
+
+| | counter | event |
+| --- | --- | --- |
+| ordinary task failure | `stats.failedTasks++` | `task:failed` |
+| forced preemption (watchdog) | `stats.failedTasks++` **and** `stats.preemptedTasksCount++` | `task:preempted` only |
+
+`stats.failedTasks` is an **aggregate that includes preemption**; `task:failed` is the stream of
+task-level failures. They are not two views of the same fact. Preemption is deliberately a separate
+event so a consumer can tell a forced kill from a cooperative timeout (ADR-0011, Decision Driver
+#4) — folding it into `task:failed` would erase that distinction.
+
+The handle itself settles normally: `WorkerHandle` rejects it with
+`TaskTimeoutError { preempted: true }` **before** emitting `task:preempted`, so your `await` and
+your `onError` callback both fire as usual. Only the event name differs.
+
+```javascript
+// WRONG — silently misses every preemption
+runtime.on('task:failed', ({ taskId }) => alerts.page(taskId));
+
+// RIGHT — both paths alert, and the preemption one carries the reason
+runtime.on('task:failed',    ({ taskId, error }) => alerts.page(taskId, error.message));
+runtime.on('task:preempted', ({ taskId })         => alerts.page(taskId, 'preempted'));
+```
+
+To count "did not succeed", read `runtime.stats().failedTasks`. To know *why*, listen to both.
+
 ### TaskHandle events (per-dispatch)
 
 ```javascript

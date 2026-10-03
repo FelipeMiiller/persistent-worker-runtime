@@ -1,7 +1,7 @@
 {
   "name": "persistent-worker-runtime",
   "version": "0.3.0",
-  "description": "Use the persistent-worker-runtime library to offload CPU-bound work to persistent Node.js worker threads while keeping the Event Loop responsive. Covers pool setup, request-response vs outbox modes, L1 state, cancellation, priority routing, zero-copy transfer, retries, preemption, inter-worker BroadcastChannel for L1 cache invalidation, durable queue via node:sqlite (SqliteTaskQueue with lease-based orphan recovery + retry budget), and liveness/readiness probes (runtime.isAlive() + runtime.isReady()) for k8s/LB/cron transport wiring.",
+  "description": "Use the persistent-worker-runtime library to offload CPU-bound work to persistent Node.js worker threads while keeping the Event Loop responsive. Covers pool setup, request-response vs outbox modes, L1 state, cancellation, priority routing, zero-copy transfer, retries, preemption, inter-worker BroadcastChannel for L1 cache invalidation, durable queue via node:sqlite (SqliteTaskQueue with lease-based orphan recovery + retry budget), liveness/readiness probes (runtime.isAlive() + runtime.isReady()) for k8s/LB/cron transport wiring, SIGTERM drain recipe, and large-file JSON parsing (the V8 ~512 MB string limit, byte-range chunking, and the time/memory trade against NDJSON streaming).",
   "author": "Felipe Miiller",
   "license": "MIT",
   "package": "persistent-worker-runtime",
@@ -34,7 +34,19 @@
     "readiness probe",
     "k8s livenessProbe",
     "k8s readinessProbe",
-    "DR §8.2"
+    "DR §8.2",
+    "SIGTERM handler",
+    "graceful shutdown",
+    "graceful drain",
+    "large JSON file",
+    "parse multi-GB JSON",
+    "JSON.parse limit",
+    "V8 string limit",
+    "chunked parse",
+    "NDJSON streaming",
+    "disk-bound",
+    "task:preempted",
+    "preemption event"
   ],
   "files": [
     "SKILL.md",

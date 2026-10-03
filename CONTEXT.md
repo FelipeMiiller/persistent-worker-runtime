@@ -1,6 +1,8 @@
 # Node.js Persistent Worker Runtime
 
-> **Status (2026-09-22, v0.2.0):** 24 ADRs (ADR-0001..0024) implemented and merged. Pipeline: 563/563 tests pass, 0 fail, 0 skip. Active features include adaptive concurrency, runtime hardening (11 HARDEN tasks), streaming, broadcast, priority, cancellation, default sizing, fire-and-forget hazard guard. See [`CHANGELOG.md`](CHANGELOG.md) for v0.2.0 release notes.
+> **Status (2026-10-03, v0.3.0):** 24 ADRs (ADR-0001..0024) implemented and merged. Pipeline: 622/622 tests pass, 0 fail, 0 skip; CI green on the full 6-job matrix. Active features include adaptive concurrency, runtime hardening (11 HARDEN tasks), streaming, broadcast, priority, cancellation, default sizing, fire-and-forget hazard guard, a durable queue via `node:sqlite` (ADR-0020, revised to SQLite-only), and liveness/readiness probes. See [`CHANGELOG.md`](CHANGELOG.md) for release notes.
+>
+> Sections 1 onward record the architecture as it was designed. Where a decision was later revised by an ADR, the ADR wins — notably ADR-0020 (durable queue: SQLite, not an external RDBMS) and ADR-0023 (pool sizing: `workers = 1` by default, adaptive sizing opt-in).
 
 ## 1. Document Objective
 

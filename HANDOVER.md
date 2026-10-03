@@ -1,9 +1,10 @@
 # Agent Handover Guide: Persistent Worker Runtime
 
 > **Audience**: AI Coding Agents (Antigravity, Claude Code, Cursor, Windsurf, Copilot) or engineers starting a new chat/session on this repository.
-> **Last Updated**: 2026-09-22 (v0.2.1 shipped — ADR-0014 T12 docs complete)
-> **Active Branch**: `main`
-> **Released**: `v0.2.0` (2026-09-22 09:59Z) + `v0.2.1` (2026-09-22 21:13Z) on npm with provenance.
+> **Last Updated**: 2026-10-03 (v0.3.0 shipped; CI hardening + spec hygiene + large-file investigation)
+> **Active Branch**: `develop` (tracks `origin/develop`; `main` is the release target)
+> **Released**: `v0.2.0`, `v0.2.1`, **`v0.3.0`** (2026-09-24) on npm with provenance.
+> **In flight**: `develop` is ~40 commits ahead of `main` with **no API changes** — the delta is 4 benchmark-assertion fixes, 3 new examples, and docs. Release (bump / promote / publish) is deliberately deferred; see §4.
 
 ---
 
@@ -11,15 +12,15 @@
 
 - **Repository**: `https://github.com/FelipeMiiller/persistent-worker-runtime`
 - **Local Path**: `c:\repository\persistent-worker-runtime`
-- **NPM Package**: `persistent-worker-runtime` (latest: **`0.2.1`**)
+- **NPM Package**: `persistent-worker-runtime` (latest: **`0.3.0`**)
 - **Goal**: Build a high-performance persistent worker runtime for Node.js over native `worker_threads`, keeping the Event Loop 100% dedicated to non-blocking I/O while persistent workers execute CPU-bound tasks and transactional outbox background jobs with warm L1 heaps.
 
 ---
 
 ## 🔒 2. Non-Negotiable Operational Rules
 
-1. **Active Branch**: All work is conducted on **`main`** (this project does not use a `develop` branch — PRs target `main` directly). Releases are tagged on `main` and published via the `release.yml` GitHub Actions workflow.
-2. **Zero External Runtime Dependencies**: `package.json` has `dependencies: {}`. Do NOT install external runtime npm packages. Everything must use standard Node.js built-ins (`node:worker_threads`, `node:test`, `node:events`, `node:async_hooks`, `node:perf_hooks`, `node:os`).
+1. **Active Branch**: All work is conducted on **`develop`**, which tracks `origin/develop`. `main` is the release target: releases are promoted `develop` → `main` and tagged there, then published via the `release.yml` GitHub Actions workflow. **Never push `develop` straight to `main`** — that skips the promotion step. (This rule previously said the project had no `develop` branch; that changed on 2026-09-27, when `develop`'s upstream was found to be misconfigured to `origin/main` and corrected. A bare `git push` would have landed a push on `main`.)
+2. **Zero External Runtime Dependencies**: `package.json` has `dependencies: {}`. Do NOT install external runtime npm packages. Everything must use standard Node.js built-ins (`node:worker_threads`, `node:test`, `node:events`, `node:async_hooks`, `node:perf_hooks`, `node:os`, `node:sqlite`).
 3. **Language**: **100% English** across all code, docstrings, tests, ADRs, specs, and commit messages.
 4. **Quality Gates**: Every task must pass `npm run validate` (= `npm run lint && npm test`) before commit. Lint violations block the commit via the husky pre-commit hook.
 5. **Atomic Conventional Commits**: One task = one commit. Prefix: `feat:`, `fix:`, `test:`, `docs:`, `perf:`, `chore:`, `ci:`, `refactor:`.
@@ -28,16 +29,18 @@
 
 ## 📍 3. Current State Snapshot
 
-### Code Health (as of commit `99ef885`, 2026-09-23)
-- **Tests**: 563 passing across 153 suites (`node:test`), 0 failures, **0 skipped**, 0 cancelled. First-time zero-skip pipeline.
-- **Lint**: 0 errors, 0 warnings across `src/`, `test/`, `examples/`, `benchmarks/` (Biome 2.x).
-- **Benchmarks**: 20+ reproducible scripts (5 streaming + adaptive-concurrency Phase A/B/C/D/E + io-throughput + 11 others). Full empirical results in `BENCHMARKS.md`.
-- **Examples**: 11 runnable scripts demonstrating the public API.
+### Code Health (as of 2026-10-03)
+- **Tests**: **622 passing**, 0 failures, 0 skipped, 0 cancelled (`node:test`).
+- **Lint**: 0 errors, 0 warnings across `src/`, `test/`, `examples/`, `benchmarks/`, `research/` (Biome 2.x).
+- **Benchmarks**: **24** gated scripts in `benchmarks/`, all wired into `npm run benchmark:all` and run in CI. Full empirical results in `BENCHMARKS.md`.
+- **Research**: 2 usage-pattern investigations in `research/` (NOT CI gates — they measure how an *application* should use the library, not `src/` itself). See [`research/README.md`](research/README.md).
+- **Examples**: **20** runnable scripts demonstrating the public API, all verified to exit 0.
 - **Embedded Skill**: `skills/persistent-worker-runtime/` shipped in npm tarball.
 
 ### Released
 - **v0.2.0** (2026-09-22 09:59Z) — ADR-0014 (adaptive concurrency) + ADR-0024 (runtime hardening). Tag `e098329`. CI run `35713434984`.
 - **v0.2.1** (2026-09-22 21:13Z) — Post-release hygiene bundle: `.gitattributes` (LF enforcement), CI workflow fixes (commit-lint SHA + `pull_request` event switch + `exec` require drop), macOS timing tolerance, ESM `require` condition, docs refresh. Tag `41d9eae`. CI run `35784807442`.
+- **v0.3.0** (2026-09-24) — Durable queue via `node:sqlite` (T13: `SqliteTaskQueue`, lease-based orphan recovery, retry budget) + liveness/readiness probes (DR §8.2 closure, `runtime.isAlive()` / `runtime.isReady()`). Tag `a515998`. ADR-0020 **revised** 2026-09-24 to SQLite-only; external RDBMS/event-streaming backends permanently out-of-scope by ADR-0005.
 
 ### Completed Features (all merged to `main`)
 1. **`persistent-worker-runtime/`** — Initial implementation (ADR-0001..0009).
@@ -51,21 +54,25 @@
 9. **`cooperative-cancellation/`** — Complete (ADR-0017).
 10. **`fire-and-forget-hazard/`** — Complete (ADR-0018).
 11. **`default-pool-sizing/`** — Complete (ADR-0019).
-12. **`durable-queue-rpo/`** — Complete (ADR-0020). SQLite via `node:sqlite` chosen (in-progress implementation in branch `feat/sqlite-queue-backend`). External backends (RDBMS / event-streaming) explicitly out of scope per ADR revision 2026-09-24.
+12. **`durable-queue-rpo/`** — **Complete (ADR-0020, SHIPPED v0.3.0 on 2026-09-24)**. `SqliteTaskQueue` via `node:sqlite` (T13 + T13.1 hardening + T13.2 lease reclaim / retry budget). ADR revised 2026-09-24 to **SQLite-only**; external backends (RDBMS / event-streaming) permanently out-of-scope by ADR-0005.
 13. **`multi-az-topology/`** — Complete (ADR-0021). ≥2 instances × ≥2 AZs active-active.
 14. **`node-built-ins-map/`** — Complete (ADR-0022). Authoritative map of "Node built-ins we use" vs "custom code we wrote".
 15. **`sizing-policy/`** — Complete (ADR-0023). `WORKER_CONCURRENCY` env + `concurrency: 'auto'` factory option.
 16. **`runtime-hardening/`** — **Complete (ADR-0024) — Accepted**. All 11 HARDEN tasks delivered (T1-T11 across Wave 1-4 commits). 3 post-review fixes: recycle-backoff Promise leak (`714f1e6`), Track 2 chunk leak (`b5c4bde`), T10 redundant if/else collapse (`12f7603`).
 
 ### Recent Quality Wins (since last handover)
-- **v0.2.0 → v0.2.1 promotion** — npm publish CI via `release.yml` (provenance + `id-token: write`). Fixed `.gitattributes` LF cycle, commit-lint workflow (SHA typo + `pull_request_target` → `pull_request` switch + `actions/github-script` v7 `exec` require drop), macOS test timing tolerance, ESM `require` condition, docs refresh.
-- **Windows Node 22 CI flake fix** (`99ef885`) — `test/recycle-backoff.test.js` HARDEN-11 timing window widened 50ms → 200ms to match the explicit pattern used by sibling test #2 ("Bump to 200 ms to absorb CI timer noise on slow runners").
-- **Dependabot bumps merged** — `actions/setup-node` 4.4.0 → 7.0.0 (`9c2b585`), `actions/checkout` 4.4.0 → 7.0.1 (`d9864ad`). Merged via direct git push (workaround for `gh` OAuth `workflow` scope limitation — see Lessons below).
-- **ADR-0014 T12 docs closed** — README §11.1 cites T10 measured numbers (p50=0.041ms/p99=0.064ms tick overhead, 65.97 M ops/sec `classifyTickDirection` throughput, ~17s wall time for Phase A+B+E suite, 16→20 saturation plateau at 1.07×). BENCHMARKS.md §20 has the headline-numbers table. HANDOVER.md + STATE.md refreshed.
+- **v0.3.0 shipped** (2026-09-24) — durable queue + liveness/readiness probes. See §3 "Released".
+- **Four benchmark-assertion defects fixed at the root** (2026-09-27/28) — each had a hard-coded threshold or sleep that encoded the benchmark author's machine instead of the behaviour under test. `broadcast-fanout` discarded 2000 `TaskHandle`s behind a fixed 200 ms sleep (unhandled rejection exited 1); `adaptive-controller-opt-out` gated on an unwarmed single p99 (scheduler noise, not a regression); `default-sizing-memory` required a ratio that only holds on a high-core-count host; `adaptive-controller-tick` measured without warmup. All four have issue files in `.agents/issues/`.
+- **Two test-suite flakes fixed at the root** (2026-09-28) — `recycling.test.js` slept a fixed 200 ms for `worker_recycled`; now deadline-based polling. Note the same file already carried "bump to 200 ms to absorb CI timer noise" comments from an earlier flake — raising a sleep constant is the wrong fix, it only moves the cliff.
+- **Spec hygiene** (2026-09-27) — all 13 features under `.specs/features/` validate **0 errors** on both `validate_spec.py` and `validate_tasks.py`. See `.agents/issues/003-spec-validation-drift.md`.
+- **Large-file investigation** (2026-09-28) — measured the chunk-parallel vs NDJSON trade and the disk ceiling. Write-up in `research/` and `.agents/research/large-json-parsing.md`. Notably it **refuted** the NDJSON recommendation this repo had been carrying.
+- **`lint-staged` broken for docs-only commits** (2026-09-27) — a `!*.skill-meta.json` negation matched every other file, so any commit touching only `.md` failed the pre-commit hook. Matcher now scoped to the code directories.
+- **v0.2.0 → v0.2.1 promotion** — npm publish CI via `release.yml` (provenance + `id-token: write`).
+- **Dependabot bumps merged** — `actions/setup-node` → 7.0.0, `actions/checkout` → 7.0.1.
 
 ### Documented but NOT YET Implemented
-- **None blocking for single-instance deployments.** All documented ADRs (0010–0024) have shipped **in-scope** features in v0.2.0/0.2.1.
-- **Multi-instance / production deployments still have deferred gaps** tracked in [DR plan §8](docs/operations/disaster-recovery.md#8-open-items-gaps-to-close) — SIGTERM handler, `/healthz`, OpenTelemetry, durable queue backend. Each is `Status = deferred` with a user-side workaround that already works against current `src/`; see that section for per-item effort estimate to close.
+- **None blocking for single-instance deployments.** All documented ADRs (0010–0024) have shipped **in-scope** features in v0.2.0/0.2.1/0.3.0.
+- **Multi-instance / production deployments still have deferred gaps** tracked in [DR plan §8](docs/operations/disaster-recovery.md#8-open-items-gaps-to-close). Current state: **§8.1** SIGTERM — recipe shipped as `examples/sigterm-drain.js`, still user-wired by design (ADR-0005). **§8.2** `/healthz` — **closed** via `isAlive()` / `isReady()`. **§8.3** OpenTelemetry and **§8.4** Postgres backend — **permanently out-of-scope by rule** (ADR-0005). **§8.5** chaos game day and **§8.6** cross-region snapshots — genuinely open, but deployment-side, not library work.
 
 ### Tracked work (`.agents/issues/`)
 - **`001-supervisor-start-not-idempotent.md`** — ✅ FIXED (`5c4069c` + `205c384`).
@@ -81,36 +88,31 @@
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Current state**: v0.3.0 is shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix. No urgent release work pending.
+**Current state**: v0.3.0 shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters and Coverage, and is ~40 commits ahead of `main`.
 
-**Only remaining repo action**: promote `develop` → `main` (fast-forward, currently ~33 commits). That is a deliberate maintainer decision, not library work.
+**Only remaining repo action**: decide whether to release the `develop` delta. It contains **no API changes** — 4 benchmark-assertion fixes, 2 test-flake fixes, 3 new examples, spec hygiene, and a `research/` directory. Both bumping to v0.4.0 and promoting `develop` → `main` are deliberate maintainer decisions, not library work. The maintainer has explicitly deferred the release; do not publish without being asked.
 
 ### Open follow-ups (in priority order)
 
-1. **T13+ portable benchmarks** — ✅ DONE 2026-09-23 (commit `75deeaf`). `.agents/issues/CI-FAILURE-macos-benchmarks.md` marked RESOLVED; macOS-Latest ARM64 benchmark now uses platform-aware `1.15× darwin / 1.3× others` threshold in `benchmarks/cpu-saturation.benchmark.js`. CI green across 4 consecutive runs.
-2. **`gh auth refresh --scopes workflow`** — ✅ DONE 2026-09-23. Token now has `gist`, `read:org`, `repo`, **`workflow`** (verified via `gh auth status`). Future dependabot PRs that touch `.github/workflows/*.yml` can be merged with `gh pr merge` directly — no more `git fetch + local merge + git push` workaround.
-3. **Spec-precision follow-ups** (cheap, non-blocking, ~25 lines total):
-   - `RECYCLE-08` — negative-case assertion in `test/worker-recycling.test.js`.
-   - `PREEMPT-06` — explicit field-name assertions in `worker_replaced` event payload.
-   - ~~`PREEMPT-08` — shutdown-during-pending-watchdog `unhandledRejection` regression test.~~ **Covered 2026-09-24** in `test/worker-runtime.test.js` ("shutdown during pending watchdog does NOT emit unhandledRejection (PREEMPT-08)").
-4. **`tasks.md` template migration** — pre-existing drift in `.specs/features/adaptive-concurrency/tasks.md` and `.specs/features/persistent-worker-runtime/tasks.md`. Both fail `validate_tasks.py` with 4 structural errors each (missing `## Test Coverage Matrix`, `## Gate Check Commands`, `## Execution Plan`, `## Task Breakdown` + per-task `**Tests**:` / `**Gate**:` fields). Dedicated session with human review.
-5. **DR plan §8 open items** (revised 2026-09-24) — SQLite durable queue shipped (T13 / `51f8007` + `181c72c`); `/healthz` closed via `runtime.isAlive()` + `runtime.isReady()` (T8.2 / `e894c69`). Remaining: SIGTERM handler (deferred), OpenTelemetry + Postgres (permanent deferral by rule — ADR-0005, see AGENTS.md cross-ref).
-   - **SIGTERM handler** — `runtime.shutdown()` exists and is idempotent, but no built-in `process.on('SIGTERM', ...)` registration in `src/`. Workaround (works today): user wires a 3-line listener; pattern documented in `skills/persistent-worker-runtime/references/observability.md §Lifecycle`.
-   - **/healthz endpoint** — zero HTTP server in `src/`. Workaround (works today): caller-side `http.createServer` reads `runtime.stats()` + `isShuttingDown`.
-   - **OpenTelemetry** — only `AsyncResource` propagation is in place (the OTel Node SDK's transport); no spans emitted by the runtime. Workaround (works today): user installs `@opentelemetry/api` and wraps their own task fns; context flows into workers automatically.
-   - **queueBackend SQLite** — **in-progress**. ADR-0020 records the decision (SQLite via `node:sqlite` is the only durable backend shipped by the runtime; external backends removed from scope 2026-09-24). Implementation tracked in branch `feat/sqlite-queue-backend`. §8.4 references will be updated to "complete" once the SQLite backend ships.
-   - **§8 doc formalization**: ✅ DONE 2026-09-23 (this session) — 6 detailed subsections (`docs/operations/disaster-recovery.md §8.1–§8.6`). Each entry has Goal / Current state / Why deferred / Workaround today / Estimated effort to close.
+1. **Release decision** — ⏸️ deferred by maintainer. `CHANGELOG.md` has a ready `[Unreleased]` section covering the whole delta. Path if resumed: bump `package.json` → CI green → promote `develop` → `main` → tag → `npm publish`.
+2. **DR plan §8** — §8.2 `/healthz` closed; §8.3/§8.4 permanently out-of-scope by ADR-0005; §8.1 SIGTERM has a shipped recipe (`examples/sigterm-drain.js`) and stays user-wired by design. **§8.5** (chaos game day) and **§8.6** (cross-region snapshots) are genuinely open but **deployment-side, not library work** — they need a production deployment to exist first.
+3. ~~`tasks.md` template migration~~ — ✅ DONE 2026-09-23; all 13 features now validate 0 errors on both validators (`.agents/issues/003-spec-validation-drift.md`).
+4. ~~Spec-precision follow-ups~~ (`RECYCLE-08`, `PREEMPT-06`, `PREEMPT-08`) — ✅ all covered by existing tests in `test/recycling.test.js` and `test/preemption.test.js`.
+5. ~~`gh auth refresh --scopes workflow`~~ — ✅ DONE 2026-09-23; token has `workflow`, so workflow-touching dependabot PRs can be merged with `gh pr merge` directly.
 
-### Workflow for next release (v0.3.0 — placeholder)
+### Workflow for the next release
 
-When ready:
-1. `git checkout -b chore/release-v0.3.0`
-2. Land features in conventional-commits commits.
-3. `npm version minor` (0.2.1 → 0.3.0).
-4. `git push origin chore/release-v0.3.0`.
-5. Open PR → merge to `main` (CI runs `lint` + `test` matrix).
-6. Tag triggers `release.yml` workflow → npm publish with provenance.
-7. GitHub release notes.
+Per the branch rule in §2, releases are promoted from `develop` — do **not** cut a
+`chore/release-*` branch off `main`. When the maintainer decides to release:
+
+1. Confirm `develop` is green across the full matrix (CI + Linters + Coverage).
+2. `npm version minor` (or `patch`) on `develop`; commit as `chore(release): v0.4.0`.
+3. `git push origin develop`, wait for the matrix to go green on the release commit.
+4. Promote `develop` → `main` (fast-forward; `main` is a strict ancestor).
+5. Tag `main` — the tag triggers `release.yml` → npm publish with provenance.
+6. GitHub release notes.
+
+Everything before the tag is reversible. `npm publish` is not — confirm with the maintainer first.
 
 ---
 
@@ -118,10 +120,24 @@ When ready:
 
 ```bash
 # Tests + lint
-npm test                     # 563 tests across 153 suites (post-ADR-0024 + 3 review fixes + Windows Node 22 fix)
+npm test                     # 622 tests, 0 failed, 0 skipped
 npm run lint                 # biome check (no auto-fix)
 npm run lint:ci              # biome ci (CI strict mode; used by lint.yml)
 npm run validate             # lint + test (used by pre-push, prepublish)
+
+# Benchmarks — 24 gated scripts, all run in CI
+npm run benchmark:all        # the full gated suite
+
+# Research — usage-pattern investigations, NOT CI gates. See research/README.md.
+# These need GB of temp disk and take 7-20 minutes. Do not add them to benchmark:all.
+node research/parse-parallelism-probe.benchmark.js
+PWR_SKIP_SWEEP=1 node research/parse-parallelism-probe.benchmark.js   # I/O section only
+node research/json-strategy-compare.benchmark.js
+PWR_SKIP_LARGE=1 node research/json-strategy-compare.benchmark.js     # 512 MB pass instead of 10 GB
+
+# Spec validation — run BOTH validators over the whole tree when closing a feature
+Get-ChildItem -Recurse -Filter spec.md .specs\features | ForEach-Object { py .agents/skills/tlc-spec-driven/scripts/validate_spec.py $_.FullName }
+Get-ChildItem -Recurse -Filter tasks.md .specs\features | ForEach-Object { py .agents/skills/tlc-spec-driven/scripts/validate_tasks.py $_.FullName }
 
 # Benchmarks (20+ scripts — full results in BENCHMARKS.md)
 npm run benchmark:all
