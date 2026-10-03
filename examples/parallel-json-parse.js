@@ -470,7 +470,7 @@ async function main() {
 
   // ── How to read the speedup number ─────────────────────────────────────────
   // A sub-linear speedup here is NOT a limitation of the worker pool.
-  // benchmarks/parse-parallelism-probe.benchmark.js shows JSON.parse itself
+  // research/parse-parallelism-probe.benchmark.js shows JSON.parse itself
   // parallelises near-linearly (6.6× on 8 workers, in memory, no disk). The
   // ceiling on a large cold file is the disk: the same probe shows the
   // non-parse share of wall time climbing from ~12% at 2 workers to ~33% at 8.

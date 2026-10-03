@@ -79,7 +79,7 @@ counts, sums, or filtered records, do the reduction *inside* the worker.
 At 10 GB the example reported 1.97× on 4 workers, and *total parse CPU rose* from 75 s to 94 s.
 That looks like a CPU ceiling, so the obvious suspects were memory bandwidth (H2) and GC
 interference between isolates (H3). **Both are wrong.** See
-`benchmarks/parse-parallelism-probe.benchmark.js`.
+`research/parse-parallelism-probe.benchmark.js`.
 
 ### The harness lied first
 
@@ -148,7 +148,7 @@ materialising 2–5× the file size as objects.
 ## 4b. …but the NDJSON recommendation is WRONG (measured, refuted)
 
 The sentence above was a claim inherited from prior reading and never tested here.
-`benchmarks/json-strategy-compare.benchmark.js` runs the SAME records — both files are generated
+`research/json-strategy-compare.benchmark.js` runs the SAME records — both files are generated
 from one record stream, so they hold byte-identical record content — through three shapes. At
 4 GB (14 277 885 records, every variant cross-checked on both count and `sum(price)`):
 
@@ -165,9 +165,55 @@ from one record stream, so they hold byte-identical record content — through t
 
 Why the folklore is wrong: `readline` yields one line at a time, and each line costs a
 `JSON.parse` call plus a stream event. At 14 M records that per-record overhead is large.
-NDJSON's genuine win is **memory** — 229 MB peak versus a chunk-parallel run that must hold a
-~400 MB slice plus its parsed graph — not speed. It is the right answer when RAM is the binding
-constraint, and the wrong answer when you have memory to spare.
+
+## 4c. The full trade: time AND memory, measured per variant
+
+Wall time alone was not enough to pick an architecture — the deciding quantity is peak RSS.
+Each variant now runs in its **own child process** (V8 rarely returns freed pages to the OS
+promptly, so sequential variants in one process would share a high-water mark and every
+reading after the first would be inflated).
+
+4 GB / 14 277 885 records, all variants cross-checked on count and `sum(price)`:
+
+| variant | wall | MB/s | peak RSS | × file size |
+| --- | --- | --- | --- | --- |
+| A chunk-parallel ×1 | 48.7 s | 84 | 2.30 GB | 0.6× |
+| A chunk-parallel ×2 | 28.2 s | 145 | 4.14 GB | 1.0× |
+| A chunk-parallel ×4 | 18.8 s | 218 | 7.42 GB | 1.9× |
+| C NDJSON streaming | 39.6 s | 103 | **0.34 GB** | **0.08×** |
+
+Two things the wall-time-only table could not show:
+
+1. **RAM scales linearly with worker count** (2.30 → 4.14 → 7.42 GB). Throughput scales the
+   same way. It is a straight trade, not a free win: each worker holds its own slice plus its
+   own parsed graph.
+2. **NDJSON beats single-worker chunk-parallel on both axes** — 39.6 s / 0.34 GB against
+   48.7 s / 2.30 GB. Chunk-parallel only wins by adding workers, and each worker costs about
+   1.9× the file size in RAM.
+
+### The decision, computed rather than asserted
+
+```
+chunk-parallel needs ≈ 1.9 × fileSize in free RAM
+  → affordable while  fileSize ≤ freeRam / 1.9
+```
+
+| Constraint | Pick | You get | You pay |
+| --- | --- | --- | --- |
+| RAM is plentiful | chunk-parallel, scale workers | up to 6.6× parse speedup | ~1.9× file size in RAM per worker count |
+| RAM is tight, file already NDJSON | NDJSON streaming | 0.08× file size, and it beats 1-worker chunk-parallel | 2.1× the wall time of 4-worker chunk-parallel; single-threaded, no parse parallelism |
+| RAM is tight, file is a JSON array | convert to NDJSON first | then the row above | one conversion pass up front |
+| File is warm in page cache | chunk-parallel | ~3.5× (not the 2× seen cold) | unchanged |
+| Disk is the ceiling | nothing in JS helps | — | faster storage, or fewer/larger sequential reads |
+
+**Limitations of chunk-parallel:** needs ~1.9× the file size in RAM; the slice size is capped by
+the ~512 MB V8 string limit, so a large file always means many chunks; and on a cold file its
+speedup falls to ~2× because four read streams queue on one device.
+
+**Limitations of NDJSON streaming:** the data must *already* be one object per line, so it cannot
+read an existing JSON array without a conversion pass; it is single-threaded, so there is no parse
+parallelism; and it is 2.1× slower here because each line costs a `JSON.parse` call plus a stream
+event.
 
 Also note that "parse the whole file in one `JSON.parse`" is not an available option above
 ~512 MB. That is exactly the limit variant A exists to work around.

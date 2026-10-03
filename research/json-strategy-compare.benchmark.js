@@ -2,7 +2,7 @@
  * [perf-tested] Three ways to get 10 GB of JSON records into memory.
  *
  * Follow-up to examples/parallel-json-parse.js. That example measured 1.97× on
- * 4 workers at 10 GB, and benchmarks/parse-parallelism-probe.benchmark.js
+ * 4 workers at 10 GB, and research/parse-parallelism-probe.benchmark.js
  * established WHY: JSON.parse itself parallelises near-linearly (6.6× on 8
  * workers), but the non-parse share of wall time climbs from ~12% to ~33% as
  * workers are added, because four interleaved read streams queue badly on one
@@ -23,7 +23,7 @@
  * generator, so A/B read byte-identical record content to C. Anything that
  * differs is architecture, not data.
  *
- * Run: `node benchmarks/json-strategy-compare.benchmark.js`
+ * Run: `node research/json-strategy-compare.benchmark.js`
  * Env: PWR_JSON_MB=10240   target size per file (default 10240)
  *      PWR_SKIP_LARGE=1    run a fast 512 MB comparison instead
  */
