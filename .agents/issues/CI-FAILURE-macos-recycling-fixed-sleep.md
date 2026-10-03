@@ -82,13 +82,30 @@ await waitFor(() => {
 });
 ```
 
-The same applies to the `maxMemoryMb` test: polling on `recyclingEvents.length` and then
-immediately asserting `recycledEvents.length === 1` fails for the same reason. Both must be
-inside the wait.
+### And the second attempt reintroduced it in a subtler shape
+
+Waiting on `recycledEvents` and then asserting `runtime.stats.totalWorkers === 2` still raced:
+`worker_recycled` is emitted when the **replacement spawns**, and the **old worker is removed
+afterwards**. Between the two the pool transiently holds N+1. CI run `37114512380` (Coverage
+workflow) caught it as `3 !== 2`.
+
+The lesson generalises past this file: **the wait must cover every condition the assertions
+touch, including ones that become true slightly after the event.** A worker replacement is a
+two-phase transition, and a predicate that only watches the first phase will hand the assertion
+a transient state.
+
+```js
+while (
+  (recycledEvents.length === 0 || runtime.stats.totalWorkers !== 2) &&
+  Date.now() < deadline
+) { /* poll */ }
+```
+
+Applied to both recycling tests that assert on pool size.
 
 ## Verification
 
-- `recycling.test.js` + `recycle-backoff.test.js`: 42/42, three consecutive runs, no flake.
+- `recycling.test.js` + `recycle-backoff.test.js`: 42/42 across **six** consecutive runs.
 - Full suite: 622/622, 0 fail, 0 skipped.
 
 ## Prevention
@@ -96,10 +113,12 @@ inside the wait.
 - **Never assert on an event that a fixed sleep is standing in for.** Poll the condition, with a
   deadline that expresses the real requirement ("this must happen within 5 s"), not a guess
   about the slowest machine.
+- **Poll the same predicate the assertions will use, and cover every condition they touch.** A
+  worker replacement is a two-phase transition (spawn, then remove); watching only the first
+  phase hands the assertion a transient N+1 pool. Both partial-predicate failures above came
+  from this.
 - When a test's sleep constant has been raised before, that is evidence the design is wrong, not
   that the constant is too small. Two such comments existed in this file already.
-- **Poll the same predicate the assertions will use.** A partial predicate reintroduces the
-  race with a shorter leash.
 - Negative waits ("wait long enough that no spurious event fires") are a different shape and are
   fine as fixed sleeps — they assert the *absence* of an event over a window, which has no
   completion signal to poll on. `recycling.test.js:506` is intentionally left as a fixed 500 ms.

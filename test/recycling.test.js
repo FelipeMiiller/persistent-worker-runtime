@@ -389,15 +389,22 @@ describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () =>
 
       assert.deepEqual([r1, r2, r3, r4], [1, 2, 3, 4]);
 
-      // Wait for the replacement worker to actually settle instead of
-      // sleeping a fixed 200 ms. The `worker_recycling` trigger fires
-      // synchronously with the task completion, but `worker_recycled` is
-      // emitted only after the replacement thread has spawned and booted —
-      // which on a loaded macOS runner can exceed 200 ms, and the fixed sleep
-      // turned that into a flaky failure (CI run 37069227658, Node 24 /
-      // macos-latest: "At least one worker must be recycled").
+      // Wait for the full recycling cycle to settle instead of sleeping a
+      // fixed 200 ms. TWO conditions must hold, and the order matters:
+      //
+      //   1. `worker_recycled` is emitted once the replacement has spawned.
+      //   2. The OLD worker is only THEN removed from the pool.
+      //
+      // Between (1) and (2) the pool transiently holds THREE workers. Waiting
+      // only on `recycledEvents` and then asserting `totalWorkers === 2`
+      // races the old worker's removal — that is the "3 !== 2" failure this
+      // wait exists to prevent (CI run 37114512380, Coverage workflow).
+      // Wait on the settled state the assertions actually check.
       const deadline = Date.now() + 5000;
-      while (recycledEvents.length === 0 && Date.now() < deadline) {
+      while (
+        (recycledEvents.length === 0 || runtime.stats.totalWorkers !== 2) &&
+        Date.now() < deadline
+      ) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
 
@@ -416,8 +423,13 @@ describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () =>
       assert.ok(recycledEvents[0].newWorkerId);
       assert.notEqual(recycledEvents[0].oldWorkerId, recycledEvents[0].newWorkerId);
 
-      // Verify pool size remains 2
-      assert.equal(runtime.stats.totalWorkers, 2);
+      // Verify pool size is back to 2 (the old worker was removed).
+      assert.equal(
+        runtime.stats.totalWorkers,
+        2,
+        `expected the pool back to 2 after the old worker was removed, got ` +
+          `${runtime.stats.totalWorkers}`,
+      );
     } finally {
       await runtime.shutdown();
     }
@@ -450,13 +462,15 @@ describe('Worker Recycling - Supervisor Orchestration & Replacement (T4)', () =>
 
       assert.equal(result.allocated, 400000);
 
-      // Wait for the full recycling cycle instead of sleeping a fixed 200 ms.
-      // The memory check runs on the supervisor poll cadence and the
-      // `worker_recycled` event is only emitted after the replacement thread
-      // has spawned and booted — both can exceed a fixed window on a loaded
-      // runner, so poll for the settled state.
+      // Wait for the full cycle to settle: the recycling event fires, the
+      // replacement spawns, and only then is the old worker removed (the
+      // pool is transiently N+1 in between). Waiting on the event alone and
+      // then asserting `totalWorkers` races that removal.
       const deadline = Date.now() + 5000;
-      while (recycledEvents.length === 0 && Date.now() < deadline) {
+      while (
+        (recycledEvents.length === 0 || runtime.stats.totalWorkers !== 1) &&
+        Date.now() < deadline
+      ) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
 
