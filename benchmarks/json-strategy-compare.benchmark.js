@@ -28,10 +28,11 @@
  *      PWR_SKIP_LARGE=1    run a fast 512 MB comparison instead
  */
 
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createReadStream, createWriteStream, mkdirSync } from 'node:fs';
 import { rm, stat, unlink } from 'node:fs/promises';
-import { cpus, tmpdir, totalmem } from 'node:os';
+import { cpus, freemem, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { createInterface } from 'node:readline';
@@ -265,6 +266,100 @@ async function variantC(filePath) {
   return { wall: performance.now() - t0, records, total, peakHeap };
 }
 
+// ── RSS sampling ────────────────────────────────────────────────────────────
+
+/**
+ * Run `work` while sampling process RSS, returning its peak.
+ *
+ * RSS is the number that actually decides the architecture: V8 rarely returns
+ * freed pages to the OS promptly, so a variant that ran earlier in the same
+ * process inflates every later reading. Each variant therefore runs in its OWN
+ * child process (see `runInChild`) and reports its own peak.
+ */
+async function withRssSampling(work, { intervalMs = 20 } = {}) {
+  const baseline = process.memoryUsage().rss;
+  let peak = baseline;
+  let sampling = true;
+  const sampler = (async () => {
+    while (sampling) {
+      const r = process.memoryUsage().rss;
+      if (r > peak) peak = r;
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  })();
+  try {
+    return { result: await work(), peakRss: peak, baselineRss: baseline };
+  } finally {
+    sampling = false;
+    await sampler;
+    const r = process.memoryUsage().rss;
+    if (r > peak) peak = r;
+  }
+}
+
+/**
+ * Execute one variant in a fresh child process and return its measurements as
+ * JSON. Isolation is the point: it makes each variant's peak RSS an honest
+ * per-architecture number rather than a high-water mark shared with whatever
+ * ran before it.
+ */
+function runInChild(mode, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [...process.execArgv, process.argv[1]], {
+      env: { ...process.env, ...env, PWR_CHILD_MODE: mode },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let errOut = '';
+    child.stdout.on('data', (c) => {
+      out += c;
+    });
+    child.stderr.on('data', (c) => {
+      errOut += c;
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) return reject(new Error(`child ${mode} exited ${code}: ${errOut}`));
+      const line = out
+        .trim()
+        .split('\n')
+        .filter((l) => l.startsWith('{'))
+        .pop();
+      if (!line) return reject(new Error(`child ${mode} produced no result line: ${out}${errOut}`));
+      try {
+        resolve(JSON.parse(line));
+      } catch {
+        reject(new Error(`child ${mode} bad JSON: ${line}`));
+      }
+    });
+  });
+}
+
+// ── Child mode ──────────────────────────────────────────────────────────────
+
+async function childMain(mode, env) {
+  const { PWR_ARRAY_FILE: arrayFile, PWR_NDJSON_FILE: ndjsonFile } = env;
+  const size = (await stat(arrayFile)).size;
+  const boundaries = await indexRecords(arrayFile);
+  const arrayClose = await findArrayClose(arrayFile, size);
+
+  if (mode.startsWith('A')) {
+    const workers = Number(mode.slice(1));
+    const { result, peakRss, baselineRss } = await withRssSampling(() =>
+      variantA(arrayFile, size, boundaries, arrayClose, workers),
+    );
+    return { ...result, peakRss, baselineRss, mb: size / 1024 ** 2 };
+  }
+  if (mode === 'B') {
+    const { result, peakRss, baselineRss } = await withRssSampling(() =>
+      variantB(arrayFile, arrayClose),
+    );
+    return { ...result, peakRss, baselineRss, mb: size / 1024 ** 2 };
+  }
+  const { result, peakRss, baselineRss } = await withRssSampling(() => variantC(ndjsonFile));
+  return { ...result, peakRss, baselineRss, mb: (await stat(ndjsonFile)).size / 1024 ** 2 };
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -273,6 +368,12 @@ async function main() {
   const arrayFile = join(dir, 'data.json');
   const ndjsonFile = join(dir, 'data.ndjson');
 
+  // Child mode: run exactly one variant, emit a single JSON line, exit.
+  if (process.env.PWR_CHILD_MODE) {
+    const res = await childMain(process.env.PWR_CHILD_MODE, process.env);
+    process.stdout.write(`${JSON.stringify(res)}\n`);
+    return;
+  }
   console.log('=====================================================================');
   console.log('BENCHMARK: chunk-parallel vs sequential vs NDJSON streaming');
   console.log('=====================================================================\n');
@@ -282,7 +383,7 @@ async function main() {
   console.log(`  workers       : ${WORKER_LADDER.join(' / ')}\n`);
 
   console.log('  generating both formats from ONE record stream ...');
-  let t0 = performance.now();
+  const t0 = performance.now();
   const recCount = await generateBothUpTo(arrayFile, ndjsonFile, EFFECTIVE_MB);
   const gen = performance.now() - t0;
   const { size: arraySize } = await stat(arrayFile);
@@ -292,25 +393,23 @@ async function main() {
       `ndjson ${(ndSize / 1024 ** 3).toFixed(2)} GB (${(gen / 1000).toFixed(0)}s)\n`,
   );
 
-  console.log('  indexing record boundaries ...');
-  t0 = performance.now();
-  const boundaries = await indexRecords(arrayFile);
-  const arrayClose = await findArrayClose(arrayFile, arraySize);
-  console.log(
-    `    ${boundaries.length.toLocaleString()} boundaries in ${((performance.now() - t0) / 1000).toFixed(1)}s\n`,
-  );
-
+  // Indexing moved into each child process: every variant needs its own index
+  // and doing it once here would only serve a value nobody reads now.
   const rows = [];
+  const childEnv = { PWR_ARRAY_FILE: arrayFile, PWR_NDJSON_FILE: ndjsonFile };
+  const gb = (b) => (b / 1024 ** 3).toFixed(2);
 
-  // ── A ──
-  console.log('  [A] chunk-parallel across a worker pool ...');
+  // Every variant runs in its own child process so its peak RSS is an honest
+  // per-architecture number. Running them in sequence in one process would let
+  // V8's unreturned pages from an earlier variant inflate the next reading.
+  console.log('  [A] chunk-parallel across a worker pool (one child process each) ...');
   for (const w of WORKER_LADDER) {
-    const r = await variantA(arrayFile, arraySize, boundaries, arrayClose, w);
-    rows.push({ variant: `A chunk-parallel x${w}`, ...r, mb: arraySize / 1024 ** 2 });
+    const r = await runInChild(`A${w}`, childEnv);
+    rows.push({ variant: `A chunk-parallel x${w}`, ...r });
     console.log(
-      `      x${w}: ${(r.wall / 1000).toFixed(2)}s  ` +
-        `${(arraySize / 1024 ** 2 / (r.wall / 1000)).toFixed(0)} MB/s  ` +
-        `${r.records.toLocaleString()} recs  (${r.chunks} chunks)`,
+      `      x${w}: ${(r.wall / 1000).toFixed(2)}s  ${(r.mb / (r.wall / 1000)).toFixed(0)} MB/s  ` +
+        `${r.records.toLocaleString()} recs  ${r.chunks} chunks  peak RSS ${gb(r.peakRss)} GB ` +
+        `(x${(r.peakRss / r.mb / 1024 ** 2).toFixed(1)} file size)`,
     );
   }
   console.log('');
@@ -324,11 +423,11 @@ async function main() {
   const fitsOneString = arraySize <= V8_MAX_STRING;
   console.log('  [B] single worker, one contiguous read ...');
   if (fitsOneString) {
-    const r = await variantB(arrayFile, arrayClose);
-    rows.push({ variant: 'B sequential x1', ...r, mb: arrayMb });
+    const r = await runInChild('B', childEnv);
+    rows.push({ variant: 'B sequential x1', ...r });
     console.log(
-      `      x1: ${(r.wall / 1000).toFixed(2)}s  ` +
-        `${(arrayMb / (r.wall / 1000)).toFixed(0)} MB/s  (whole file in one V8 string)`,
+      `      x1: ${(r.wall / 1000).toFixed(2)}s  ${(r.mb / (r.wall / 1000)).toFixed(0)} MB/s  ` +
+        `peak RSS ${gb(r.peakRss)} GB`,
     );
   } else {
     console.log(
@@ -342,12 +441,13 @@ async function main() {
 
   // ── C ──
   console.log('  [C] NDJSON streaming (O(1) memory, no slicing) ...');
-  const c = await variantC(ndjsonFile);
-  rows.push({ variant: 'C ndjson stream', ...c, mb: ndSize / 1024 ** 2 });
-  const cMbs = ndSize / 1024 ** 2 / (c.wall / 1000);
+  const c = await runInChild('C', childEnv);
+  rows.push({ variant: 'C ndjson stream', ...c });
+  const cMbs = c.mb / (c.wall / 1000);
   console.log(
     `      : ${(c.wall / 1000).toFixed(2)}s  ${cMbs.toFixed(0)} MB/s  ` +
-      `${c.records.toLocaleString()} recs  peak heap ${(c.peakHeap / 1024 ** 2).toFixed(0)} MB`,
+      `${c.records.toLocaleString()} recs  peak RSS ${gb(c.peakRss)} GB ` +
+      `(x${(c.peakRss / c.mb / 1024 ** 2).toFixed(2)} file size)`,
   );
   console.log('');
 
@@ -361,8 +461,9 @@ async function main() {
         {
           'wall (s)': (r.wall / 1000).toFixed(2),
           'MB/s': (r.mb / (r.wall / 1000)).toFixed(0),
+          'peak RSS': `${(r.peakRss / 1024 ** 3).toFixed(2)} GB`,
+          '×file': (r.peakRss / (r.mb * 1024 ** 2)).toFixed(1),
           records: r.records.toLocaleString(),
-          'sum(price)': r.total.toFixed(0),
         },
       ]),
     ),
@@ -389,17 +490,68 @@ async function main() {
   const bestA = rows
     .filter((r) => r.variant.startsWith('A'))
     .reduce((a, b) => (b.wall < a.wall ? b : a));
-  const bestB = rows.find((r) => r.variant.startsWith('B'));
   const cRow = rows.find((r) => r.variant.startsWith('C'));
+
+  const fileGb = bestA.mb / 1024;
+  const aRssGb = bestA.peakRss / 1024 ** 3;
+  const cRssGb = cRow.peakRss / 1024 ** 3;
+  const speedCost = cRow.wall / bestA.wall; // how much slower NDJSON is
+  const memSaving = aRssGb / cRssGb; // how much less RAM NDJSON needs
+
   console.log('');
-  console.log(`  best chunk-parallel : ${bestA.variant} — ${(bestA.wall / 1000).toFixed(2)}s`);
-  if (bestB) console.log(`  sequential          : ${(bestB.wall / 1000).toFixed(2)}s`);
-  console.log(`  NDJSON streaming    : ${(cRow.wall / 1000).toFixed(2)}s`);
+  console.log('  ── Decision ──\n');
+  console.log('  Both options are viable; they trade time against memory.');
+  console.log('  The crossover below is computed from the measurements above, not guessed.');
+  console.log('');
+  console.table({
+    '': {
+      'speed (4 GB)': `${(bestA.wall / 1000).toFixed(1)}s vs ${(cRow.wall / 1000).toFixed(1)}s`,
+      'peak RSS': `${aRssGb.toFixed(2)} GB vs ${cRssGb.toFixed(2)} GB`,
+      '× file size': `${(aRssGb / fileGb).toFixed(1)}× vs ${(cRssGb / fileGb).toFixed(2)}×`,
+    },
+  });
   console.log('');
   console.log(
-    `  NDJSON vs best chunk-parallel: ${(cRow.wall / bestA.wall).toFixed(2)}× ` +
-      `(${cRow.wall < bestA.wall ? 'NDJSON is faster' : 'chunk-parallel is faster'})`,
+    `  NDJSON costs ${speedCost.toFixed(2)}× the wall time and saves ${memSaving.toFixed(1)}× the RAM.`,
   );
+  console.log('');
+  console.log(
+    `  For a file of size F, chunk-parallel needs about ${(aRssGb / fileGb).toFixed(1)}× F of free RAM.`,
+  );
+  console.log(
+    `  That is affordable while  F <= freeRam / ${(aRssGb / fileGb).toFixed(1)}` +
+      `  (≈ ${(freemem() / 1024 ** 3 / (aRssGb / fileGb)).toFixed(1)} GB on this host).`,
+  );
+  console.log('');
+
+  const ratio = aRssGb / fileGb;
+  const budget = freemem() / 1024 ** 3;
+  if (budget > fileGb * ratio * 1.5) {
+    console.log(
+      `  → Use CHUNK-PARALLEL. ${budget.toFixed(1)} GB free comfortably covers the ` +
+        `${(fileGb * ratio).toFixed(1)} GB this file needs, and it is ${speedCost.toFixed(2)}× faster.`,
+    );
+  } else {
+    console.log(
+      `  → Use NDJSON STREAMING. ${budget.toFixed(1)} GB free does not comfortably cover the ` +
+        `${(fileGb * ratio).toFixed(1)} GB chunk-parallel would need for this file. ` +
+        `Pay the ${speedCost.toFixed(2)}× time cost and keep ${cRssGb.toFixed(2)} GB.`,
+    );
+  }
+  console.log('');
+  console.log('  Limitations of each option (measured, not assumed):');
+  console.log(
+    `    chunk-parallel — needs ~${ratio.toFixed(1)}× file size in RAM; the slice size is`,
+  );
+  console.log('      capped by the ~512 MB V8 string limit, so a big file always means');
+  console.log('      many chunks; and on a COLD file its speedup falls to ~2× because');
+  console.log('      four read streams queue on one device (see parse-parallelism-probe).');
+  console.log(`    NDJSON streaming — needs the data to ALREADY be one object per line, so it`);
+  console.log('      cannot read an existing JSON array without a conversion pass; single');
+  console.log(
+    `      threaded, so no parse parallelism; and ${speedCost.toFixed(2)}× slower here because`,
+  );
+  console.log('      each line costs a JSON.parse call plus a stream event.');
   console.log('');
 
   if (!process.env.PWR_JSON_KEEP) {
