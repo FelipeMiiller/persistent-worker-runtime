@@ -11,6 +11,7 @@
       "test/**/*.js",
       "examples/**/*.js",
       "benchmarks/**/*.js",
+      "research/**/*.js",
       "*.js",
       "*.mjs",
       "*.cjs",
@@ -74,7 +75,7 @@
   },
   "overrides": [
     {
-      "includes": ["examples/**", "benchmarks/**"],
+      "includes": ["examples/**", "benchmarks/**", "research/**"],
       "linter": {
         "rules": {
           "suspicious": {

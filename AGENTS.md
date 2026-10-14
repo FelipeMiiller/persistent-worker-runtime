@@ -152,5 +152,19 @@ Runs the full lint + test suite before a push lands on `origin/develop`.
 
 ### Per-directory overrides in `biome.json`
 
-- `examples/**`, `benchmarks/**`: `noConsole` is **off** (these are demonstrative scripts that print output).
+- `examples/**`, `benchmarks/**`, `research/**`: `noConsole` is **off** (these are demonstrative scripts that print output).
 - `test/**`: `noConsole` and `noEmptyBlockStatements` are **off** (legitimate patterns like `.catch(() => {})` for fire-and-forget).
+
+### Which directories are linted
+
+`biome.json` `files.includes` and the five npm scripts (`lint`, `lint:ci`, `lint:fix`,
+`format`, `format:check`) list these paths **explicitly** — a new top-level directory with JS is
+NOT linted until it is added in both places:
+
+```
+src/  test/  examples/  benchmarks/  research/
+```
+
+`research/` holds usage-pattern investigations (not CI gates). It is linted and formatted like
+`benchmarks/` but deliberately absent from `benchmark:all`, because those scripts take 7–20 minutes
+and generate GB of temp files. See [`research/README.md`](research/README.md).
