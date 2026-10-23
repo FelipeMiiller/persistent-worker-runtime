@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Changes merged to `develop` after the v0.3.0 release. The public API surface is unchanged — `src/index.js`
-still exports the same 16 names — and `src/` behaviour is identical. These are CI, correctness and
-measurement fixes.
+still exports the same 16 names — but one behaviour **is** changed: `dispatch()` now attaches an
+internal rejection handler to the handle's promise (ADR-0025), so a fire-and-forget handle that
+nobody awaits can no longer take the process down. Everything else is CI, correctness, type-surface
+and measurement work.
 
 ### Added
 
@@ -65,7 +67,57 @@ measurement fixes.
   fires, so no caller is left hanging. The distinction is what lets a consumer tell a forced kill
   from a cooperative timeout.
 
+### Changed
+
+- **`dispatch()`'s fire-and-forget contract is now true (ADR-0025)** — the `dispatch()` JSDoc and
+  ADR-0018 both promised that the handle's promise carried an internal `.catch()`, so a discarded
+  handle was safe. It never did: `src/task-handle.js` attached no handler at all, and the only
+  `.catch()` in `dispatch()` was on the *enqueue* promise. The observable consequence was not
+  theoretical — `runtime.shutdown()` calls `queue.destroy()`, which **rejects** every still-queued
+  task, and the unhandled rejection **exited the user's process with code 1**. `dispatch()` (and
+  `dispatchAll()`) now attach a no-op rejection handler to the handle's promise. Nothing is masked:
+  the promise still rejects (`await handle.promise` throws the same error) and `onError` still fires.
+  `execute()` deliberately keeps **no** such handler — its promise belongs to the caller, so the
+  ADR-0018 hazard stays visible — which is why `execute()` now calls a private `#dispatchTask()`
+  instead of the public `dispatch()`. `test/dispatch-promise-contract.test.js` proves both halves:
+  removing the keep-alive makes 4 of its 7 tests fail. ADR-0018 is amended (the false claim is
+  marked corrected, the original text kept as history) and ADR-0025 records the decision.
+
 ### Fixed
+
+- **Four public exports were missing from the TypeScript declarations** — `src/index.d.ts` shipped
+  without `SqliteTaskQueue`, `TaskQueue`, `StreamAbortedError` and `StreamConfigError`, so a
+  TypeScript consumer importing the documented API got `TS2305` on its first `tsc` run. The failure
+  was invisible to the JavaScript suite, to coverage and to CI. `SqliteTaskQueue` is a headline
+  feature (ADR-0020, in the README's feature table and in the shipped skill), so the type layer was
+  denying an API the documentation told users to use. All four are now declared, each with a shape
+  derived from the runtime source rather than invented (`StreamConfigError` extends `TypeError`, not
+  `WorkerRuntimeError`, and carries no `code`).
+- **`WorkerHandle` was missing four public properties** — the runtime sets `isDedicated`,
+  `workerScript`, `handlerPath` and `resourceLimits` on the instance (`src/worker-handle.js`), but
+  the class declaration listed none of them; `isDedicated` was declared only in the unrelated
+  `WorkerSnapshot` interface.
+- **The `.d.ts` and the runtime could drift apart without anyone noticing** — a repo-wide search
+  for `typescript`/`tsc`/`tsd`/`checkJs` returned zero tooling hits, so nothing proved the
+  declarations matched the code they describe. `test/types-surface.test.js` is the new
+  **zero-dependency** gate: it compares the runtime exports with the `.d.ts`'s value-level
+  declarations in **both directions**, ignoring type-only `interface`/`type` declarations. Proven
+  non-vacuous — removing one declaration, and appending a ghost one with no runtime counterpart,
+  each make it exit 1 with a clear message. It compares **names**; it does not prove the
+  declarations compile, which still needs a `tsc --noEmit` gate and a decision about ADR-0005.
+- **`npm run test:coverage` reported coverage but could never fail** — the workflow's name promised
+  a property the job did not enforce, so a silent regression looked like a green build. The script
+  now carries `--test-coverage-lines=90 --test-coverage-branches=80 --test-coverage-functions=85`
+  (the flag names carry **no** `--experimental-` prefix, and they exist as far back as Node 22.13.0).
+  The floors sit below the measured baseline of **94.39 / 87.71 / 91.01** on purpose: a floor equal
+  to the baseline turns the next uncovered line into a red build for a reason unrelated to its
+  quality. Proven to fail — the same run with `--test-coverage-lines=100` exits 1.
+- **`npm publish` could ship a release that disagreed with itself** — the publish workflow had no
+  check that the git tag matched `package.json`'s version, that `CHANGELOG.md` had a section for it,
+  or that the version was not already on npm. A mismatched tag published the *previous* version
+  (npm then rejects the duplicate with a confusing error, after the release is already public on
+  GitHub); an untagged version shipped undocumented. A pre-flight step now validates all three and
+  fails with a clear `::error::` message before anything is published.
 
 - **`node:sqlite`'s `DatabaseSync` import broke the whole package when the DEP0210 alias is removed.**
   Node 26.11 renamed `DatabaseSync` to `Database`. `src/queue/sqlite-backend.js` used a *named* import,

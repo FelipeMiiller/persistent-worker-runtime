@@ -178,7 +178,13 @@ agent's scratch folder, then restored; the repo hash was verified identical befo
   **not** prove the declarations compile, that an overload is right, or that a type body references
   a name that exists. That needs `typescript` as a devDependency plus an explicit ADR-0005 note —
   a policy decision, deliberately not taken here.
-- `WorkerHandle.isDedicated` is set by the runtime (`src/worker-handle.js:53`) but is still missing
-  from `WorkerHandle` in the `.d.ts`. It is a real (minor) drift of the same family, left out of
-  this fix because it is outside the 4 names this issue scoped.
+- **The gate compares NAMES, not PROPERTIES.** The property-level drift found while fixing this
+  issue — `WorkerHandle` exposes `isDedicated`, `workerScript`, `handlerPath` and `resourceLimits` on
+  the instance (`src/worker-handle.js:50-56`), but the class declaration listed none of them
+  (`isDedicated` was declared only in the unrelated `WorkerSnapshot` interface) — was invisible to
+  the gate. Those four are now declared, but the **class of defect remains uncovered**: a property
+  that exists at runtime and is missing from the `.d.ts` produces the same `TS2339` for a consumer
+  as a missing name did, and the gate cannot see it. Closing that would mean comparing the runtime's
+  public instance fields against the declarations' class bodies — a bigger parser than the name
+  gate needs, and a follow-up in its own right.
 

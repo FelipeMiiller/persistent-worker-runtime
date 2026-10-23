@@ -654,6 +654,19 @@ export class WorkerHandle {
   readonly id: string;
   readonly name: string | null;
   readonly affinityKey: string | null;
+
+  /** True when the worker was created through `createDedicatedWorker()`. */
+  readonly isDedicated: boolean;
+
+  /** Worker script the thread was started with. */
+  readonly workerScript: string;
+
+  /** Custom handler module path, when one was supplied. */
+  readonly handlerPath: string | null;
+
+  /** Resource limits applied to the thread, when any. */
+  readonly resourceLimits: ResourceLimits | null;
+
   readonly status: 'starting' | 'idle' | 'busy' | 'recycling' | 'preempting' | 'terminating' | 'terminated';
   readonly isIdle: boolean;
   readonly isRecycling: boolean;

@@ -120,7 +120,7 @@ Everything before the tag is reversible. `npm publish` is not — confirm with t
 
 ```bash
 # Tests + lint
-npm test                     # 624 tests, 0 failed, 0 skipped
+npm test                     # 641 tests, 0 failed, 0 skipped
 npm run lint                 # biome check (no auto-fix)
 npm run lint:ci              # biome ci (CI strict mode; used by lint.yml)
 npm run validate             # lint + test + benchmark:hot-path (used by pre-push, prepublish)

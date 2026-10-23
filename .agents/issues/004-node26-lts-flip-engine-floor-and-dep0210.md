@@ -202,4 +202,5 @@ Node 26 story verifiable on a Node 24 host, instead of waiting a full CI cycle p
   CI job itself; this host runs Node v24.16.0 and the npm cache has no 22.13.0 build. The CI run
   `39981180594` did execute the job and it **passed**.
 - **The `26.x` CI leg had not passed at the time of writing.** The fix for Gap 5 is verified locally
-  on Node v26.12.1 (624/624); the CI re-run is the confirmation.
+  on Node v26.12.1 (624/624 at the time of the fix; the suite has grown since, to 641/641);
+  the CI re-run is the confirmation.
