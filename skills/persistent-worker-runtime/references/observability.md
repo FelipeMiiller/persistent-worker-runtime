@@ -63,6 +63,18 @@ handle.onError((err) => db.failedJobs.insert({ task, error: err.message }));
 
 These are called **after all retries exhausted** (for `onError`) or **on first success** (for `onComplete`). This is the recommended way to implement transactional outbox.
 
+**`onError` is the failure channel for `dispatch()`.** A handle returned by
+`dispatch()` has its promise internally `.catch()`-handled (ADR-0025). The
+rejection is still there — `await handle.promise` throws the very same error —
+but a handle you deliberately discarded can no longer raise an unhandled
+rejection and take the process down. So for fire-and-forget work: register
+`onError` to learn about failures. Do not rely on the promise to report them,
+and do not rely on an unhandled rejection to report them either.
+
+This does **not** apply to `runtime.execute()`: its promise belongs to the
+caller and MUST be awaited or `.catch()`-handled (ADR-0018). An unhandled
+`execute()` is still an unhandled rejection, and still crashes the process.
+
 ## Lifecycle
 
 ```javascript

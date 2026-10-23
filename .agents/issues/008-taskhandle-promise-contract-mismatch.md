@@ -1,7 +1,8 @@
 # `TaskHandle.promise` is documented as internally `.catch()`-handled — and it is not
 
-**Status**: 🔴 **OPEN** — a documented contract does not hold. Needs a decision: change the code or
-change the contract (the second touches an accepted ADR).
+**Status**: ✅ **FIXED** 2026-10-23 — Option A implemented (ADR-0025). The published
+contract is now true for `dispatch()`; `execute()`'s ADR-0018 hazard is deliberately
+preserved.
 
 **Discovered**: 2026-10-23, during the audit of the Node 26 / execution-gate work
 (issue 004 and issue 006), surfaced by the D3 failure of the skill gate.
@@ -117,9 +118,116 @@ rejection.
 
 - **A documented contract is a testable claim.** "`.promise` is already `.catch()`-handled
   internally" is a behavioural promise; it needed a test, not a paragraph. The skill gate now
-  catches the *symptom* (a crashing snippet); nothing yet asserts the *contract*.
+  catches the *symptom* (a crashing snippet); the *contract* is asserted by
+  `test/dispatch-promise-contract.test.js` (ADR-0025).
 - **An ADR that justifies a decision with an implementation claim inherits that claim's fate.**
   ADR-0018 reasoned from "dispatch() is safe" without the code doing it. When an ADR's premise is
   an implementation detail, the premise needs its own test.
 - **`onError` is not `.catch()`.** A callback and a rejection handler are different things; the
   outbox pattern in the skill conflates them.
+
+## What was implemented (Option A)
+
+ADR-0025 (`docs/adr/0025-fire-and-forget-dispatch-promise-contract.md`).
+
+`execute()` and `dispatch()` now share a private
+`#dispatchTask(taskDefinition, { keepAlive })` in `src/worker-runtime.js`:
+
+- **`dispatch()`** (and `dispatchAll()`, which maps it) attaches a no-op
+  `.catch()` to the handle's promise. The promise still rejects —
+  `await handle.promise` throws the same error — and `onError` still fires.
+  A discarded handle can no longer raise an unhandled rejection.
+- **`execute()`** attaches **nothing**. The caller owns the promise and must
+  await it or `.catch()` it. The ADR-0018 hazard stays visible, exactly as
+  Option 3 of that ADR decided.
+
+`src/task-handle.js` was **not** touched — the contract is `dispatch()`'s, and
+`TaskHandle` is also created by internal paths (`WorkerHandle.executeDirectTask`,
+the SQLite queue backend's handle map) whose promise semantics must not change.
+
+ADR-0018 was **amended** (not rewritten): the false claim in §Architectural
+Mechanics and the false premise in §Decision Outcome → "Why not Option 2" are
+now marked as corrected, and the "Amendment — 2026-10-23" section states what
+was wrong, why it mattered, and what ADR-0025 changed. The decision ADR-0018
+recorded (document the `execute()` hazard) is reaffirmed.
+
+### A finding that changed the shape of the fix
+
+While implementing it, the location of the hazard turned out to be narrower
+than the issue assumed, and that matters for anyone reading this issue later:
+
+`src/worker-runtime.js` already does `worker.executeTask(dequeued).catch(…)`,
+and `WorkerHandle.executeTask` is `async` and returns `task.promise`. The async
+adoption therefore attaches a rejection handler to `task.promise` **as soon as
+the task reaches a worker**. So:
+
+- a task that **fails inside the worker** was already protected — the keep-alive
+  changes nothing for it;
+- a task **rejected while still queued** is the genuinely unhandled case, and
+  it is the issue-008 scenario: `shutdown()` → `queue.destroy()` →
+  `task.reject(reason)` for every queued task, with nobody holding the promise.
+
+The same shape applies to a task aborted before it reached a worker.
+
+The tests therefore target the **queued** rejection, not the in-worker failure.
+This is also why the first draft of the test suite was vacuous — it asserted on
+an in-worker failure, which was protected before and after the fix. See
+"Non-vacuity" below.
+
+## Verification
+
+All numbers are measured, not estimated.
+
+| Check | Result |
+| --- | --- |
+| `npm test` (suite attributable to this change) | **631 pass / 0 fail**, 173 suites — the 624-test baseline plus the 7 new tests (171 → 173 suites) |
+| `npm test` (whole tree, including a parallel unrelated test file from another change) | **641 pass / 0 fail**, 175 suites |
+| `npm run lint` | 0 errors, 105 files |
+| `npm run format:check` | 0 errors, 105 files |
+| `npm run skill:validate` | **PASSED** — 35 JavaScript blocks, **0 syntax-error**, **0 runtime-error**, 0 timeout; executed 5, skipped 4, fragment 22, external-dependency 4 |
+| `npm run benchmark:hot-path` / `npm run validate` | **not run** — deliberately skipped (another agent was running the suite in parallel; the hot-path benchmark has a CPU-load-sensitive p99 budget). The central agent runs the full `validate` alone at the end. |
+
+### New test file
+
+`test/dispatch-promise-contract.test.js` — 7 tests, 2 suites:
+
+1. a fire-and-forget `dispatch()` rejected **while queued** raises **no**
+   unhandled rejection (in-process, `process.on('unhandledRejection')`);
+2. `await handle.promise` still rejects with the **same error instance** that
+   `onError` received;
+3. `onError` still fires, exactly once, with the task error;
+4. a task that fails **inside the worker** still reports through `onError` and
+   `handle.promise`;
+5. `dispatchAll()` inherits the fire-and-forget protection;
+6. a **child process** that dispatches a task and then calls `shutdown()` exits
+   with code **0** — the issue-008 scenario, verbatim;
+7. a **child process** that calls `execute()` without `await`/`.catch()` exits
+   with a **non-zero** code — the ADR-0018 hazard is preserved.
+
+Tests 6 and 7 are child processes on purpose: in-process, the test runner's own
+`unhandledRejection` listener would turn the hazard into a test failure instead
+of an assertion.
+
+### Non-vacuity (the tests fail when the fix is removed)
+
+With `if (keepAlive)` temporarily forced to `if (keepAlive && false)`, the
+suite was re-run and **4 of the 7 tests failed**:
+
+- the in-process test observed the unhandled rejection
+  (`UNHANDLED_COUNT 1 — ["Task aborted before execution"]`);
+- the `dispatchAll()` test failed;
+- the child process exited **1** with
+  `WorkerRuntimeError: Runtime is shutting down` instead of 0.
+
+The keep-alive was restored afterwards. The three tests that still passed are
+the ones that assert the *unchanged* behaviour (the promise still rejects,
+`onError` still fires, `execute()` still crashes) — they are supposed to pass
+in both states.
+
+### Measured exit codes of the child scripts (manual run, outside the suite)
+
+| Script | Keep-alive ON | Keep-alive OFF |
+| --- | --- | --- |
+| `dispatch()` + `shutdown()` (queued rejection) | exit **0** | exit **1** (`WorkerRuntimeError: Runtime is shutting down`) |
+| `execute()` without `await`/`.catch()` | exit **1** (`Error: pwr-child-boom`) | exit **1** (unchanged — by design) |
+| `dispatch()` whose task fails **inside** the worker | exit **0** | exit **0** (unchanged — already protected by `executeTask`'s adoption) |

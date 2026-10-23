@@ -921,14 +921,20 @@ export class WorkerRuntime extends EventTarget {
    *
    * If you intentionally want fire-and-forget semantics (e.g. transactional outbox,
    * background webhooks), use `dispatch()` instead — it returns a `TaskHandle`
-   * with `onComplete` / `onError` and an internally-captured `.promise.catch()`.
+   * with `onComplete` / `onError` callbacks and a promise that is internally
+   * `.catch()`-handled, so discarding the handle never raises an unhandled
+   * rejection (ADR-0025).
+   *
+   * `execute()` deliberately does NOT get that protection: its promise belongs
+   * to the caller, so the hazard described above stays visible (ADR-0018).
    *
    * @see ADR-0018 for the full fire-and-forget hazard analysis.
+   * @see ADR-0025 for the `dispatch()` promise contract.
    * @param {Object|Function} taskDefinition
    * @returns {Promise<any>}
    */
   async execute(taskDefinition) {
-    const handle = this.dispatch(taskDefinition);
+    const handle = this.#dispatchTask(taskDefinition, { keepAlive: false });
     return handle.promise;
   }
 
@@ -939,18 +945,46 @@ export class WorkerRuntime extends EventTarget {
    *
    * The returned `TaskHandle` carries:
    *   - `onComplete(result)` / `onError(err)` callbacks
-   *   - `.promise` (already `.catch()`-handled internally by the handle, so
+   *   - `.promise` (already `.catch()`-handled internally by the runtime, so
    *     unhandled-rejection warnings do not fire on legitimate cleanup)
+   *
+   * The promise is still **rejected** on failure — `await handle.promise`
+   * throws the very same error. The internal handler only marks the rejection
+   * as *observed* for callers who deliberately discarded the handle; the
+   * failure stays visible through `onError` (ADR-0025).
    *
    * **Prefer `dispatch()` over `execute()` when you do not need to await the
    * result synchronously** (background jobs, transactional outbox). See
    * ADR-0018 for the rationale behind the two-mode distinction.
    *
    * @see ADR-0018 for the full fire-and-forget hazard analysis.
+   * @see ADR-0025 for the `dispatch()` promise contract.
    * @param {Object|Function} taskDefinition
    * @returns {TaskHandle}
    */
   dispatch(taskDefinition) {
+    return this.#dispatchTask(taskDefinition, { keepAlive: true });
+  }
+
+  /**
+   * Internal task submission shared by `execute()` and `dispatch()`.
+   *
+   * `keepAlive` decides who owns the rejection:
+   *   - `true` (`dispatch()`): a no-op rejection handler is attached to the
+   *     handle's promise, so a fire-and-forget task that nobody awaits cannot
+   *     raise an unhandled rejection and take the process down (ADR-0025).
+   *     The promise itself still rejects — `await handle.promise` throws and
+   *     `onError` still fires — so nothing is masked.
+   *   - `false` (`execute()`): no handler is attached. The caller owns the
+   *     promise and must await it or attach `.catch()`, exactly as ADR-0018
+   *     requires. The hazard stays visible.
+   *
+   * @param {Object|Function} taskDefinition
+   * @param {Object} options
+   * @param {boolean} options.keepAlive
+   * @returns {TaskHandle}
+   */
+  #dispatchTask(taskDefinition, { keepAlive }) {
     if (this.#isShuttingDown) {
       throw new WorkerRuntimeError('Cannot dispatch tasks: Runtime is shutting down');
     }
@@ -990,6 +1024,17 @@ export class WorkerRuntime extends EventTarget {
 
     const task = new TaskHandle(taskOptions);
     this.#stats.submittedTasks++;
+
+    // ADR-0025 keep-alive: mark the rejection as observed so Node does not
+    // report an unhandled rejection for a handle the caller deliberately
+    // ignored. This does NOT swallow the failure — the promise still rejects
+    // (`await handle.promise` throws) and `onError` still fires.
+    if (keepAlive) {
+      task.promise.catch(() => {
+        // Intentionally empty: the rejection stays reachable through the
+        // promise itself and through the handle's `onError` callbacks.
+      });
+    }
 
     // Enqueue asynchronously without blocking the Event Loop
     this.#queue

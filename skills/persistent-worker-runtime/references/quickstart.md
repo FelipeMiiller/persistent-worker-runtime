@@ -171,10 +171,12 @@ try {
   console.log('cancelled:', err.name); // TaskAbortedError
 }
 
-// `dispatch()` is fire-and-forget, but the handle's promise still rejects
-// when the task never runs. Settle every handle BEFORE `shutdown()`: a task
-// still queued at that point is rejected with "Runtime is shutting down",
-// and an unhandled rejection would take the process down.
+// `dispatch()` is fire-and-forget: the handle's promise is internally
+// `.catch()`-handled, so a discarded handle can no longer raise an
+// unhandled rejection and take the process down (ADR-0025). The promise
+// still rejects when the task never runs, so settle every handle BEFORE
+// `shutdown()` — that is how you see the "Runtime is shutting down"
+// rejection instead of losing it.
 await Promise.allSettled([...background.map((h) => h.promise), urgent.promise]);
 
 await runtime.shutdown();

@@ -73,6 +73,12 @@ No-op'ing the Promise when nobody is listening would **silently swallow real wor
 
 Adding a `spawn()` alias encourages API surface growth that has to be supported indefinitely (deprecation cycles for `dispatch()` etc.). The hazard is already eliminated by `dispatch()` existing; the gap is in caller awareness, not API design.
 
+> **[Premise corrected by ADR-0025 — 2026-10-23.]** The sentence above rests on
+> the claim that `dispatch()`'s handle promise had a `.catch()` attached
+> internally. It never did, so at the time of this ADR the hazard was **not**
+> eliminated by `dispatch()` existing. The premise became true only with
+> ADR-0025. See [Amendment — 2026-10-23](#amendment--2026-10-23) below.
+
 ### Architectural Mechanics
 
 #### 1. Test Fix (commit `7acdfe6`)
@@ -134,6 +140,14 @@ async execute(taskDefinition) {
 
 The same warning is mirrored on `dispatch()` JSDoc so the contract is symmetric.
 
+> **[Claim corrected by ADR-0025 — 2026-10-23.]** The quoted JSDoc above says
+> the handle's `.promise` "has `.catch()` attached internally by the handle".
+> At the time this ADR was written that was **not** true: `src/task-handle.js`
+> attached no handler at all, and the only `.catch()` in `dispatch()` was on the
+> *enqueue* promise. The quoted text is kept verbatim as the historical record;
+> the corrected contract is ADR-0025. See
+> [Amendment — 2026-10-23](#amendment--2026-10-23) below.
+
 #### 3. Pitfall Entry in `HANDOVER.md`
 
 Added entry to §7 "Common Pitfalls to Avoid":
@@ -194,12 +208,76 @@ Both `references/broadcast-channel.md` (in the embedded skill) and `BENCHMARKS.m
 2. Consider adding `--test-force-exit` to the test runner invocation so post-test async activity that DOES happen is killed fast instead of bubbling up to subsequent tests. This would mask the flake but not fix the root cause — only acceptable as a backup if the JSDoc/pitfall guard rail fails.
 3. Pin the CI matrix's macOS runner to a specific hardware generation (`macos-13` or `macos-14`) so that flaky timing surfaces deterministically.
 
+## Amendment — 2026-10-23
+
+This ADR is **amended**, not rewritten. The decision it recorded — *document the
+`execute()` hazard, do not absorb it* — **stands**. What was wrong is the
+implementation claim the decision was justified by.
+
+### What was false
+
+Two statements in this ADR asserted an implementation detail that did not
+exist:
+
+1. §Architectural Mechanics, the mirrored `dispatch()` JSDoc:
+
+   > `.promise` (which has `.catch()` attached internally by the handle).
+
+   `src/task-handle.js` contains **zero** `.catch(` occurrences. The handle's
+   promise is created in the constructor and returned to the caller untouched.
+
+2. §Decision Outcome → "Why not Option 2":
+
+   > The hazard is already eliminated by `dispatch()` existing.
+
+   Both halves of that reasoning — the internal catch, and the elimination it
+   was supposed to produce — assumed an implementation that was never written.
+
+### Why it mattered
+
+`runtime.shutdown()` calls `queue.destroy()`, which rejects every task still
+**queued** with `WorkerRuntimeError('Runtime is shutting down')`. A queued
+task has not reached a worker yet, so the runtime's own
+`worker.executeTask(task).catch(…)` wiring has not adopted its promise. With
+no internal handler either, Node raised an unhandled rejection and the
+user's process **exited 1** — for a fire-and-forget task the user had
+deliberately not awaited.
+
+(A task that fails *inside* the worker was already protected: `executeTask` is
+`async` and returns `task.promise`, so the async adoption attaches a handler
+to it. The genuinely unhandled window is the queued one.)
+
+### The correction
+
+[ADR-0025](0025-fire-and-forget-dispatch-promise-contract.md) makes the claim
+true, by attaching a keep-alive rejection handler to the handle's promise on
+the `dispatch()` path only:
+
+- `dispatch()` (and `dispatchAll()`) — the promise gets a no-op `.catch()`, so
+  a discarded handle cannot raise an unhandled rejection. The promise still
+  rejects, `await handle.promise` still throws, and `onError` still fires.
+- `execute()` — **unchanged**. No handler is attached; the caller owns the
+  promise. The hazard documented in this ADR stays exactly as visible as it
+  was, and the `execute()` contract in this ADR is unaffected.
+
+The decision recorded above (Option 3: document the `execute()` hazard) is
+therefore reaffirmed, and its original premise is repaired.
+
+### Follow-up added to ADR-0018
+
+The original Follow-up #1 (a grep-based audit for fire-and-forget
+`execute()` calls) remains open. ADR-0025 adds a second one: the shipped
+skill gate should assert the **contract** — that a fire-and-forget
+`dispatch()` does *not* produce an unhandled rejection — not only the symptom
+of a crashing snippet.
+
 ## Links
 
 - Incident: GitHub Actions run `35172546288` (failure) and `35166075502` (passing — silent race).
 - Implementation: `src/worker-runtime.js:215-225` (execute with new JSDoc), `src/task-handle.js` (handle.promise contract, ADR-0015).
 - Test fix: `test/broadcast-runtime-api.test.js:63-72`.
 - Related ADRs:
+  - [ADR-0025](0025-fire-and-forget-dispatch-promise-contract.md) — makes this ADR's premise true: `dispatch()` gets the internal rejection handler; `execute()` does not.
   - [ADR-0015](0015-promise-rejection-contract-for-task-queue-waiters.md) — defines the rejection contract that this incident exposed.
   - [ADR-0011](0011-hard-preemption-and-timeout-termination-for-runaway-tasks.md) — `forceKillOnTimeout: true` is the intentional version of what we accidentally triggered here.
   - [ADR-0003](0003-dual-execution-model-execute-and-dispatch.md) — defines execute vs dispatch and why both exist.

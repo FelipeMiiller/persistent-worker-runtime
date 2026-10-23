@@ -70,6 +70,11 @@ app.listen(3000);
 process.on('SIGTERM', () => runtime.shutdown());
 ```
 
+`onError` is the failure channel in this pattern. `dispatch()`'s handle promise
+is internally `.catch()`-handled (ADR-0025), so a failed background job will
+not crash the process — it will simply never call `onComplete`. Always
+register `onError` to move the outbox row to `failed`.
+
 ---
 
 ## Pattern 2: Image Resize Batch

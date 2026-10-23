@@ -124,6 +124,16 @@ interface ExecuteTask<T = any> {
 
 **Outbox (background) mode**. Returns immediately with a `TaskHandle`. The task runs asynchronously; settlement is delivered via callbacks.
 
+**Promise contract (ADR-0025).** The handle's `promise` is internally
+`.catch()`-handled, so a handle you deliberately discard cannot raise an
+unhandled rejection and crash the process. The promise still **rejects** on
+failure — `await handle.promise` throws the same error — and `onError` still
+fires with it. For fire-and-forget work, **`onError` is the failure channel**.
+
+`runtime.execute()` is different: its promise belongs to the caller and MUST
+be awaited or `.catch()`-handled (ADR-0018). An unhandled `execute()` is still
+an unhandled rejection.
+
 ```typescript
 interface TaskHandle {
   readonly id: string;

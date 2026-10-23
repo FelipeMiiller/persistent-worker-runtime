@@ -28,3 +28,4 @@ This directory contains the formal Architecture Decision Records for the **Persi
 | **[ADR-0022](0022-node-built-ins-we-use-vs-custom-code-we-wrote.md)** | Node Built-ins We Use vs Custom Code We Wrote | Accepted | 2026-09-18 |
 | **[ADR-0023](0023-worker-concurrency-and-auto-sizing-policy.md)** | `WORKER_CONCURRENCY` Env Var + `concurrency: 'auto'` Sizing Policy | Accepted | 2026-09-18 |
 | **[ADR-0024](0024-runtime-observability-and-recycling-hardening.md)** | Hardening do Runtime — Telemetria Per-Worker, Task-Fn Dispatch via Deps Manifest, Reciclagem por Taxa de Acumulação | Proposed | 2026-09-20 |
+| **[ADR-0025](0025-fire-and-forget-dispatch-promise-contract.md)** | Fire-and-Forget `dispatch()` Promise Contract — Keep-Alive Handler on the Task Handle | Accepted | 2026-10-23 |
