@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "test": "node --test --test-concurrency=4 test/**/*.test.js",
-    "test:coverage": "node --test --test-concurrency=4 --experimental-test-coverage test/**/*.test.js",
+    "test:coverage": "node --test --test-concurrency=4 --experimental-test-coverage --test-coverage-lines=90 --test-coverage-branches=80 --test-coverage-functions=85 test/**/*.test.js",
     "examples": "node scripts/run-examples.js",
     "skill:validate": "node scripts/validate-skill.js",
     "lint": "biome check src/ test/ examples/ benchmarks/ research/ scripts/",

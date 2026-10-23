@@ -48,4 +48,16 @@ jobs:
         run: npm ci
 
       - name: Run tests with built-in coverage
+        # The thresholds live in the `test:coverage` script (package.json) so
+        # that they are enforced by every invocation of the script, not only
+        # by this workflow. They are floors with headroom BELOW the measured
+        # baseline, so an unrelated pull request that adds one uncovered line
+        # does not turn the build red:
+        #
+        #   measured baseline : 94.39% line / 87.71% branch / 91.01% function
+        #   enforced floors   : 90% line     / 80% branch     / 85% function
+        #
+        # Raise the floors as the baseline improves — but never to exactly the
+        # current baseline: that turns any unrelated coverage wobble into a
+        # failure with no relation to the change under review.
         run: npm run test:coverage

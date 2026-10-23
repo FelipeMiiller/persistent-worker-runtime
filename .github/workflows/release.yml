@@ -31,6 +31,53 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # Pre-flight: a release must agree with itself BEFORE anything is
+      # published. `npm publish` rejects a duplicate version with a confusing
+      # error at publish time, and a tag that does not match the manifest
+      # silently republishes the previous version. These checks are
+      # milliseconds and they fail loudly with a clear message.
+      - name: Pre-flight — version, tag and changelog agreement
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION=""
+
+          # 1. The release tag must match package.json's version.
+          #    On a `release` event GITHUB_REF is refs/tags/vX.Y.Z — strip the
+          #    leading `v`. On `workflow_dispatch` there is no tag: the tag
+          #    check is skipped and the registry check below takes over.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/}"
+            TAG_VERSION="${TAG_VERSION#v}"
+            if [ "$VERSION" != "$TAG_VERSION" ]; then
+              echo "::error::release tag '$GITHUB_REF' (version '$TAG_VERSION') does not match package.json version '$VERSION'"
+              exit 1
+            fi
+          fi
+
+          # 2. CHANGELOG.md must have a section for this exact version.
+          #    The dots are escaped so `1.2.3` does not match `1x2y3`.
+          ESCAPED_VERSION=${VERSION//./\\.}
+          if ! grep -qE "^## \[${ESCAPED_VERSION}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section for version '$VERSION'"
+            exit 1
+          fi
+
+          # 3. Without a tag (workflow_dispatch) the version must not be
+          #    published yet — otherwise the publish step fails with a
+          #    duplicate-version error instead of a clear pre-flight failure.
+          if [ -z "$TAG_VERSION" ]; then
+            if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
+              echo "::error::version '$VERSION' of '$PACKAGE_NAME' is already published on npm"
+              exit 1
+            fi
+          fi
+
+          echo "Pre-flight OK — publishing '$PACKAGE_NAME@$VERSION'."
+
       - name: Publish to NPM (with provenance)
         run: npm publish --access public --provenance
         env:
