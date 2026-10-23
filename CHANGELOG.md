@@ -6,11 +6,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Changes merged to `develop` after the v0.3.0 release. No API surface changed; `src/` behaviour is
-identical. These are correctness and measurement fixes.
+Changes merged to `develop` after the v0.3.0 release. The public API surface is unchanged — `src/index.js`
+still exports the same 16 names — and `src/` behaviour is identical. These are CI, correctness and
+measurement fixes.
 
 ### Added
 
+- **CI matrix leg for Node 26** — Node 26 becomes Active LTS on 2026-10-28 and was the only supported
+  line with no CI leg at all. `ci.yml` now runs `[22.x, 24.x, 26.x]`. A defect that only reproduces on
+  the new Active LTS would otherwise be found by users, not by this CI.
+- **`engine-floor` CI job** (Node 22.13.0, Linux, `npm test` only) — `package.json` declares
+  `engines.node >= 22.13.0`, the release where `node:sqlite` stopped requiring
+  `--experimental-sqlite`, but the matrix resolves `22.x` to the *latest* 22.x, so the declared floor
+  was never exercised. The job pins the floor literally. It runs tests only, on purpose: benchmarks on
+  the floor fail for reasons unrelated to the floor (older V8, different GC heuristics, CI noise) and
+  would turn an engine-contract signal into throughput noise.
+- **Pinned `lts/*` out of `lint.yml`, `coverage.yml` and `commit-lint.yml`** — `lts/*` resolves to
+  Node 26 on 2026-10-28, flipping three workflows' runtime with no commit, no review and no changelog
+  entry. They are now pinned to `24.x`, with the reason in a comment; moving to `26.x` becomes a
+  deliberate diff, made after the `26.x` matrix leg is green.
+- **`npm run examples` — CI gate for the 20 `examples/` scripts** (`scripts/run-examples.js`). Each
+  example runs in an isolated child process, with its working directory **outside** the repository, a
+  wall-clock budget, and an explicit `// requires:` skip marker for examples that need an external
+  service. The examples are the primary API documentation for a library with a large, non-obvious
+  surface, and one of them already shipped broken (`examples/durable-task-vacuum.js` →
+  `ReferenceError: DatabaseSync is not defined`), caught only by hand-reconciling the docs against the
+  filesystem. Wired into `ci.yml` as a step right after `npm test`.
+- **`npm run skill:validate` — CI gate for the shipped skill** (`scripts/validate-skill.js`) plus a
+  dedicated `.github/workflows/skill-validation.yml`. The skill ships inside the npm tarball and is
+  loaded by AI agents, which treat it as authoritative — a stale example there propagates into someone
+  else's project. The gate extracts every fenced block, syntax-checks the JavaScript ones, executes them
+  from a scratch directory outside the repo, and validates `.skill-meta.json`. It needed its own
+  workflow: every other workflow uses `paths-ignore: ['**.md', ...]` and the skill is entirely `.md`, so
+  a skill change did not even trigger a build (`paths-ignore` does not support negation — hence `paths:`).
 - **`examples/parallel-json-parse.js`** — parses a ~10 GB JSON array across a worker pool.
   Verified at 10 240 MB / 35 296 907 records on a 28-core host: 1 worker 127.7 s (80 MB/s),
   4 workers 64.9 s (158 MB/s). Includes the two constraints that make the design
@@ -39,6 +67,31 @@ identical. These are correctness and measurement fixes.
 
 ### Fixed
 
+- **`node:sqlite`'s `DatabaseSync` import broke the whole package when the DEP0210 alias is removed.**
+  Node 26.11 renamed `DatabaseSync` to `Database`. `src/queue/sqlite-backend.js` used a *named* import,
+  and a named import of a removed export is a `SyntaxError` raised while importing the module — which
+  `src/index.js` re-exports, so every consumer of the package breaks, not only the ones using the
+  durable queue. The constructor is now resolved at runtime (`nodeSqlite.Database ??
+  nodeSqlite.DatabaseSync`) and exported as `DatabaseCtor` so the shim itself is covered by a test on
+  every Node line. `examples/durable-task-vacuum.js` and `test/sqlite-queue.test.js` carried the same
+  import and are fixed the same way.
+- **Two skill code blocks did not parse** — `references/observability.md` (`runtime.dispatch({ ... })`)
+  and `references/stateful-l1.md` (`payload: { ... }` and `fn: ...`). A snippet that does not parse is a
+  broken snippet, and an agent copies it verbatim.
+- **The skill called `runtime.stats()` as a function** in three places in `references/observability.md`
+  — `runtime.stats` is a **getter** (`get stats()`), so copying the snippet produced
+  `TypeError: runtime.stats is not a function`.
+- **The skill's priority + cancellation snippet crashed the process.** It dispatched fire-and-forget
+  work and then called `shutdown()` while tasks were still queued; `shutdown()` destroys the queue,
+  which rejects those tasks with `WorkerRuntimeError('Runtime is shutting down')`, and `dispatch()`
+  does not attach a handler to the handle promise — so the rejection was unhandled and took the process
+  down. The snippet now settles every handle before shutting down. (The runtime JSDoc at
+  `src/worker-runtime.js:942` claims the handle promise is *already* `.catch()`-handled internally; it
+  is not. Reported separately, not fixed here.)
+- **The skill gate reported syntax errors and still exited 0.** A block that does not parse is now
+  fatal, with the file, the line and the parser message. FRAGMENT, EXTERNAL-DEPENDENCY and RUNTIME-ERROR
+  stay non-fatal: a fragment cannot be executed in isolation by design, and an external dependency
+  violates ADR-0005.
 - **`lint-staged` negated every non-`.skill-meta.json` file** (including `.md`), and Biome ignores
   markdown — so any commit touching only docs / issues / ADRs failed the pre-commit hook with
   *"No files were processed in the specified paths"*. The matcher is now scoped to the code

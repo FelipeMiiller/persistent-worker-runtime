@@ -70,6 +70,10 @@ persistent-worker-runtime/
 │   ├── priority-routing.js             # Critical work vs. batch work ordering
 │   ├── zero-copy-image.js              # TransferList for 30MB image buffer
 │   └── cancel-on-disconnect.js         # Manual + AbortSignal.timeout + pre-aborted patterns
+├── scripts/                            # CI gates (Node built-ins only, zero deps)
+│   ├── run-examples.js                 # npm run examples — executes every examples/*.js
+│   ├── validate-skill.js               # npm run skill:validate — executes the shipped skill's code blocks
+│   └── lib/spawn.js                    # Shared child-process runner (hard timeout, no shell)
 └── .specs/                             # LOCAL planning state (gitignored)
     ├── STATE.md                        # Active spec, decisions, handoff pointer
     └── features/                       # Per-feature spec + tasks breakdown
@@ -92,6 +96,10 @@ These are the **canonical link targets** for the next session / agent. Each item
 | CI | [`.agents/issues/CI-FAILURE-macos-recycling-fixed-sleep.md`](.agents/issues/CI-FAILURE-macos-recycling-fixed-sleep.md) | `recycling.test.js` flaked on Node 24.x / macos-latest (run 37069227658) | ✅ **FIXED** 2026-10-03 | A hard-coded 200 ms sleep stood in for the `worker_recycled` event, which only fires after the replacement thread has spawned and booted. Now deadline-based polling (5 s) at 5 sites in `recycling.test.js` + `recycle-backoff.test.js`. Note the same file already carried "bump to 200 ms to absorb CI timer noise" comments from an earlier flake — raising a sleep constant is the wrong fix, it just moves the cliff |
 | BENCH | [`.agents/issues/io-throughput-preempted-accounting.md`](.agents/issues/io-throughput-preempted-accounting.md) | `io-throughput.benchmark.js` Phase 1 accounting assertion ignored `task:preempted` | ✅ **FIXED** 2026-09-27 | A preempted task increments `stats.failedTasks` but emits only `task:preempted`, never `task:failed` — so the two-counter sum could never reach `TOTAL_TASKS` once the watchdog fired. Assertion now sums all three terminal buckets. **Runtime left unchanged** — no ADR or test mandates that preemption also emit `task:failed` |
 | 003 | [`.agents/issues/003-spec-validation-drift.md`](.agents/issues/003-spec-validation-drift.md) | `spec.md` files never run through `validate_spec.py` (only `validate_tasks.py`) | ✅ **FIXED** 2026-09-27 | 9 errors found across 3 specs (`durable-queue`, `health-probes`, `persistent-worker-runtime`); all 5 missing template sections added. **Run BOTH validators when closing a feature** — they cover different artifacts. Note `ID_RE` forbids the 2-hyphen `REQ-UBI-001` form in traceability tables |
+| 004 | [`.agents/issues/004-node26-lts-flip-engine-floor-and-dep0210.md`](.agents/issues/004-node26-lts-flip-engine-floor-and-dep0210.md) | Node 26 becomes Active LTS on 2026-10-28 — matrix lacks `26.x`, `lts/*` auto-flips, `engines` floor untested, DEP0210 `DatabaseSync` | ✅ **FIXED** 2026-10-23 | `ci.yml` matrix is now `[22.x, 24.x, 26.x]`, and a new `engine-floor` job pins Node **22.13.0** literally (Linux, `npm test` only) — the matrix resolves `22.x` to the latest 22.x, so the declared `engines` floor was never exercised. `lint.yml`/`coverage.yml`/`commit-lint.yml` are pinned to `24.x` instead of `lts/*`, so the LTS flip becomes a reviewed diff. DEP0210 shim: `node:sqlite` is now a **namespace import** resolved at runtime (`nodeSqlite.Database ?? nodeSqlite.DatabaseSync`) — a *named* import of a removed export is a `SyntaxError` that would break the whole package at import time, not just the SQLite backend. Covered by 2 new tests. |
+| 005 | [`.agents/issues/005-typescript-definitions-have-no-compile-gate.md`](.agents/issues/005-typescript-definitions-have-no-compile-gate.md) | `src/index.d.ts` (33.7 kB) ships to npm with no compile gate of any kind | 🔴 **OPEN** 2026-10-23 | Repo-wide search for `typescript`/`tsc`/`tsd`/`checkJs` returns **zero** tooling hits outside prose. The README carries a *TypeScript-Ready* badge, but nothing proves the declarations compile or that they still match the **16** names `src/index.js` exports — **4 of them are missing from the `.d.ts`**: `SqliteTaskQueue`, `TaskQueue`, `StreamAbortedError`, `StreamConfigError`. The ~15 TypeScript blocks in the shipped skill's `api-reference.md` are never compiled either. ADR-0005 forbids TS **in runtime paths** — a dev-only gate is not excluded by that wording, but needs an explicit note |
+| 006 | [`.agents/issues/006-examples-and-skill-code-blocks-never-executed.md`](.agents/issues/006-examples-and-skill-code-blocks-never-executed.md) | The 20 `examples/` scripts and the shipped skill's code blocks are never executed by CI | ✅ **FIXED** 2026-10-23 | `npm run examples` (`scripts/run-examples.js`) runs all 20 examples in isolated child processes **outside** the repo working tree, with a hard timeout and a visible `// requires:` skip marker — **20/20 ok, 0 skipped, 0 failed**, and `git status` stays clean. `npm run skill:validate` (`scripts/validate-skill.js`) syntax-checks and executes the shipped skill's code blocks; it needed its own workflow because every other workflow uses `paths-ignore: ['**.md', …]` and the skill is all `.md`. **A block that does not parse is now fatal** — the first version reported syntax errors and exited 0, which is not a gate. On its first run the gate found **3 real defects** in the shipped skill: 2 blocks that did not parse, 3 calls to `runtime.stats()` (it is a **getter**, so the snippet threw `TypeError`), and 1 snippet that crashed the process on `shutdown()` (unhandled rejection of a fire-and-forget handle). All 3 fixed. |
+| 007 | [`.agents/issues/007-coverage-threshold-and-release-version-consistency.md`](.agents/issues/007-coverage-threshold-and-release-version-consistency.md) | Coverage reports but never fails; release never checks tag ↔ version ↔ CHANGELOG | 🔴 **OPEN** 2026-10-23 | `coverage.yml` runs `npm run test:coverage` and exits 0 regardless. Measured baseline on `develop`: **94.39% line / 87.71% branch / 91.01% function** — Node's runner supports `--experimental-test-coverage-lines/-branches/-functions` thresholds; none are used. `release.yml` publishes with no check that `package.json` version == git tag or that `CHANGELOG.md` has an entry for it |
 
 **Cross-references for related gaps** (not in `.agents/issues/` but worth knowing):
 
@@ -109,7 +117,7 @@ These are the **canonical link targets** for the next session / agent. Each item
    - Zero external runtime dependencies. Only built-in `node:*` modules may be imported.
    - Types are provided exclusively in `src/index.d.ts` for consumer IDE autocompletion.
 2. **Mandatory Testing + Lint after Every Modification:**
-   - Always run `npm run validate` (= `npm run lint && npm test`) after any code change.
+   - Always run `npm run validate` (= `npm run lint && npm test && npm run benchmark:hot-path`) after any code change.
    - Never commit code if any unit test fails or any lint error remains.
    - The husky pre-commit hook runs `npx lint-staged` + `npm test` automatically; the pre-push hook runs the full validation.
 3. **Architecture Decision Records (ADRs):**
@@ -127,11 +135,11 @@ The project uses **Biome 2.x** for both linting and formatting (single Rust bina
 
 | Script | Purpose |
 | --- | --- |
-| `npm run lint` | Check src/, test/, examples/, benchmarks/ against biome.json rules |
+| `npm run lint` | Check src/, test/, examples/, benchmarks/, research/, scripts/ against biome.json rules |
 | `npm run lint:fix` | Auto-fix all fixable issues (use with care; `--unsafe` enables fixer for unsafe cases) |
 | `npm run format` | Apply Biome formatter (single quotes, 2-space indent, trailing commas, LF) |
 | `npm run format:check` | Verify formatting without applying |
-| `npm run validate` | `lint` + `test` (used by pre-push hook and `prepublishOnly`) |
+| `npm run validate` | `lint` + `test` + `benchmark:hot-path` (used by pre-push hook and `prepublishOnly`) |
 
 ### Pre-commit hook (`.husky/pre-commit`)
 
@@ -150,9 +158,24 @@ npm run validate
 
 Runs the full lint + test suite before a push lands on `origin/develop`.
 
+### Execution gates
+
+Two npm scripts execute the artifacts that *document* the API. Both are wired into CI, both use only
+Node built-ins (zero deps), and both run their children with the working directory **outside** the
+repository so nothing they write lands in the working tree.
+
+| Script | What it does | Wired into |
+| --- | --- | --- |
+| `npm run examples` | Runs every `examples/*.js` in an isolated child process with a hard wall-clock budget. An example that needs an external service declares it with a `// requires:` marker and is skipped **visibly**, never silently. | `ci.yml` → `Run Examples` (after `npm test`) |
+| `npm run skill:validate` | Extracts every fenced code block from the shipped skill (`skills/persistent-worker-runtime/`), syntax-checks the JavaScript ones, executes them, and validates `.skill-meta.json`. A block that **does not parse is fatal**; `FRAGMENT`, `EXTERNAL-DEPENDENCY` and `RUNTIME-ERROR` are reported but non-fatal. | `.github/workflows/skill-validation.yml` (own workflow — the others use `paths-ignore: ['**.md', …]` and the skill is all `.md`, so a skill change did not even trigger a build) |
+
+The skill ships **inside the npm tarball** and is loaded by AI agents, which treat it as authoritative.
+A stale example there is worse than a stale README line: the agent reproduces it in someone else's
+project. Run `npm run skill:validate` after editing anything under `skills/`.
+
 ### Per-directory overrides in `biome.json`
 
-- `examples/**`, `benchmarks/**`, `research/**`: `noConsole` is **off** (these are demonstrative scripts that print output).
+- `examples/**`, `benchmarks/**`, `research/**`, `scripts/**`: `noConsole` is **off** (these are demonstrative scripts that print output).
 - `test/**`: `noConsole` and `noEmptyBlockStatements` are **off** (legitimate patterns like `.catch(() => {})` for fire-and-forget).
 
 ### Which directories are linted
@@ -162,9 +185,13 @@ Runs the full lint + test suite before a push lands on `origin/develop`.
 NOT linted until it is added in both places:
 
 ```
-src/  test/  examples/  benchmarks/  research/
+src/  test/  examples/  benchmarks/  research/  scripts/
 ```
 
 `research/` holds usage-pattern investigations (not CI gates). It is linted and formatted like
 `benchmarks/` but deliberately absent from `benchmark:all`, because those scripts take 7–20 minutes
 and generate GB of temp files. See [`research/README.md`](research/README.md).
+
+`scripts/` holds the two CI gates (`run-examples.js`, `validate-skill.js`). It is linted and formatted
+like `src/`, and `lint-staged` covers it — but it is **not** published: `package.json#files` lists only
+`src`, `skills`, `README.md` and `LICENSE`, so `scripts/` never reaches the npm tarball.
