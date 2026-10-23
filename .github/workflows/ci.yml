@@ -64,11 +64,18 @@ jobs:
       - name: Run Unit Tests
         run: npm test
 
-      - name: Run Examples
-        run: npm run examples
-
+      # The benchmarks measure the runtime's hot paths, so they must not
+      # inherit the state left behind by the 20 example scripts — each of
+      # them opens worker threads. On a small runner (macos-latest has 3
+      # cores) that residual load deforms the measured tail; it is what
+      # turned the adaptive-controller-opt-out p99 ratio into a flake.
+      # Running the examples afterwards costs nothing: the order of the
+      # steps does not change what each gate verifies.
       - name: Run Full Concurrency & Performance Benchmarks
         run: npm run benchmark:all
+
+      - name: Run Examples
+        run: npm run examples
 
       - name: Verify ESM Package Exports
         run: node --input-type=module -e "import * as mod from './src/index.js'; console.log('Exports verified successfully:', Object.keys(mod));"
