@@ -75,6 +75,14 @@ measurement fixes.
   nodeSqlite.DatabaseSync`) and exported as `DatabaseCtor` so the shim itself is covered by a test on
   every Node line. `examples/durable-task-vacuum.js` and `test/sqlite-queue.test.js` carried the same
   import and are fixed the same way.
+- **The test suite failed on Node 26 — the exact line the new matrix leg was added to cover.**
+  `test/common.js` keeps a static allowlist of the platform's global surface, and the exit-time leak
+  check compares `globalThis` against it **by name**. Node 26 adds six built-ins (`ErrorEvent`,
+  `QuotaExceededError`, `Storage`, `Temporal`, `localStorage`, `sessionStorage`), so the check
+  reported Node's *own* globals as test pollution and failed the 11 test files that import the helper
+  (`process.exit(1)` at exit). The six names are now in the allowlist, in their own block so the next
+  Node line is a one-line diff. Verified on Node v26.12.1: **624 pass / 0 fail**. This is the new
+  matrix leg earning its keep on the first run — the defect was invisible while Node 26 was untested.
 - **Two skill code blocks did not parse** — `references/observability.md` (`runtime.dispatch({ ... })`)
   and `references/stateful-l1.md` (`payload: { ... }` and `fn: ...`). A snippet that does not parse is a
   broken snippet, and an agent copies it verbatim.

@@ -513,6 +513,23 @@ const expectedGlobalKeys = new Set([
   // Web platform blobs
   'Blob',
   'BroadcastChannel',
+
+  // Node 26 additions. These are PLATFORM globals (V8 14.6 / Web Storage /
+  // Temporal), not test pollution — but the exit-time leak check compares
+  // `globalThis` against this list by NAME, so a Node line that adds a
+  // built-in makes every test file that imports test/common.js fail with
+  // "[leaked-globals] N unexpected global(s)" and exit 1.
+  //
+  // Kept in their own block so the next Node line is a one-line diff here.
+  // Listing a global that the current Node does not have is harmless: the
+  // check only reports names that are PRESENT in `globalThis` and ABSENT
+  // from this set.
+  'ErrorEvent',
+  'QuotaExceededError',
+  'Storage',
+  'Temporal',
+  'localStorage',
+  'sessionStorage',
 ]);
 
 export function allowGlobals(...keys) {

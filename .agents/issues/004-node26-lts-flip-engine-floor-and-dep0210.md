@@ -1,7 +1,9 @@
 # Node 26 becomes LTS on 2026-10-28: CI matrix, `lts/*` auto-flip, unverified engine floor, and DEP0210
 
 **Status**: ✅ **FIXED** — 2026-10-23, on `develop`. All four gaps closed (CI matrix leg, `lts/*` pin,
-engine-floor job, DEP0210 shim). See [Verification](#verification) for what was run and the numbers.
+engine-floor job, DEP0210 shim). The new `26.x` leg then failed on its first run and surfaced a
+**fifth** gap (the test suite fails on Node 26) — also fixed and verified on Node v26.12.1.
+See [Verification](#verification) for what was run and the numbers.
 
 **Discovered**: 2026-10-23, during a state audit of `develop` (HEAD `1ed718d`).
 **Component**: `.github/workflows/ci.yml`, `.github/workflows/lint.yml`, `.github/workflows/coverage.yml`, `.github/workflows/commit-lint.yml`, `package.json` (`engines`), `src/queue/sqlite-backend.js`
@@ -125,6 +127,7 @@ Everything below was run on `develop` (Windows, Node v24.16.0) on 2026-10-23, af
 | 2 — `lts/*` auto-flip | pinned to `24.x`, with the reason in a comment | `.github/workflows/lint.yml:46`, `coverage.yml:45`, `commit-lint.yml:25` |
 | 3 — engine floor untested | new `engine-floor` job: Node **22.13.0**, `ubuntu-latest`, `npm test` only | `.github/workflows/ci.yml:76` (job), `ci.yml:98` (setup), `ci.yml:111` (test step) |
 | 4 — DEP0210 `DatabaseSync` | namespace import + runtime resolution, exported as `DatabaseCtor` | `src/queue/sqlite-backend.js:43` (import), `:54` (shim), `:171` (use); `examples/durable-task-vacuum.js:40,47,108`; `test/sqlite-queue.test.js:5,47` |
+| 5 — **found by the new leg** | 6 Node 26 built-ins added to the leak-check allowlist | `test/common.js:513-529` |
 
 The DEP0210 shim is deliberately a **namespace import** (`import * as nodeSqlite from 'node:sqlite'`)
 followed by `nodeSqlite.Database ?? nodeSqlite.DatabaseSync`. A namespace import of a module that
@@ -133,6 +136,34 @@ exactly the package-wide failure mode this issue describes. `DatabaseCtor` is ex
 `src/queue/sqlite-backend.js` so the shim itself is covered by a test on whichever Node line runs the
 suite. It is **not** re-exported from `src/index.js`, so the public API surface is unchanged (still
 16 names).
+
+### Gap 5 — the new leg failed on its first run, and it was right to
+
+Adding the `26.x` leg immediately produced **3 failures** (ubuntu, macos, windows) in the `Run Unit
+Tests` step — while `22.x`, `24.x` and the `engine-floor` job all passed. Root cause:
+
+`test/common.js` keeps a **static** allowlist of the platform's global surface, and the exit-time
+leak check compares `globalThis` against it **by name**:
+
+```js
+export function getLeakedGlobals() {
+  const leaked = [];
+  for (const name of Object.getOwnPropertyNames(globalThis)) {
+    if (!expectedGlobalKeys.has(name)) leaked.push(name);
+  }
+  return leaked;
+}
+```
+
+Node 26 adds six built-ins — `ErrorEvent`, `QuotaExceededError`, `Storage`, `Temporal`,
+`localStorage`, `sessionStorage` — so the check reported **Node's own globals** as test pollution and
+called `process.exit(1)`, failing the 11 test files that import the helper. The six names are now in
+the allowlist, in their own block so the next Node line is a one-line diff. Listing a global the
+current Node does not have is harmless: the check only reports names **present** in `globalThis` and
+**absent** from the set.
+
+This is the clearest possible vindication of Gap 1: the defect was real, it was invisible while
+Node 26 was untested, and it was invisible *only* because the line was untested.
 
 ### What was run
 
@@ -146,6 +177,9 @@ suite. It is **not** re-exported from `src/index.js`, so the public API surface 
 | `npm run examples` | ✅ 20/20 ok, 0 skipped, 0 failed |
 | `npm run skill:validate` | ✅ exit 0 — 35 JS blocks: 4 executed, 4 skipped, 23 fragment, 4 external-dependency, 0 runtime-error, **0 syntax-error** |
 | `npm pack --dry-run` | ✅ 30 files — `scripts/` does not leak into the tarball (`package.json#files` = `src`, `skills`, `README.md`, `LICENSE`) |
+| `npx -y node@26 --test --test-concurrency=4 "test/**/*.test.js"` | ✅ **624 pass / 0 fail** on Node **v26.12.1** (before the Gap 5 fix: 635 tests, 624 pass, **11 fail**) |
+| `npx -y node@26 scripts/run-examples.js` | ✅ 20/20 ok on Node v26.12.1 |
+| `npx -y node@26 scripts/validate-skill.js` | ✅ exit 0 on Node v26.12.1 — same counts as Node 24 |
 
 ### The two new shim tests
 
@@ -156,12 +190,16 @@ suite. It is **not** re-exported from `src/index.js`, so the public API surface 
 2. opens a real database through `DatabaseCtor`, writes a row and reads it back — so the shim is
    exercised, not merely asserted.
 
+### How Node 26 was verified locally
+
+`npx -y node@26` downloads the official Node **v26.12.1** binary into the npm cache (nothing is
+installed system-wide and the repository is untouched) and runs it directly. That made the whole
+Node 26 story verifiable on a Node 24 host, instead of waiting a full CI cycle per hypothesis.
+
 ### Not verified here
 
-- **The Node 26.11+ path of the shim was not executed locally.** This host runs Node v24.16.0, where
-  `node:sqlite` exports `DatabaseSync` and *not* `Database`. The `Database ?? DatabaseSync` resolution
-  covers both eras by construction, and the `26.x` CI leg is where the `Database` spelling actually
-  gets exercised — that signal comes from CI, not from this session.
-- **The `engine-floor` job has not run yet.** It only exists on CI; the 22.13.0 floor is asserted by
-  the job, not by a local run.
-- **The `26.x` matrix leg has not run yet.** Same: CI-only.
+- **The `engine-floor` job (Node 22.13.0) has not run locally.** The 22.13.0 floor is asserted by the
+  CI job itself; this host runs Node v24.16.0 and the npm cache has no 22.13.0 build. The CI run
+  `39981180594` did execute the job and it **passed**.
+- **The `26.x` CI leg had not passed at the time of writing.** The fix for Gap 5 is verified locally
+  on Node v26.12.1 (624/624); the CI re-run is the confirmation.
