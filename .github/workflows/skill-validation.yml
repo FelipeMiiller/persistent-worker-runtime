@@ -1,0 +1,64 @@
+name: Skill validation
+
+# The skill (`skills/persistent-worker-runtime/`) ships INSIDE the npm
+# tarball and is loaded by AI agents, which treat it as authoritative.
+#
+# This workflow exists because the other workflows cannot cover it: they all
+# use `paths-ignore: ['**.md', ...]`, and the skill is entirely `.md`, so a
+# skill change did not even trigger a build. `paths-ignore` does not support
+# negation ("everything except .md"), so the fix is a dedicated workflow
+# that filters with `paths:` instead — the trigger semantics of the existing
+# workflows are left untouched.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'skills/**'
+      - 'scripts/validate-skill.js'
+      - 'scripts/lib/**'
+      - '.github/workflows/skill-validation.yml'
+      - 'package.json'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'skills/**'
+      - 'scripts/validate-skill.js'
+      - 'scripts/lib/**'
+      - '.github/workflows/skill-validation.yml'
+      - 'package.json'
+  workflow_dispatch:
+
+# Cancel in-flight runs for the same branch when a new commit is pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate-skill:
+    name: Validate the shipped skill
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js 24.x
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4.1.0
+        with:
+          # Pinned explicitly. `lts/*` resolves to Node 26 on 2026-10-28,
+          # flipping this workflow's runtime with no commit, no review and no
+          # changelog entry. Moving to `26.x` is a deliberate change, made
+          # after the `26.x` leg of the CI matrix is green.
+          node-version: 24.x
+
+      # No `npm ci` here: the gate uses `node:` built-ins only, and the
+      # repository has no runtime dependencies to install.
+
+      - name: Validate skill metadata and code blocks
+        run: npm run skill:validate

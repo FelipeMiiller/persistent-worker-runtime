@@ -35,10 +35,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node.js LTS
+      - name: Setup Node.js 24.x
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4.1.0
         with:
-          node-version: lts/*
+          # Pinned explicitly. `lts/*` resolves to Node 26 on 2026-10-28,
+          # flipping this workflow's runtime with no commit, no review and no
+          # changelog entry. Moving to `26.x` is a deliberate change, made
+          # after the `26.x` leg of the CI matrix is green.
+          node-version: 24.x
 
       - name: Install dependencies
         run: npm ci

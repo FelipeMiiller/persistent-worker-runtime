@@ -21,11 +21,13 @@
   "scripts": {
     "test": "node --test --test-concurrency=4 test/**/*.test.js",
     "test:coverage": "node --test --test-concurrency=4 --experimental-test-coverage test/**/*.test.js",
-    "lint": "biome check src/ test/ examples/ benchmarks/ research/",
-    "lint:ci": "biome ci src/ test/ examples/ benchmarks/ research/",
-    "lint:fix": "biome check --write --unsafe src/ test/ examples/ benchmarks/ research/",
-    "format": "biome format --write src/ test/ examples/ benchmarks/ research/",
-    "format:check": "biome format src/ test/ examples/ benchmarks/ research/",
+    "examples": "node scripts/run-examples.js",
+    "skill:validate": "node scripts/validate-skill.js",
+    "lint": "biome check src/ test/ examples/ benchmarks/ research/ scripts/",
+    "lint:ci": "biome ci src/ test/ examples/ benchmarks/ research/ scripts/",
+    "lint:fix": "biome check --write --unsafe src/ test/ examples/ benchmarks/ research/ scripts/",
+    "format": "biome format --write src/ test/ examples/ benchmarks/ research/ scripts/",
+    "format:check": "biome format src/ test/ examples/ benchmarks/ research/ scripts/",
     "validate": "npm run lint && npm test && npm run benchmark:hot-path",
     "benchmark:hot-path": "node benchmarks/hot-path-micro.benchmark.js",
     "benchmark": "node benchmarks/event-loop-lag.benchmark.js",
@@ -83,7 +85,7 @@
   },
   "lint-staged": {
     "!.skill-meta.json": [],
-    "+(src|test|examples|benchmarks)/**/*.{js,mjs,cjs,json}": [
+    "+(src|test|examples|benchmarks|scripts)/**/*.{js,mjs,cjs,json}": [
       "biome check --write"
     ],
     "*.{js,mjs,cjs,json}": [

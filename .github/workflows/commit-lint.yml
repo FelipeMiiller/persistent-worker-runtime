@@ -18,7 +18,11 @@ on:
   workflow_dispatch:
 
 env:
-  NODE_VERSION: lts/*
+  # Pinned explicitly. `lts/*` resolves to Node 26 on 2026-10-28, flipping
+  # this workflow's runtime with no commit, no review and no changelog entry.
+  # Moving to `26.x` is a deliberate change, made after the `26.x` leg of the
+  # CI matrix is green.
+  NODE_VERSION: 24.x
 
 permissions:
   contents: read
