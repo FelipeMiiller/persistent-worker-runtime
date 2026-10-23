@@ -68,8 +68,12 @@ These are called **after all retries exhausted** (for `onError`) or **on first s
 ```javascript
 const runtime = await createWorkerRuntime({ workers: 4 });
 // ... use it ...
-await runtime.shutdown(); // graceful: drains queue, closes BCs, terminates workers
+await runtime.shutdown(); // closes BCs and terminates workers — queued tasks are REJECTED, not drained
 ```
+
+`shutdown()` **rejects** every task still sitting in the queue with
+`WorkerRuntimeError('Runtime is shutting down')` — it does not drain the queue. Handle those
+rejections before shutting down.
 
 The runtime ships **no signal handlers** (ADR-0005 — it stays a library, not a daemon). You wire
 the transport. The production-safe shape has two properties beyond the obvious one-liner:

@@ -40,7 +40,7 @@ persistent-worker-runtime/
 │   ├── worker-thread-entry.js          # In-thread worker loop with L1 memory
 │   ├── supervisor.js                   # Pool lifecycle, recycling, and crash recovery
 │   └── worker-runtime.js               # Central execution engine
-├── test/                               # Native unit tests (node:test, 149 tests across 50 suites)
+├── test/                               # Native unit tests (node:test, 624 tests across 171 suites)
 │   ├── task-queue.test.js              # Queue unit tests (lifecycle, priority, affinity, drain, destroy)
 │   ├── errors.test.js                  # Error hierarchy tests
 │   ├── supervisor-units.test.js        # Supervisor getters, dispatch validation, retry path
