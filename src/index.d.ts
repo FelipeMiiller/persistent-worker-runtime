@@ -526,6 +526,128 @@ export class TaskHandle<TResult = any> {
 }
 
 /**
+ * In-memory task queue with asynchronous backpressure and timeout guarantees.
+ * Ensures the main Event Loop never blocks when the queue reaches capacity.
+ */
+export class TaskQueue {
+  /**
+   * @param options.maxQueueSize Maximum queue depth before backpressure is applied. Default 1000.
+   * @param options.queueTimeoutMs Default wait budget (ms) for a task parked by backpressure. Default 30000.
+   */
+  constructor(options?: { maxQueueSize?: number; queueTimeoutMs?: number });
+
+  /** Number of tasks currently queued. */
+  readonly size: number;
+
+  /** Capacity ceiling — mirrors the `maxQueueSize` constructor option. */
+  readonly maxQueueSize: number;
+
+  /** Number of tasks currently parked waiting for capacity. */
+  readonly waitingCount: number;
+
+  /**
+   * Returns the highest-priority task WITHOUT removing it.
+   * `null` when the queue is empty.
+   */
+  peek(): TaskHandle | null;
+
+  /**
+   * Enqueues a task handle. Resolves once the task is queued; rejects with
+   * `TaskQueueTimeoutError` when the queue stays full past the timeout.
+   */
+  enqueue(task: TaskHandle): Promise<void>;
+
+  /**
+   * Dequeues the next task for the given worker, honouring worker affinity
+   * and priority. `null` when the queue is empty.
+   */
+  dequeue(worker?: WorkerHandle | null): TaskHandle | null;
+
+  /** Clears the queue and rejects every pending task and waiter. */
+  destroy(reason?: Error): void;
+}
+
+/**
+ * Durable queue backend backed by `node:sqlite` (ADR-0020).
+ * Pending tasks survive a runtime crash (RPO = 0). The payload must be
+ * JSON-serializable and `transferList` is intentionally dropped.
+ */
+export class SqliteTaskQueue {
+  /**
+   * @param options.path Filesystem path to the SQLite file. Use `:memory:` for a
+   *   non-durable in-process database. Required — the constructor throws a
+   *   `TypeError` when it is missing.
+   * @param options.maxQueueSize Maximum queue depth before backpressure is applied. Default 2000.
+   * @param options.queueTimeoutMs Default wait budget (ms) for a task parked by backpressure. Default 30000.
+   * @param options.leaseMs Lease duration (ms) for a `processing` claim. Claims whose
+   *   lease expired are reclaimed as `pending` on the next sweep. Default 30000.
+   * @param options.workerId Stable identifier stored in the `claimed_by` column.
+   *   Defaults to a per-instance random id.
+   */
+  constructor(options: {
+    path: string;
+    maxQueueSize?: number;
+    queueTimeoutMs?: number;
+    leaseMs?: number;
+    workerId?: string;
+  });
+
+  /** Number of tasks currently pending. */
+  readonly size: number;
+
+  /** Capacity ceiling — mirrors the `maxQueueSize` constructor option. */
+  readonly maxQueueSize: number;
+
+  /** Number of tasks currently parked waiting for capacity. */
+  readonly waitingCount: number;
+
+  /**
+   * Returns the highest-priority pending task WITHOUT claiming it.
+   * `null` when the queue is empty.
+   */
+  peek(): TaskHandle | null;
+
+  /**
+   * Enqueues a task handle. Resolves once the task is persisted; rejects with
+   * `TaskQueueTimeoutError` when the queue stays full past the timeout.
+   */
+  enqueue(task: TaskHandle): Promise<void>;
+
+  /**
+   * Claims the next task for the given worker, honouring worker affinity.
+   * `null` when the queue is empty.
+   */
+  dequeue(worker?: WorkerHandle | null): TaskHandle | null;
+
+  /**
+   * Sweeps expired `processing` rows back to `pending`. Each reclaim counts as
+   * an attempt; rows that exhaust `max_retries` are marked `failed` instead.
+   */
+  reclaimExpired(now?: number): { reclaimed: number; exhausted: number };
+
+  /** Marks a task as completed and removes its row from the queue. */
+  markDone(taskId: string): void;
+
+  /** Marks a task as failed. The row is kept as `state='failed'` for post-mortem inspection. */
+  markFailed(taskId: string, error?: Error): void;
+
+  /** Removes terminal rows older than `olderThanMs`. Returns the number of rows removed. */
+  vacuumCompleted(olderThanMs?: number): number;
+
+  /** Marks every still-pending row as `failed`. Returns the number of rows transitioned. */
+  purgePending(): number;
+
+  /** Forces a WAL checkpoint. Returns the number of busy frames (`-1` on a closed queue). */
+  checkpointWal(): number;
+
+  /**
+   * Closes the queue. Pending rows are LEFT in place so a fresh instance
+   * opened on the same `path` recovers them.
+   */
+  destroy(reason?: Error): void;
+}
+
+/**
  * Handle to a dedicated persistent worker with warm L1 private memory.
  */
 export class WorkerHandle {
@@ -939,4 +1061,47 @@ export class TaskAbortedError extends WorkerRuntimeError {
 }
 export class QueueOverflowError extends WorkerRuntimeError {
   maxQueueSize: number;
+}
+
+/**
+ * Raised when a streaming task is aborted — by the consumer calling
+ * `stream.return()`, by an `AbortSignal`, or by `runtime.shutdown()`.
+ *
+ * Extends `WorkerRuntimeError` so callers can catch the broad runtime family
+ * and still branch on the dedicated `ERR_STREAM_ABORTED` code.
+ *
+ * @see ADR-0012 / .specs/features/streaming-results/spec.md
+ */
+export class StreamAbortedError extends WorkerRuntimeError {
+  constructor(
+    message: string,
+    options?: { taskId?: string; reason?: unknown; cause?: unknown; code?: string },
+  );
+
+  /** Id of the stream task that was aborted. `undefined` when not provided. */
+  taskId: string | undefined;
+
+  /** Why the stream was aborted (e.g. `'consumer-return'`, `'runtime-shutdown'`). */
+  reason: unknown;
+}
+
+/**
+ * Raised when `runtime.stream()` is called with an invalid configuration —
+ * e.g. `taskFn` is neither an `AsyncGeneratorFunction` nor a
+ * `GeneratorFunction`, or `highWaterMark` is non-positive.
+ *
+ * Extends `TypeError` (NOT `WorkerRuntimeError`) so callers can branch on
+ * `err instanceof TypeError` for invalid-argument checks. It therefore
+ * carries no `code` property.
+ *
+ * @see ADR-0012 / .specs/features/streaming-results/spec.md
+ */
+export class StreamConfigError extends TypeError {
+  constructor(message: string, options?: { cause?: unknown });
+
+  /** Always `'StreamConfigError'`. */
+  name: 'StreamConfigError';
+
+  /** Underlying error that caused the invalid configuration, when provided. */
+  cause?: unknown;
 }

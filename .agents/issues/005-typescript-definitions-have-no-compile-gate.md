@@ -1,7 +1,9 @@
 # `src/index.d.ts` ships to npm with no compile gate — and has already drifted from the runtime
 
-**Status**: 🔴 **OPEN** — the definitions are unvalidated, **and 4 of the 16 public runtime exports are
-missing from them today**.
+**Status**: ✅ **FIXED** 2026-10-23 — the drift is closed (the 4 missing names are declared, each
+with a shape derived from the runtime source) and a **zero-dependency surface gate**
+(`test/types-surface.test.js`) now fails the build when the runtime exports and the declarations
+disagree.
 
 **Discovered**: 2026-10-23, during a state audit of `develop` (HEAD `1ed718d`).
 **Component**: `src/index.d.ts` (33.7 kB, ~900 lines), `package.json`, `.github/workflows/*`
@@ -115,3 +117,68 @@ compiles.
   question that `examples/` and `benchmarks/` already get.
 - **A badge is a claim.** "TypeScript-Ready" should be backed by something that compiles the
   declarations, not only by a file that exists.
+
+---
+
+## Verification (2026-10-23, `develop` @ `6e5f22d`)
+
+### 1. Drift closed — Option 0
+
+The 4 names missing from `src/index.d.ts` are declared. Every shape was **derived from the runtime
+source**, not invented:
+
+| Name | Declaration | Runtime source | Shape taken from the code |
+| --- | --- | --- | --- |
+| `TaskQueue` | `src/index.d.ts:532` | `src/task-queue.js:7` | `constructor(options?)` (`maxQueueSize`, `queueTimeoutMs`), `size`, `maxQueueSize`, `waitingCount`, `peek()`, `async enqueue(task)`, `dequeue(worker?)`, `destroy(reason?)` |
+| `SqliteTaskQueue` | `src/index.d.ts:575` | `src/queue/sqlite-backend.js:133` | `constructor(options)` with **`options.path` required** (the runtime throws a `TypeError` without it), plus `size`, `maxQueueSize`, `waitingCount`, `peek()`, `enqueue()`, `dequeue()`, `reclaimExpired()`, `markDone()`, `markFailed()`, `vacuumCompleted()`, `purgePending()`, `checkpointWal()`, `destroy()` |
+| `StreamAbortedError` | `src/index.d.ts:1075` | `src/errors.js:65` | extends `WorkerRuntimeError`; default `code` `ERR_STREAM_ABORTED`; carries `taskId` and `reason` |
+| `StreamConfigError` | `src/index.d.ts:1099` | `src/errors.js:82` | extends **`TypeError`** (NOT `WorkerRuntimeError`), `name = 'StreamConfigError'`, `options.cause` — it carries **no** `code` property, exactly like the runtime |
+
+`src/index.d.ts` now declares **28 names**: **16 value-level** (an exact match for the 16 runtime
+exports) + **12 type-only** (`export interface`) names that are erased at compile time and have no
+runtime counterpart.
+
+### 2. Gate installed — Option A (zero dependencies)
+
+`test/types-surface.test.js` (new, **10 tests**, `node:test` + `node:*` built-ins only — no
+`typescript` devDependency, no ADR amendment needed):
+
+1. imports `src/index.js` and collects the runtime exports;
+2. extracts the **value-level** declared names from `src/index.d.ts` — `export class`, `export
+   function`, `export const`, `export declare class`, … — while **ignoring** `export interface` and
+   `export type` (type-only, erased at compile time);
+3. asserts the two sets are equal **in both directions**: no export without a declaration, and no
+   declaration without an export.
+
+Stability is pinned by 6 parser self-tests: comments, `export { A, B as C }` re-export lists,
+`export { type C }` inline type modifiers, `export type { C }` type-only lists, whitespace and line
+breaks are all handled — so the gate cannot fail because of formatting.
+
+**Proof that the gate fails when a name is missing** (done on a byte-exact copy of the file in the
+agent's scratch folder, then restored; the repo hash was verified identical before and after):
+
+| Proof | Mutation | Result |
+| --- | --- | --- |
+| A | `export class TaskQueue {` → `export class TaskQueueMissingProof {` | **exit 1**, 3 failures — `src/index.d.ts is missing a declaration for: TaskQueue` **and** `src/index.d.ts declares names the runtime does not export: TaskQueueMissingProof` |
+| B | appended `export class GhostProofDeclaration {}` | **exit 1**, 1 failure — `src/index.d.ts declares names the runtime does not export: GhostProofDeclaration` |
+| restore | file restored from the pristine copy | hash `3B7A286A…` before and after — **exit 0**, 10/10 pass |
+
+### 3. Full validation at the time of the fix
+
+| Check | Result |
+| --- | --- |
+| `npm test` | **641 pass / 0 fail**, 175 suites (baseline 624/171 + this gate's 10 + the parallel agent's new suite) |
+| `npm run lint` | 0 errors, 105 files checked |
+| `npm run format:check` | 0 errors, 105 files checked |
+| `npm pack --dry-run` | **30 files**, `scripts/` does not leak, `src/index.d.ts` shipped at 39.6 kB |
+
+### What is still open
+
+- **Option B (a real `tsc --noEmit`) is still open.** This gate proves the *surface* agrees; it does
+  **not** prove the declarations compile, that an overload is right, or that a type body references
+  a name that exists. That needs `typescript` as a devDependency plus an explicit ADR-0005 note —
+  a policy decision, deliberately not taken here.
+- `WorkerHandle.isDedicated` is set by the runtime (`src/worker-handle.js:53`) but is still missing
+  from `WorkerHandle` in the `.d.ts`. It is a real (minor) drift of the same family, left out of
+  this fix because it is outside the 4 names this issue scoped.
+
