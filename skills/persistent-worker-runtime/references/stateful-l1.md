@@ -39,9 +39,9 @@ A task dispatched multiple times may run on different workers. To pin a logical 
 
 ```javascript
 // All three dispatches route to the SAME worker
-const handle1 = runtime.dispatch({ type: 'session_step', affinityKey: `user:${userId}`, payload: { ... }, fn: ... });
-const handle2 = runtime.dispatch({ type: 'session_step', affinityKey: `user:${userId}`, payload: { ... }, fn: ... });
-const handle3 = runtime.dispatch({ type: 'session_step', affinityKey: `user:${userId}`, payload: { ... }, fn: ... });
+const handle1 = runtime.dispatch({ type: 'session_step', affinityKey: `user:${userId}`, payload: { step: 1 }, fn: () => { /* process step */ } });
+const handle2 = runtime.dispatch({ type: 'session_step', affinityKey: `user:${userId}`, payload: { step: 2 }, fn: () => { /* process step */ } });
+const handle3 = runtime.dispatch({ type: 'session_step', affinityKey: `user:${userId}`, payload: { step: 3 }, fn: () => { /* process step */ } });
 ```
 
 The supervisor tracks which worker holds each affinity key; new tasks with the same key route there. Useful for: per-user session state, per-tenant model caches, per-connection dedup.

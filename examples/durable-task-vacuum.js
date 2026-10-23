@@ -37,9 +37,14 @@
 import { existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import * as nodeSqlite from 'node:sqlite';
 import { SqliteTaskQueue } from '../src/queue/sqlite-backend.js';
 import { TaskHandle } from '../src/task-handle.js';
+
+// Node 26.11 renamed `node:sqlite`'s `DatabaseSync` to `Database` (DEP0210).
+// The old spelling is still exported today; resolve at runtime so this
+// example keeps working on every supported Node line.
+const DatabaseCtor = nodeSqlite.Database ?? nodeSqlite.DatabaseSync;
 
 // === Configuration ===
 
@@ -100,7 +105,7 @@ function dbFileBytes(dbPath, checkpointFirst = true) {
  * the main db file on DELETE — it just frees pages inside the file.
  */
 function failedRowCount(dbPath) {
-  const db = new DatabaseSync(dbPath);
+  const db = new DatabaseCtor(dbPath);
   try {
     const row = db.prepare("SELECT COUNT(*) AS n FROM queue_tasks WHERE state = 'failed'").get();
     return row.n;

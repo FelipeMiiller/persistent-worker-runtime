@@ -5,7 +5,7 @@
 ### Aggregate stats
 
 ```javascript
-const stats = runtime.stats();
+const stats = runtime.stats;
 // {
 //   totalTasks, completedTasks, failedTasks,
 //   queuedTasks, activeWorkers, recycledCount, ...
@@ -50,12 +50,12 @@ runtime.on('task:failed',    ({ taskId, error }) => alerts.page(taskId, error.me
 runtime.on('task:preempted', ({ taskId })         => alerts.page(taskId, 'preempted'));
 ```
 
-To count "did not succeed", read `runtime.stats().failedTasks`. To know *why*, listen to both.
+To count "did not succeed", read `runtime.stats.failedTasks`. To know *why*, listen to both.
 
 ### TaskHandle events (per-dispatch)
 
 ```javascript
-const handle = runtime.dispatch({ ... });
+const handle = runtime.dispatch({ type: 'audit', payload: { id: 1 } });
 
 handle.onComplete((result) => db.auditLog.insert({ task, result, completedAt: new Date() }));
 handle.onError((err) => db.failedJobs.insert({ task, error: err.message }));
@@ -121,7 +121,7 @@ const runtime = await createWorkerRuntime({
 
 Recycled workers lose their L1 cache — design stateful code to gracefully re-warm.
 
-`runtime.stats().recycledCount` is the cumulative recycle count; alert on it going up faster than expected.
+`runtime.stats.recycledCount` is the cumulative recycle count; alert on it going up faster than expected.
 
 ## Error Hierarchy
 

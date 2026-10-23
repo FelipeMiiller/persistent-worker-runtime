@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import * as nodeSqlite from 'node:sqlite';
 import { afterEach, before, describe, it } from 'node:test';
 import { TaskQueueTimeoutError } from '../src/errors.js';
-import { SqliteTaskQueue } from '../src/queue/sqlite-backend.js';
+import { DatabaseCtor, SqliteTaskQueue } from '../src/queue/sqlite-backend.js';
 import { TaskHandle } from '../src/task-handle.js';
 
 let tmpDir;
@@ -43,6 +43,35 @@ function makeHandle(opts = {}) {
     ...opts,
   });
 }
+
+describe('node:sqlite DEP0210 shim', () => {
+  it('resolves the database constructor across the DatabaseSync -> Database rename', () => {
+    // Node 26.11 renamed `node:sqlite`'s `DatabaseSync` to `Database`
+    // (DEP0210). `src/queue/sqlite-backend.js` resolves the constructor at
+    // runtime instead of using a named import, because a named import of a
+    // removed export is a SyntaxError that breaks the whole package at
+    // import time. This test pins that resolution on whichever Node line is
+    // running the suite.
+    assert.equal(typeof DatabaseCtor, 'function', 'resolved constructor must be a function');
+    assert.equal(
+      DatabaseCtor,
+      nodeSqlite.Database ?? nodeSqlite.DatabaseSync,
+      'resolved constructor must be the canonical node:sqlite export',
+    );
+  });
+
+  it('opens a database through the resolved constructor', () => {
+    const dbPath = tmpDb('dep0210');
+    const db = new DatabaseCtor(dbPath);
+    try {
+      db.exec('CREATE TABLE t (x INTEGER)');
+      db.exec('INSERT INTO t (x) VALUES (1)');
+      assert.equal(db.prepare('SELECT x FROM t').get().x, 1);
+    } finally {
+      db.close();
+    }
+  });
+});
 
 describe('SqliteTaskQueue', () => {
   describe('Constructor & Defaults', () => {
@@ -602,7 +631,7 @@ describe('SqliteTaskQueue', () => {
       // Open the DB directly with node:sqlite, write a corrupt row,
       // close. Then open via SqliteTaskQueue and verify recovery treats
       // it as failed.
-      const setup = new DatabaseSync(dbPath);
+      const setup = new DatabaseCtor(dbPath);
       setup.exec(`
         CREATE TABLE IF NOT EXISTS queue_tasks (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -646,7 +675,7 @@ describe('SqliteTaskQueue', () => {
         assert.equal(q.size, 0);
         // Verify the underlying row was marked failed by querying the
         // SQLite file directly.
-        const db = new DatabaseSync(dbPath);
+        const db = new DatabaseCtor(dbPath);
         const row = db.prepare("SELECT state FROM queue_tasks WHERE task_id = 'corrupt-1'").get();
         db.close();
         assert.ok(row, 'corrupt row must still exist in the DB');
@@ -661,7 +690,7 @@ describe('SqliteTaskQueue', () => {
     /** Insert a row in `processing` state directly via the SQLite handle
      *  to simulate a previous instance that crashed mid-execution. */
     function plantOrphan(dbPath, opts = {}) {
-      const db = new DatabaseSync(dbPath);
+      const db = new DatabaseCtor(dbPath);
       try {
         db.exec(`
           CREATE TABLE IF NOT EXISTS queue_tasks (
@@ -795,7 +824,7 @@ describe('SqliteTaskQueue', () => {
         // At this point the row has state='processing' + lease +60s.
         // Manually expire the lease to simulate a worker that died after
         // claiming but before completing.
-        const db = new DatabaseSync(dbPath);
+        const db = new DatabaseCtor(dbPath);
         try {
           db.prepare('UPDATE queue_tasks SET claim_expires_at = ? WHERE task_id = ?').run(
             Date.now() - 1000,
@@ -850,7 +879,7 @@ describe('SqliteTaskQueue', () => {
         // The test setup creates a queue with the SCHEMA + ALTER
         // (which adds claim_expires_at). After dequeue, the row must
         // have a non-null claim_expires_at.
-        const setup = new DatabaseSync(dbPath);
+        const setup = new DatabaseCtor(dbPath);
         try {
           setup
             .prepare(
@@ -884,7 +913,7 @@ describe('SqliteTaskQueue', () => {
         try {
           const claimed = q2.dequeue();
           assert.ok(claimed);
-          const db = new DatabaseSync(dbPath);
+          const db = new DatabaseCtor(dbPath);
           try {
             const row = db
               .prepare(
@@ -915,7 +944,7 @@ describe('SqliteTaskQueue', () => {
      *  and retries budget, simulating a worker that died mid-task after
      *  N prior attempts. */
     function plantOrphanWithBudget(dbPath, opts) {
-      const db = new DatabaseSync(dbPath);
+      const db = new DatabaseCtor(dbPath);
       try {
         db.exec(`
           CREATE TABLE IF NOT EXISTS queue_tasks (
@@ -976,7 +1005,7 @@ describe('SqliteTaskQueue', () => {
       try {
         // Recovery reclaim should mark this as failed, not pending.
         assert.equal(q.size, 0, 'row with retries=0 must NOT be reclaimed to pending');
-        const db = new DatabaseSync(dbPath);
+        const db = new DatabaseCtor(dbPath);
         try {
           const row = db
             .prepare("SELECT state, attempt FROM queue_tasks WHERE task_id = 'r0'")
@@ -1006,7 +1035,7 @@ describe('SqliteTaskQueue', () => {
       try {
         // First reclaim: attempt becomes 1 (still < 2), goes to pending.
         assert.equal(q.size, 1);
-        const db = new DatabaseSync(dbPath);
+        const db = new DatabaseCtor(dbPath);
         try {
           const row = db
             .prepare("SELECT state, attempt FROM queue_tasks WHERE task_id = 'r1'")
@@ -1046,7 +1075,7 @@ describe('SqliteTaskQueue', () => {
 
           // Force lease expiry to simulate the worker crashing without
           // calling markDone / markFailed.
-          const db = new DatabaseSync(dbPath);
+          const db = new DatabaseCtor(dbPath);
           try {
             db.prepare(`UPDATE queue_tasks SET claim_expires_at = ? WHERE task_id = 'r2'`).run(
               Date.now() - 1000,
@@ -1068,7 +1097,7 @@ describe('SqliteTaskQueue', () => {
         }
 
         // After 3 reclaims total: attempt=3, state=failed, size=0.
-        const final = new DatabaseSync(dbPath);
+        const final = new DatabaseCtor(dbPath);
         try {
           const row = final
             .prepare("SELECT state, attempt FROM queue_tasks WHERE task_id = 'r2'")

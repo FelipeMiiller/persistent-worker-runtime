@@ -40,9 +40,18 @@
  * still recoverable).
  */
 
-import { DatabaseSync } from 'node:sqlite';
+import * as nodeSqlite from 'node:sqlite';
 import { TaskQueueTimeoutError } from '../errors.js';
 import { TaskHandle } from '../task-handle.js';
+
+// Node 26.11 renamed `node:sqlite`'s `DatabaseSync` to `Database` (DEP0210).
+// The old spelling is still exported today, but the canonical name differs
+// per release line — and a *named* import of a removed export is a
+// `SyntaxError` raised while importing the package, breaking every consumer
+// of `persistent-worker-runtime`, not only the ones using the durable queue.
+// Resolving the constructor at runtime keeps both naming eras working.
+// Exported so the shim itself is covered by a test on every Node line.
+export const DatabaseCtor = nodeSqlite.Database ?? nodeSqlite.DatabaseSync;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS queue_tasks (
@@ -159,7 +168,7 @@ export class SqliteTaskQueue {
       `pwr-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     this.#dbPath = options.path;
-    this.#db = new DatabaseSync(options.path);
+    this.#db = new DatabaseCtor(options.path);
     // WAL = readers don't block writers; durable + fast. NORMAL = small
     // fsync window; durable enough for queue use (TRUNCATE/EXTRA are overkill
     // for non-financial data).

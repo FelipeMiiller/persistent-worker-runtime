@@ -132,8 +132,9 @@ import { createWorkerRuntime } from 'persistent-worker-runtime';
 const runtime = await createWorkerRuntime({ workers: 2 });
 
 // Low-priority work first
+const background = [];
 for (let i = 0; i < 10; i++) {
-  runtime.dispatch({
+  background.push(runtime.dispatch({
     type: 'background',
     priority: 0,
     payload: { id: `bg-${i}` },
@@ -141,11 +142,11 @@ for (let i = 0; i < 10; i++) {
       await new Promise((r) => setTimeout(r, 100));
       return p.id;
     },
-  });
+  }));
 }
 
 // High-priority jumps the queue
-runtime.dispatch({
+const urgent = runtime.dispatch({
   type: 'urgent',
   priority: 10,
   payload: { id: 'urgent-1' },
@@ -169,6 +170,12 @@ try {
 } catch (err) {
   console.log('cancelled:', err.name); // TaskAbortedError
 }
+
+// `dispatch()` is fire-and-forget, but the handle's promise still rejects
+// when the task never runs. Settle every handle BEFORE `shutdown()`: a task
+// still queued at that point is rejected with "Runtime is shutting down",
+// and an unhandled rejection would take the process down.
+await Promise.allSettled([...background.map((h) => h.promise), urgent.promise]);
 
 await runtime.shutdown();
 ```

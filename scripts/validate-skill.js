@@ -28,9 +28,29 @@
  *  5. Validates `.skill-meta.json`: it must parse, its trigger list must be
  *     non-empty and free of duplicates, and every file it lists must exist.
  *
- * Exit code: 0 when the metadata is coherent. A block that fails is
- * REPORTED, not fatal — the gate must not paint the repository red over
- * content this task is not allowed to rewrite.
+ * Exit code:
+ *
+ *  - 1 when the metadata is incoherent, OR when any JavaScript block FAILS TO
+ *    PARSE. A snippet that does not parse is a broken snippet: it is not a
+ *    fragment of a larger program (a fragment still parses), it is not an
+ *    external dependency, and an agent copying it verbatim gets a syntax
+ *    error on the first line. Reporting that and exiting 0 is not a gate.
+ *  - 0 otherwise. A block that PARSES but fails at RUNTIME is reported and
+ *    stays non-fatal, because the runtime failure belongs to a category the
+ *    gate cannot fix on its own:
+ *
+ *      - FRAGMENT            — the snippet is a piece of a larger program and
+ *                              references an identifier defined outside it.
+ *                              It cannot be executed in isolation by design.
+ *      - EXTERNAL-DEPENDENCY — the snippet needs a package that this
+ *                              zero-dependency repository cannot install
+ *                              (ADR-0005).
+ *      - RUNTIME-ERROR       — the snippet parses but the runtime rejects it
+ *                              (for example: it dispatches after `shutdown()`).
+ *      - TIMEOUT             — the snippet did not finish within the budget.
+ *
+ *    Those categories are reported with the file, the line and the reason, so
+ *    the finding is actionable — the gate just does not fail on them.
  *
  * Usage: `npm run skill:validate`
  */
@@ -441,6 +461,9 @@ async function main() {
   console.log(
     `javascript blocks: ${outcomes.length} | executed: ${executed.length} | skipped: ${skipped.length} | fragment: ${fragments.length} | external-dependency: ${external.length} | runtime-error: ${runtimeErrors.length} | syntax-error: ${syntaxErrors.length} | timeout: ${timeouts.length}`,
   );
+  console.log(
+    'fatal: syntax-error (a snippet that does not parse). reported, not fatal: fragment, external-dependency, runtime-error, timeout.',
+  );
   console.log(`out-of-scope blocks: ${outOfScope.length}`);
 
   const byLang = new Map();
@@ -465,8 +488,12 @@ async function main() {
     for (const outcome of external) console.log(`  ${outcome.label} — ${outcome.reason}`);
   }
   if (syntaxErrors.length > 0) {
-    console.log('\nSYNTAX ERRORS — these snippets do not parse:');
-    for (const outcome of syntaxErrors) console.log(`  ${outcome.label} — ${outcome.reason}`);
+    console.error('\n=== SYNTAX ERRORS — these snippets do not parse (FATAL) ===');
+    for (const outcome of syntaxErrors) console.error(`  ${outcome.label} — ${outcome.reason}`);
+    console.error(
+      `\nskill gate FAILED — ${syntaxErrors.length} JavaScript block(s) do not parse. A snippet that does not parse is a broken snippet: an agent copying it verbatim gets a syntax error on the first line. Fix the snippet (or mark the fence as out of scope) and re-run \`npm run skill:validate\`.`,
+    );
+    process.exit(1);
   }
   if (runtimeErrors.length > 0) {
     console.log('\nRUNTIME ERRORS — reported, not fatal:');
