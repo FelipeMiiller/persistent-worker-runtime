@@ -4,6 +4,7 @@
  * "The Event Loop coordinates. Persistent Workers execute."
  */
 
+export { attempt } from './attempt.js';
 export {
   QueueOverflowError,
   StreamAbortedError,

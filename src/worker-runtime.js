@@ -1403,6 +1403,48 @@ export class WorkerRuntime extends EventTarget {
   }
 
   /**
+   * Explicit Resource Management protocol (ADR-0026).
+   *
+   * Implements the async half of Explicit Resource Management — the
+   * `[Symbol.asyncDispose]()` method — so a consumer running on **Node.js >= 24**
+   * can scope a runtime with the `await using` declaration:
+   *
+   * ```js
+   * {
+   *   await using runtime = await createWorkerRuntime({ workers: 2 });
+   *   await runtime.execute({ type: 'report', fn: () => 42 });
+   * } // <- runtime.shutdown() runs here, even if the block threw
+   * ```
+   *
+   * The runtime is torn down exactly like an explicit `shutdown()`: the queue
+   * is drained, in-flight streams are aborted and every worker thread is
+   * terminated. The returned promise resolves only AFTER the teardown
+   * completed, so the scope boundary is also the "workers are gone" boundary.
+   *
+   * **The library implements the PROTOCOL, never the SYNTAX.** `package.json`
+   * declares `engines.node >= 22.13.0` and the parser of that version does
+   * not understand `using` / `await using`, so `src/` must not contain the
+   * syntax — a static test (`test/explicit-resource-management.test.js`)
+   * enforces that. The `await using` declaration is the CONSUMER's choice and
+   * requires Node.js >= 24 on the consumer side; the runtime itself keeps
+   * working on 22.13.0.
+   *
+   * **Idempotent.** `shutdown()` is idempotent, so calling the dispose method
+   * after an explicit `shutdown()` — or calling it twice — resolves without
+   * throwing and leaves the runtime in the same shut-down state.
+   *
+   * **No synchronous `[Symbol.dispose]`.** The teardown is asynchronous
+   * (worker threads are terminated over the event loop), so a synchronous
+   * `dispose` could only fire-and-forget the shutdown and break the guarantee
+   * that "the teardown finished when the scope ended".
+   *
+   * @returns {Promise<void>} Resolves once the runtime is fully torn down.
+   */
+  async [Symbol.asyncDispose]() {
+    await this.shutdown();
+  }
+
+  /**
    * Publishes a message to all subscribers of the named channel.
    *
    * The message is structured-cloned before delivery, so it may contain

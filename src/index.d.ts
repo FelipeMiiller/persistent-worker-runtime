@@ -1,3 +1,26 @@
+/// <reference lib="esnext.disposable" />
+
+/**
+ * ADR-0026 (portability of the Explicit Resource Management surface).
+ *
+ * `Symbol.asyncDispose` is only declared by TypeScript's `esnext.disposable`
+ * lib, which is NOT part of the default `lib` set of `target: ES2022`. A
+ * declaration file that used the symbol WITHOUT pulling that lib in would
+ * break the build of every consumer that does not opt in explicitly:
+ *
+ *   error TS2339: Property 'asyncDispose' does not exist on type
+ *   'SymbolConstructor'.
+ *
+ * The `/// <reference lib="esnext.disposable" />` directive above adds the lib
+ * to the program that consumes this file, so the consumer needs NO extra
+ * configuration: `target: ES2022` with the default libs is enough.
+ *
+ * Trade-off (recorded in ADR-0026): the directive requires TypeScript >= 5.2
+ * (the version that introduced the `esnext.disposable` lib). On an older
+ * compiler the directive itself is reported as an unknown lib — the price is
+ * a documented minimum TypeScript version instead of a broken build for the
+ * (far more common) modern consumer.
+ */
 import { ResourceLimits } from 'node:worker_threads';
 
 /**
@@ -932,6 +955,37 @@ export class WorkerRuntime extends EventTarget {
    */
   shutdown(): Promise<void>;
 
+  /**
+   * ADR-0026: Explicit Resource Management protocol (async half).
+   *
+   * Implemented on the runtime as `[Symbol.asyncDispose]()`, so a consumer on
+   * Node.js >= 24 can scope a runtime with `await using`:
+   *
+   * ```ts
+   * {
+   *   await using runtime = await createWorkerRuntime({ workers: 2 });
+   *   await runtime.execute({ type: 'report', fn: () => 42 });
+   * } // <- runtime.shutdown() runs here, even if the block threw
+   * ```
+   *
+   * The teardown is the same as an explicit `shutdown()`: the queue is
+   * drained, in-flight streams are aborted and every worker thread is
+   * terminated. The returned promise resolves only AFTER the teardown
+   * completed. `shutdown()` is idempotent, so disposing an already-shut-down
+   * runtime resolves without throwing.
+   *
+   * The library implements the PROTOCOL, never the SYNTAX: `src/` must not
+   * contain `using` / `await using` because `package.json` declares
+   * `engines.node >= 22.13.0`, whose parser does not understand it. The
+   * `await using` declaration is the consumer's choice and requires Node.js
+   * >= 24 on the consumer side.
+   *
+   * Requires TypeScript's `esnext.disposable` lib, which this file pulls in
+   * through the `/// <reference lib="esnext.disposable" />` directive at the
+   * top — the consumer needs no extra configuration.
+   */
+  [Symbol.asyncDispose](): Promise<void>;
+
   // ─── EventEmitter-compatible surface (compat shim) ─────────────────────
   // Provided at runtime by `src/event-target-compat.js` to preserve
   // backward compatibility with consumers that used the EventEmitter API.
@@ -1049,6 +1103,42 @@ export class Supervisor extends EventTarget {
   /** @deprecated Not part of the EventTarget API. */
   listenerCount(eventName: string | symbol): number;
 }
+
+/**
+ * ADR-0026: the result tuple produced by {@link attempt}.
+ *
+ * On success the tuple is `[null, value]`; on failure it is
+ * `[error, undefined]`. `error` is `null` (never `undefined`) on success, so
+ * `if (err)` is the only check a caller needs.
+ */
+export type AttemptResult<T> = [null, T] | [Error, undefined];
+
+/**
+ * ADR-0026: Go-style multi-return error handling for asynchronous work.
+ *
+ * The Go idiom `v, err := doSomething()` returns the error instead of
+ * throwing it. `attempt` is the JavaScript translation: it never throws and
+ * never rejects, it RETURNS the error as the first element of a two-element
+ * tuple.
+ *
+ * ```ts
+ * const [err, value] = await attempt(() => runtime.execute({ type: 'x' }));
+ * if (err) {
+ *   // Handle the error locally — no try/catch nesting.
+ *   return;
+ * }
+ * ```
+ *
+ * The original error object is preserved as-is: same identity, same `cause`,
+ * same `stack`. Nothing is wrapped.
+ *
+ * @param input A thunk (`() => T | Promise<T>`) or a promise. The thunk form
+ *   also captures a synchronous throw.
+ * @returns The `[error, value]` tuple — `[null, value]` on success,
+ *   `[error, undefined]` on failure.
+ */
+export function attempt<T>(input: () => T | Promise<T>): Promise<AttemptResult<T>>;
+export function attempt<T>(input: Promise<T>): Promise<AttemptResult<T>>;
 
 // Error Hierarchy
 export class WorkerRuntimeError extends Error {
