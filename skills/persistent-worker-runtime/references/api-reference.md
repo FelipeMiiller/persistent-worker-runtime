@@ -291,6 +291,7 @@ Gracefully drains the queue, terminates all workers, and rejects any in-flight t
 The **Explicit Resource Management** protocol. On Node.js **>= 24** the consumer can scope the runtime with `await using` — the teardown runs when the scope ends, even if the block threw:
 
 ```javascript
+// requires: node >= 24
 async function withScopedRuntime() {
   await using runtime = await createWorkerRuntime({ workers: 1 });
   const result = await runtime.execute({ type: 'ping', fn: () => 'pong' });

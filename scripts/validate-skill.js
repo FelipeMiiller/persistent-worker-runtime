@@ -18,14 +18,19 @@
  *  2. Reports the blocks that are out of scope (TypeScript, shell, SQL,
  *     untagged fences) with the reason for each — nothing is skipped
  *     silently.
- *  3. Syntax-checks EVERY JavaScript block. A block that does not parse is
+ *  3. Honours a `// requires:` marker — the convention the sibling gate
+ *     (`scripts/run-examples.js`) already uses for the examples. A block that
+ *     declares a requirement the running Node does not meet is SKIPPED with a
+ *     visible reason instead of being executed. See "The `// requires:`
+ *     marker" below.
+ *  4. Syntax-checks EVERY JavaScript block. A block that does not parse is
  *     a broken snippet an agent will copy verbatim.
- *  4. Executes the JavaScript blocks in an isolated child process, with a
+ *  5. Executes the JavaScript blocks in an isolated child process, with a
  *     wall-clock budget, and classifies the outcome. Blocks that are
  *     fragments of a larger program fail with a precise reason
  *     ("undefined identifier `runtime`"), which is reported as a documented
  *     skip rather than a gate failure.
- *  5. Validates `.skill-meta.json`: it must parse, its trigger list must be
+ *  6. Validates `.skill-meta.json`: it must parse, its trigger list must be
  *     non-empty and free of duplicates, and every file it lists must exist.
  *
  * Exit code:
@@ -35,6 +40,9 @@
  *    fragment of a larger program (a fragment still parses), it is not an
  *    external dependency, and an agent copying it verbatim gets a syntax
  *    error on the first line. Reporting that and exiting 0 is not a gate.
+ *    A block SKIPPED by the `// requires:` marker is NOT in this category:
+ *    a snippet that needs a newer Node than the one running the gate is an
+ *    environment limitation, not a broken snippet.
  *  - 0 otherwise. A block that PARSES but fails at RUNTIME is reported and
  *    stays non-fatal, because the runtime failure belongs to a category the
  *    gate cannot fix on its own:
@@ -51,6 +59,33 @@
  *
  *    Those categories are reported with the file, the line and the reason, so
  *    the finding is actionable — the gate just does not fail on them.
+ *
+ * The `// requires:` marker
+ *
+ * A JavaScript block may declare, on a line of its own, what it needs before
+ * it can run:
+ *
+ *     // requires: node >= 24
+ *
+ * This is the same convention as the sibling gate (`scripts/run-examples.js`)
+ * uses for the examples: the marker is a whole-line comment and it may sit on
+ * any line of the block.
+ *
+ * The gate understands ONE shape — `node >= <version>` — and compares the
+ * versions NUMERICALLY, part by part (`9.0.0` is older than `24`, even
+ * though it sorts after it as a string). Two outcomes follow:
+ *
+ *  - the running Node is older than the requirement: the block is SKIPPED,
+ *    and the reason (with the running version) is in the report. This is the
+ *    case that matters: the package supports Node >= 22.13.0, and a snippet
+ *    that uses `await using` does not even PARSE on 22.13.0. Treating that
+ *    as a fatal syntax error fails the gate on a version the package itself
+ *    claims to support.
+ *  - the requirement is not one this gate can verify (for example
+ *    `// requires: a running Postgres`): the block is SKIPPED too. The gate
+ *    does not run what it cannot check.
+ *
+ * A block with no marker behaves exactly as before.
  *
  * Usage: `npm run skill:validate`
  */
@@ -119,6 +154,25 @@ const EXCLUDED_BLOCKS = {
     5: 'only registers signal handlers — running it would exercise no library API',
   },
 };
+
+/**
+ * Matches a `// requires:` marker: a whole-line comment that names what the
+ * block needs before it can run.
+ *
+ * Same convention as the sibling gate (`scripts/run-examples.js`) uses for
+ * the examples: the marker is a whole-line comment, and it may sit on any
+ * line of the block.
+ */
+const REQUIRES_MARKER = /^\s*\/\/\s*requires:\s*(.+?)\s*$/;
+
+/**
+ * Matches the ONE requirement shape this gate can verify: `node >= <version>`,
+ * where `<version>` is `X`, `X.Y` or `X.Y.Z`.
+ *
+ * Every other shape (`node < 24`, `node 24`, `a running Postgres`) is a
+ * requirement the gate cannot check — see `parseNodeRequirement`.
+ */
+const NODE_REQUIREMENT_RE = /^node\s*>=\s*(\d+(?:\.\d+){0,2})$/i;
 
 /**
  * Harness preamble prepended to an executed block.
@@ -197,6 +251,79 @@ export function extractCodeBlocks(markdown) {
  */
 export function blockFingerprint(code) {
   return createHash('sha256').update(code).digest('hex').slice(0, 12);
+}
+
+/**
+ * Reads the `// requires:` marker of a block.
+ *
+ * @param {string} source The block's source code.
+ * @returns {string|null} the requirement declared by the block, or `null` when
+ *   it declares none.
+ */
+export function parseRequiresMarker(source) {
+  for (const line of source.split(/\r?\n/)) {
+    const match = REQUIRES_MARKER.exec(line);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+/**
+ * Reads the block's `// requires:` marker and interprets it as a Node version
+ * requirement.
+ *
+ * @param {string} source The block's source code.
+ * @returns {{minVersion: string}|null} the minimum Node version the block
+ *   needs, or `null` when the block declares no requirement OR declares one
+ *   this gate cannot verify. The caller tells the two apart with
+ *   `parseRequiresMarker`.
+ */
+export function parseNodeRequirement(source) {
+  const requirement = parseRequiresMarker(source);
+  if (requirement === null) return null;
+  const match = NODE_REQUIREMENT_RE.exec(requirement.trim());
+  if (!match) return null;
+  return { minVersion: match[1] };
+}
+
+/**
+ * Splits a version string into its numeric parts.
+ *
+ * @param {string} version
+ * @returns {number[]|null} the parts, or `null` when the string is not a
+ *   dotted numeric version.
+ */
+function parseVersionParts(version) {
+  const match = /^(\d+(?:\.\d+)*)$/.exec(String(version).trim());
+  if (!match) return null;
+  return match[1].split('.').map(Number);
+}
+
+/**
+ * Compares the running Node against a minimum version, NUMERICALLY and part
+ * by part.
+ *
+ * A lexicographic comparison gets `9.0.0` wrong — it sorts AFTER `24` as a
+ * string, and it is older — so each part is compared as a number and the
+ * missing parts count as zero: `24` and `24.0.0` are the same version.
+ *
+ * @param {string} minVersion The minimum version the block requires.
+ * @param {string} runningVersion The version of the Node running the gate.
+ * @returns {boolean} true when the running version is BELOW the minimum. A
+ *   version that cannot be parsed yields `true` as well: the gate cannot
+ *   prove the requirement is met, and it does not run what it cannot verify.
+ */
+export function isNodeVersionBelow(minVersion, runningVersion) {
+  const min = parseVersionParts(minVersion);
+  const running = parseVersionParts(runningVersion);
+  if (min === null || running === null) return true;
+  const length = Math.max(min.length, running.length);
+  for (let i = 0; i < length; i++) {
+    const current = running[i] ?? 0;
+    const required = min[i] ?? 0;
+    if (current !== required) return current < required;
+  }
+  return false;
 }
 
 /**
@@ -371,6 +498,37 @@ async function main() {
           fingerprint: blockFingerprint(block.code),
         });
         return;
+      }
+
+      // A block may declare what it needs before it can run. The marker is
+      // the same convention the examples gate uses (`// requires:`), and the
+      // decision happens BEFORE the syntax check: a snippet that needs a
+      // newer Node than the one running this gate does not parse here, and
+      // that is an environment limitation, not a broken snippet.
+      const requirement = parseRequiresMarker(block.code);
+      if (requirement !== null) {
+        const nodeRequirement = parseNodeRequirement(block.code);
+        if (nodeRequirement === null) {
+          // The gate cannot verify this requirement, so it does not run the
+          // block. Conservative on purpose: skipping is recoverable, running
+          // a snippet whose prerequisites are missing is not.
+          outcomes.push({
+            label,
+            status: 'skipped',
+            reason: `not executed — requires: ${requirement} — the gate cannot verify this requirement`,
+            fingerprint: blockFingerprint(block.code),
+          });
+          return;
+        }
+        if (isNodeVersionBelow(nodeRequirement.minVersion, process.versions.node)) {
+          outcomes.push({
+            label,
+            status: 'skipped',
+            reason: `not executed — requires node >= ${nodeRequirement.minVersion} (running v${process.versions.node}) — the snippet uses syntax this Node cannot parse`,
+            fingerprint: blockFingerprint(block.code),
+          });
+          return;
+        }
       }
 
       outcomes.push({
