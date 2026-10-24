@@ -33,6 +33,7 @@ persistent-worker-runtime/
 ├── src/                                # Core implementation (pure JavaScript ESM)
 │   ├── index.js                        # Public API entry point
 │   ├── index.d.ts                      # TypeScript definitions for IDE autocompletion
+│   ├── attempt.js                      # attempt() helper — [error, value] tuple, never throws (ADR-0026)
 │   ├── errors.js                       # Error hierarchy
 │   ├── task-handle.js                  # Task model with AsyncResource and callbacks
 │   ├── task-queue.js                   # Asynchronous priority queue with backpressure timeout
@@ -40,7 +41,7 @@ persistent-worker-runtime/
 │   ├── worker-thread-entry.js          # In-thread worker loop with L1 memory
 │   ├── supervisor.js                   # Pool lifecycle, recycling, and crash recovery
 │   └── worker-runtime.js               # Central execution engine
-├── test/                               # Native unit tests (node:test, 641 tests across 175 suites)
+├── test/                               # Native unit tests (node:test, 655 tests across 178 suites)
 │   ├── task-queue.test.js              # Queue unit tests (lifecycle, priority, affinity, drain, destroy)
 │   ├── errors.test.js                  # Error hierarchy tests
 │   ├── supervisor-units.test.js        # Supervisor getters, dispatch validation, retry path

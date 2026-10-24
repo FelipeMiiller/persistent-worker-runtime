@@ -29,8 +29,8 @@
 
 ## 📍 3. Current State Snapshot
 
-### Code Health (as of 2026-10-03)
-- **Tests**: **622 passing**, 0 failures, 0 skipped, 0 cancelled (`node:test`).
+### Code Health (as of 2026-10-24)
+- **Tests**: **655 passing**, 0 failures, 0 skipped, 0 cancelled (`node:test`).
 - **Lint**: 0 errors, 0 warnings across `src/`, `test/`, `examples/`, `benchmarks/`, `research/` (Biome 2.x).
 - **Benchmarks**: **24** gated scripts in `benchmarks/`, all wired into `npm run benchmark:all` and run in CI. Full empirical results in `BENCHMARKS.md`.
 - **Research**: 2 usage-pattern investigations in `research/` (NOT CI gates — they measure how an *application* should use the library, not `src/` itself). See [`research/README.md`](research/README.md).
@@ -71,7 +71,7 @@
 - **Dependabot bumps merged** — `actions/setup-node` → 7.0.0, `actions/checkout` → 7.0.1.
 
 ### Documented but NOT YET Implemented
-- **None blocking for single-instance deployments.** All documented ADRs (0010–0024) have shipped **in-scope** features in v0.2.0/0.2.1/0.3.0.
+- **None blocking for single-instance deployments.** All documented ADRs (0010–0026) have shipped **in-scope** features — 0010–0024 in v0.2.0/0.2.1/0.3.0, and ADR-0026 (`attempt()` + `[Symbol.asyncDispose]()`) in the unreleased `develop` delta.
 - **Multi-instance / production deployments still have deferred gaps** tracked in [DR plan §8](docs/operations/disaster-recovery.md#8-open-items-gaps-to-close). Current state: **§8.1** SIGTERM — recipe shipped as `examples/sigterm-drain.js`, still user-wired by design (ADR-0005). **§8.2** `/healthz` — **closed** via `isAlive()` / `isReady()`. **§8.3** OpenTelemetry and **§8.4** Postgres backend — **permanently out-of-scope by rule** (ADR-0005). **§8.5** chaos game day and **§8.6** cross-region snapshots — genuinely open, but deployment-side, not library work.
 
 ### Tracked work (`.agents/issues/`)
@@ -88,9 +88,9 @@
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Current state**: v0.3.0 shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters and Coverage, and is ~40 commits ahead of `main`.
+**Current state**: v0.3.0 shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters, Coverage and Skill validation, and is ~60 commits ahead of `main`.
 
-**Only remaining repo action**: decide whether to release the `develop` delta. It contains **no API changes** — 4 benchmark-assertion fixes, 2 test-flake fixes, 3 new examples, spec hygiene, and a `research/` directory. Both bumping to v0.4.0 and promoting `develop` → `main` are deliberate maintainer decisions, not library work. The maintainer has explicitly deferred the release; do not publish without being asked.
+**Only remaining repo action**: decide whether to release the `develop` delta. It now **does contain API changes** — `attempt()` was added to the public exports (17 names) and `WorkerRuntime` implements `[Symbol.asyncDispose]()` (ADR-0026) — alongside 4 benchmark-assertion fixes, 2 test-flake fixes, 3 new examples, spec hygiene, and a `research/` directory. Both bumping to v0.4.0 and promoting `develop` → `main` are deliberate maintainer decisions, not library work. The maintainer has explicitly deferred the release; do not publish without being asked.
 
 ### Open follow-ups (in priority order)
 

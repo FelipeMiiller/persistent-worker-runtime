@@ -6,13 +6,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Changes merged to `develop` after the v0.3.0 release. The public API surface is unchanged — `src/index.js`
-still exports the same 16 names — but one behaviour **is** changed: `dispatch()` now attaches an
-internal rejection handler to the handle's promise (ADR-0025), so a fire-and-forget handle that
-nobody awaits can no longer take the process down. Everything else is CI, correctness, type-surface
+Changes merged to `develop` after the v0.3.0 release. The public API surface **does** change now:
+`src/index.js` exports **17** names (the new `attempt` helper) and `WorkerRuntime` implements
+`[Symbol.asyncDispose]()`. One behaviour also changed: `dispatch()` now attaches an internal
+rejection handler to the handle's promise (ADR-0025), so a fire-and-forget handle that nobody
+awaits can no longer take the process down. Everything else is CI, correctness, type-surface
 and measurement work.
 
 ### Added
+
+- **Explicit Resource Management — `WorkerRuntime[Symbol.asyncDispose]()`** (ADR-0026) — the runtime
+  now implements the protocol, so a consumer on Node ≥ 24 can write
+  `await using runtime = createWorkerRuntime({ workers: 4 })` and have the pool torn down when the
+  scope exits, including when it exits through a `throw`. The runtime itself keeps working on the
+  declared floor (`engines: >=22.13.0`): the library implements **only the protocol**, never the
+  `using` syntax — 22.13.0's parser does not accept it, so using the syntax in `src/` would break
+  the package at parse time on the floor. The method delegates to `shutdown()`, which is already
+  idempotent, so calling it after an explicit `shutdown()` is a no-op rather than an error.
+  `[Symbol.dispose]` (the synchronous variant) is deliberately **not** implemented: `shutdown()` is
+  asynchronous, and a synchronous dispose would have to fire the teardown without awaiting it,
+  losing the guarantee that the pool is gone when the scope ends.
+- **`attempt()` — error as a value, not an exception** (ADR-0026) — a helper that turns a throwing or
+  rejecting operation into a tuple, the JavaScript counterpart of Go's `v, err := fn()`:
+
+  ```javascript
+  const [err, value] = await attempt(() => runtime.dispatch(task));
+  if (err) return handleError(err);
+  ```
+
+  It never throws and never rejects — the error comes back as the first element (`null` on
+  success), so the failure path does not need a `try`/`catch` around it. It accepts a thunk **or** a
+  promise directly; the thunk form is what also captures a *synchronous* throw, which a bare
+  promise cannot. The original error object is returned unchanged (same instance, same `cause`, same
+  `stack`) — it is never wrapped, so `instanceof` checks and error codes keep working.
 
 - **CI matrix leg for Node 26** — Node 26 becomes Active LTS on 2026-10-28 and was the only supported
   line with no CI leg at all. `ci.yml` now runs `[22.x, 24.x, 26.x]`. A defect that only reproduces on
