@@ -41,7 +41,7 @@ persistent-worker-runtime/
 │   ├── worker-thread-entry.js          # In-thread worker loop with L1 memory
 │   ├── supervisor.js                   # Pool lifecycle, recycling, and crash recovery
 │   └── worker-runtime.js               # Central execution engine
-├── test/                               # Native unit tests (node:test, 655 tests across 178 suites)
+├── test/                               # Native unit tests (node:test, 682 tests across 183 suites)
 │   ├── task-queue.test.js              # Queue unit tests (lifecycle, priority, affinity, drain, destroy)
 │   ├── errors.test.js                  # Error hierarchy tests
 │   ├── supervisor-units.test.js        # Supervisor getters, dispatch validation, retry path
@@ -171,7 +171,7 @@ repository so nothing they write lands in the working tree.
 | Script | What it does | Wired into |
 | --- | --- | --- |
 | `npm run examples` | Runs every `examples/*.js` in an isolated child process with a hard wall-clock budget. An example that needs an external service declares it with a `// requires:` marker and is skipped **visibly**, never silently. | `ci.yml` → `Run Examples` (after `npm test`) |
-| `npm run skill:validate` | Extracts every fenced code block from the shipped skill (`skills/persistent-worker-runtime/`), syntax-checks the JavaScript ones, executes them, and validates `.skill-meta.json`. A block that **does not parse is fatal**; `FRAGMENT`, `EXTERNAL-DEPENDENCY` and `RUNTIME-ERROR` are reported but non-fatal. | `.github/workflows/skill-validation.yml` (own workflow — the others use `paths-ignore: ['**.md', …]` and the skill is all `.md`, so a skill change did not even trigger a build) |
+| `npm run skill:validate` | Extracts every fenced code block from the shipped skill (`skills/persistent-worker-runtime/`), syntax-checks the JavaScript ones, executes them, and validates `.skill-meta.json`. A block that **does not parse is fatal**; `FRAGMENT`, `EXTERNAL-DEPENDENCY` and `RUNTIME-ERROR` are reported but non-fatal. A block that declares `// requires: node >= X` (same convention as the examples gate) is **skipped, visibly**, when the running Node is below X — a snippet that needs newer syntax is a limitation of the environment, not a broken snippet. An unverifiable requirement also skips: the gate does not run what it cannot check. | `.github/workflows/skill-validation.yml` (own workflow — the others use `paths-ignore: ['**.md', …]` and the skill is all `.md`, so a skill change did not even trigger a build) |
 
 The skill ships **inside the npm tarball** and is loaded by AI agents, which treat it as authoritative.
 A stale example there is worse than a stale README line: the agent reproduces it in someone else's

@@ -30,7 +30,7 @@
 ## 📍 3. Current State Snapshot
 
 ### Code Health (as of 2026-10-24)
-- **Tests**: **655 passing**, 0 failures, 0 skipped, 0 cancelled (`node:test`).
+- **Tests**: **682 passing**, 0 failures, 0 skipped, 0 cancelled (`node:test`).
 - **Lint**: 0 errors, 0 warnings across `src/`, `test/`, `examples/`, `benchmarks/`, `research/` (Biome 2.x).
 - **Benchmarks**: **24** gated scripts in `benchmarks/`, all wired into `npm run benchmark:all` and run in CI. Full empirical results in `BENCHMARKS.md`.
 - **Research**: 2 usage-pattern investigations in `research/` (NOT CI gates — they measure how an *application* should use the library, not `src/` itself). See [`research/README.md`](research/README.md).

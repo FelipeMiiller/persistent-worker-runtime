@@ -111,6 +111,18 @@ and measurement work.
 
 ### Fixed
 
+- **The skill gate failed on the Node floor** — `npm run skill:validate` exited 1 on Node **22.13.0**,
+  the version `engines` declares as supported: the skill's `await using` example does not parse
+  there, and the gate classified it as a **fatal syntax error**. A snippet that needs newer syntax
+  is a limitation of the *environment*, not a broken snippet — and the repo's own floor must be
+  able to run the repo's own gate. The gate now honours the same `// requires:` convention the
+  examples gate already used, in a version-aware form: a block that declares
+  `// requires: node >= X` is **skipped, visibly** (the running version appears in the reason)
+  when the running Node is below X, and is still syntax-checked and executed when it is at or
+  above X. A requirement the gate cannot verify — anything other than `node >= X` — also skips:
+  the gate does not run what it cannot check. The version comparison is numeric per part, so
+  `9.0.0` is correctly *below* `24` (a lexicographic comparison gets that backwards). Covered by
+  27 new tests, including one that fails if the marker is ever dropped from the skill.
 - **`cpu-saturation` E-1 asserted the wrong pair — CI-only, no runtime change** — the gate compared
   the **two largest** entries of the worker sweep (16 and 8) whatever the host was, and measured each
   configuration **once**, in a fixed order. On a 3-core CI runner both members of that pair are already
