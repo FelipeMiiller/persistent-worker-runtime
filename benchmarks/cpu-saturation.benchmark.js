@@ -7,25 +7,48 @@
  * in T6. If saturation is proven here, T6's defaults rest on data,
  * not folklore.
  *
- * Three phases, each with hard assertions (process.exit(1) on regression):
+ * Phases:
  *
- *   E-1 — CPU-bound saturation:
- *         Measure throughput across worker counts {1, 2, 4, 8, N/2, N}
- *         with a tight CPU inner loop. Assert throughput scales
- *         sub-linearly past `availableParallelism()` (the saturation
- *         knee is at N cores). If throughput KEEPS scaling linearly
- *         past N, the saturation rule is wrong on this host — fail.
+ *   E-1 — CPU-bound saturation (hard assertions):
+ *         Sweep a set of worker counts that CONTAINS the host core
+ *         count (`CORES`) and 2× the core count, both capped at
+ *         MAX_WORKERS.
  *
- *   E-2 — I/O-bound control:
+ *           E-1a — 2-worker throughput ≥ SPEEDUP_MIN_E1 × 1-worker
+ *                   throughput (proves the workers really run in
+ *                   parallel).
+ *           E-1  — KNEE pair: throughput(2×CORES) / throughput(CORES)
+ *                   ≤ SAT_RATIO_MAX_E1. The knee of a CPU-bound sweep
+ *                   sits at the core count, so doubling the pool past
+ *                   it must NOT buy throughput. If the ratio is ≈2×
+ *                   the knee is at 2×CORES and the sizing rule is
+ *                   wrong on this host → fail.
+ *
+ *         E-1 is measured over ROUNDS_E1 rounds. The sweep order is
+ *         ROTATED by one position per round AND its direction is
+ *         ALTERNATED per round (even rounds ascending, odd rounds
+ *         descending), so the relative order of the two members of the
+ *         measured pair inverts between rounds. A discarded warmup
+ *         sweep (quarter of the tasks per point) precedes the rounds.
+ *         Each configuration's reported value is the MEDIAN of the
+ *         rounds. See "Why rounds + rotation + direction" below.
+ *
+ *   E-2 — I/O-bound control (hard assertion):
  *         Same sweep with `await setTimeout(10)` per task. Assert
  *         throughput scales sub-linearly even with oversubscription
  *         (more workers = more concurrent I/O slots). This proves
- *         the inverse rule: I/O-bound is NOT CPU-limited.
+ *         the inverse rule: I/O-bound is NOT CPU-limited. Uses the
+ *         SAME pair as E-1 when the knee is measurable, so the two
+ *         phases are comparable apples-to-apples; otherwise the
+ *         doubling pair (8, 16) is used as fallback.
  *
- *   E-3 — Decision matrix:
+ *   E-3 — Decision matrix (reporting only):
  *         Side-by-side comparison prints a sizing recommendation
- *         table the user can act on. No hard assertion here — this
- *         is a reporting phase.
+ *         table the user can act on. No hard assertion here.
+ *
+ *   E-4 — Health probes under load (hard assertions):
+ *         runtime.isAlive() / runtime.isReady() under idle, saturated
+ *         and draining states (DR §8.2).
  *
  * What this DOESN'T measure (deliberately):
  *   - Latency p50/p99 (separate benchmark; saturation is about
@@ -33,12 +56,49 @@
  *   - Memory pressure (use `benchmarks/default-sizing-memory`).
  *   - Process-level isolation (`node:cluster`, ADR-0020 territory).
  *
+ * Why rounds + rotation + direction (and why the old single-pass
+ * sweep was a noise gate):
+ *   The original E-1 measured every configuration ONCE, in a fixed
+ *   order, with the host's own core count LAST, and it compared the
+ *   two LARGEST entries of the sweep whatever the host was. Two
+ *   independent defects followed from that shape:
+ *
+ *     1. The first configuration paid the process cold-start and was
+ *        ~20% slow (measured on a 28-core host: 1 worker took 1021 ms
+ *        where 2 workers took 431 ms — an impossible 118% "efficiency").
+ *        Ratios that use the first measurement as denominator inherit
+ *        that bias.
+ *     2. On a 3-core CI runner the compared pair was (16, 8) — both
+ *        already oversubscribed — so the TRUE ratio was ≈1.0 by
+ *        construction and the gate was measuring runner noise against
+ *        a 1.5× budget. It failed intermittently (CI run 40036815752:
+ *        1.58×).
+ *
+ *   Rotating the sweep order per round removes the "always measured
+ *   in the same position" bias. Alternating the DIRECTION per round
+ *   removes the systematic component that rotation alone cannot: a
+ *   cyclic rotation preserves the relative order of the two members
+ *   of the pair, so a "measured later is faster" effect stays
+ *   systematic and inflates the ratio in EVERY round. Alternating the
+ *   direction inverts that relative order in every other round, so the
+ *   systematic component cancels across the even number of rounds.
+ *
+ *   The value taken per configuration is the MEDIAN, not the maximum:
+ *   the gate is a RATIO between two magnitudes, and the variance of
+ *   the maximum of N samples is larger than the variance of the
+ *   median.
+ *
  * Failure modes (read these if E-1 fails):
- *   - Throughput keeps scaling past N: something other than CPU is
- *     the bottleneck (memory bandwidth? cache contention?).
- *     Investigate before shipping `concurrency: 'auto'`.
- *   - Throughput plateaus BEFORE N: workers aren't truly parallel.
- *     Check `worker_threads` config + `resourceLimits`.
+ *   - Knee ratio > 1.5×: throughput kept scaling past the core count
+ *     → something other than CPU is the bottleneck (memory bandwidth?
+ *     cache contention?). Investigate before shipping
+ *     `concurrency: 'auto'`.
+ *   - 2-worker speedup below the floor: workers aren't truly
+ *     parallel. Check `worker_threads` config + `resourceLimits`.
+ *   - Knee not measurable (2×CORES > MAX_WORKERS): the host has more
+ *     cores than the sweep can reach (MAX_WORKERS = 20). The knee
+ *     assertion is SKIPPED and says so — it is never reported as
+ *     "saturation confirmed".
  */
 
 import { availableParallelism } from 'node:os';
@@ -90,15 +150,117 @@ const MAX_WORKERS = 20;
 // genuine regression). See `.agents/issues/CI-FAILURE-macos-benchmarks.md`
 // for the original failure analysis.
 const SPEEDUP_MIN_E1 = process.platform === 'darwin' ? 1.15 : 1.3;
+// Budget for the knee ratio. The knee at CORES gives ≈1.0; a knee at
+// 2×CORES gives ≈2.0. 1.5 separates the two.
+const SAT_RATIO_MAX_E1 = 1.5;
+// Floor for the I/O control: I/O-bound throughput must keep growing
+// with the worker count.
+const IO_RATIO_MIN_E2 = 1.15;
+// Number of measured rounds over the same sweep. EVEN on purpose:
+// every configuration must occupy each relative role the same number
+// of times, or the systematic order component does not cancel.
+const ROUNDS_E1 = 4;
+// Warmup tasks per point — a quarter of the measured load. Enough to
+// warm the JIT and the worker pools, cheap enough to discard.
+const WARMUP_TASKS_PER_TRIAL = Math.floor(TASKS_PER_TRIAL / 4);
 const CORES = availableParallelism();
+// Oversubscription probe: the classic "past the knee" point, kept from
+// the original sweep.
+const OVERSUBSCRIPTION_PROBE = Math.min(MAX_WORKERS, Math.max(16, Math.floor(CORES / 2)));
+// The sweep CONTAINS the knee (CORES) and the double (2×CORES) whenever
+// 2×CORES is reachable within MAX_WORKERS. Sorted ascending so the
+// sweep, the round orders and the decision matrix are deterministic.
 const WORKER_COUNTS = [
   1,
   2,
   4,
   8,
-  Math.min(MAX_WORKERS, Math.max(16, Math.floor(CORES / 2))),
+  OVERSUBSCRIPTION_PROBE,
   Math.min(MAX_WORKERS, CORES),
-].filter((v, i, a) => a.indexOf(v) === i);
+  Math.min(MAX_WORKERS, CORES * 2),
+]
+  .filter((v, i, a) => a.indexOf(v) === i)
+  .sort((a, b) => a - b);
+// The knee pair: the host core count and twice it.
+const KNEE_LOW = CORES;
+const KNEE_HIGH = CORES * 2;
+// The knee is measurable only when the double fits inside the sweep
+// cap (CORES ≤ 10). Above that the host is bigger than the benchmark
+// can reach and the assertion is skipped — never silently passed.
+const KNEE_MEASURABLE = KNEE_HIGH <= MAX_WORKERS;
+
+/**
+ * Median of a sample. Even-sized samples average the two central
+ * values, which mixes the two order roles of the median exactly when
+ * the sample has one entry per role.
+ *
+ * @param {number[]} values
+ * @returns {number}
+ */
+function median(values) {
+  if (values.length === 0) return Number.NaN;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * Measurement order for one round.
+ *
+ * The sweep is rotated by one position per round (so no configuration
+ * always sits in the same slot) AND the direction alternates per round
+ * (even rounds ascending, odd rounds descending). The direction
+ * alternation is what cancels the systematic component of the order
+ * effect: a cyclic rotation alone keeps the relative order of the two
+ * members of the measured pair, so a "measured later is faster" bias
+ * would inflate the asserted ratio in EVERY round.
+ *
+ * @param {number[]} sweep ascending worker counts
+ * @param {number} round zero-based round index
+ * @returns {number[]} worker counts in measurement order
+ */
+function roundOrder(sweep, round) {
+  const n = sweep.length;
+  const start = round % n;
+  const order = [];
+  for (let i = 0; i < n; i++) {
+    const index = round % 2 === 0 ? (start + i) % n : (start - i + n) % n;
+    order.push(sweep[index]);
+  }
+  return order;
+}
+
+/**
+ * Pair used by the I/O control (E-2): the knee pair whenever it is
+ * measurable, so both phases compare the SAME two worker counts. When
+ * the knee is out of range the doubling pair (8, 16) is used instead —
+ * the E-2 assertion ("I/O-bound keeps scaling with more workers")
+ * does not depend on the knee.
+ *
+ * @returns {{ low: number, high: number, reason: string } | null}
+ */
+function selectIoPair() {
+  if (KNEE_MEASURABLE) {
+    return { low: KNEE_LOW, high: KNEE_HIGH, reason: 'knee pair (identical to the E-1 pair)' };
+  }
+  if (WORKER_COUNTS.includes(8) && WORKER_COUNTS.includes(16)) {
+    return {
+      low: 8,
+      high: 16,
+      reason: 'doubling-pair fallback (the knee is not measurable on this host)',
+    };
+  }
+  for (const low of WORKER_COUNTS) {
+    if (WORKER_COUNTS.includes(low * 2)) {
+      return {
+        low,
+        high: low * 2,
+        reason: 'doubling-pair fallback (the knee is not measurable on this host)',
+      };
+    }
+  }
+  return null;
+}
 
 function formatRow(workers, durationMs, throughput, idealScaling, efficiency) {
   const w = String(workers).padStart(3);
@@ -109,21 +271,165 @@ function formatRow(workers, durationMs, throughput, idealScaling, efficiency) {
   return `  workers=${w}: ${dur}ms -> ${tput} tasks/sec  (ideal ${ideal}, ${eff}% efficient)`;
 }
 
-async function measureWorkload(workers, workloadFn, _isAsync) {
+/**
+ * Measures one configuration. The runtime is created and destroyed
+ * outside the timed window, exactly like the original benchmark.
+ *
+ * @param {number} workers
+ * @param {(p: { seed: number }) => any} workloadFn
+ * @param {number} tasksPerTrial
+ * @returns {Promise<{ workers: number, durationMs: number, throughput: number }>}
+ */
+async function measureWorkload(workers, workloadFn, tasksPerTrial = TASKS_PER_TRIAL) {
   const runtime = await createWorkerRuntime({ workers });
   try {
     const tasks = [];
-    for (let i = 0; i < TASKS_PER_TRIAL; i++) {
+    for (let i = 0; i < tasksPerTrial; i++) {
       tasks.push({ type: 'probe', payload: { seed: i }, fn: workloadFn });
     }
     const start = performance.now();
     await runtime.executeAll(tasks);
     const durationMs = performance.now() - start;
-    const throughput = TASKS_PER_TRIAL / (durationMs / 1000);
+    const throughput = tasksPerTrial / (durationMs / 1000);
     return { workers, durationMs, throughput };
   } finally {
     await runtime.shutdown();
   }
+}
+
+/**
+ * Phase E-1: CPU-bound saturation point.
+ *
+ * @returns {Promise<Map<number, { workers: number, throughput: number, durationMs: number, rounds: number[] }>>}
+ */
+async function phaseECpuSaturation() {
+  console.log('\n── Phase E-1: CPU-bound saturation point ─────────────────────────────');
+  console.log(`  host: ${CORES} logical cores available`);
+  console.log(`  workload: ${TASKS_PER_TRIAL} tasks × 50k-iter modular arithmetic per task`);
+  console.log(`  sweep: ${WORKER_COUNTS.join(', ')}`);
+  console.log(
+    `  method: ${ROUNDS_E1} rounds, sweep order rotated by 1 position per round and direction ` +
+      `alternated per round, per-configuration value = median of the ${ROUNDS_E1} rounds`,
+  );
+
+  // Warmup: one discarded sweep with a quarter of the tasks per point,
+  // so the process cold-start is not charged to the first measured
+  // configuration.
+  const warmupOrder = roundOrder(WORKER_COUNTS, 0);
+  console.log(
+    `\n  warmup sweep (${WARMUP_TASKS_PER_TRIAL} tasks/point, discarded): ${warmupOrder.join('→')}`,
+  );
+  for (const workers of warmupOrder) {
+    await measureWorkload(workers, cpuBoundWorkload, WARMUP_TASKS_PER_TRIAL);
+  }
+
+  // Measured rounds.
+  const perWorker = new Map();
+  const rounds = [];
+  for (let round = 0; round < ROUNDS_E1; round++) {
+    const order = roundOrder(WORKER_COUNTS, round);
+    console.log(`  round ${round + 1}/${ROUNDS_E1} order: ${order.join('→')}`);
+    const results = [];
+    for (const workers of order) {
+      results.push(await measureWorkload(workers, cpuBoundWorkload, TASKS_PER_TRIAL));
+    }
+    rounds.push(results);
+    for (const result of results) {
+      if (!perWorker.has(result.workers)) perWorker.set(result.workers, []);
+      perWorker.get(result.workers).push(result);
+    }
+  }
+
+  // Per-configuration median over the rounds + the full per-round
+  // dispersion, so a reader sees the spread and not only the median
+  // the gate asserts on.
+  console.log('');
+  const cpuResults = new Map();
+  const baselineThroughput = median((perWorker.get(1) ?? []).map((r) => r.throughput));
+  for (const workers of WORKER_COUNTS) {
+    const samples = perWorker.get(workers) ?? [];
+    const throughputs = samples.map((r) => r.throughput);
+    const medianThroughput = median(throughputs);
+    const medianDurationMs = (TASKS_PER_TRIAL / medianThroughput) * 1000;
+    const spread = Math.max(...throughputs) - Math.min(...throughputs);
+    const spreadPct = medianThroughput > 0 ? (spread / medianThroughput) * 100 : 0;
+    const idealScaling = baselineThroughput * workers;
+    const efficiency = medianThroughput / idealScaling;
+    cpuResults.set(workers, {
+      workers,
+      throughput: medianThroughput,
+      durationMs: medianDurationMs,
+      rounds: throughputs,
+    });
+    console.log(formatRow(workers, medianDurationMs, medianThroughput, idealScaling, efficiency));
+    console.log(
+      `             rounds: ${throughputs.map((t) => t.toFixed(0)).join(' | ')}   ` +
+        `spread ${spread.toFixed(0)} (${spreadPct.toFixed(1)}%)`,
+    );
+  }
+
+  // E-1a — the workers are really parallel.
+  const w1 = cpuResults.get(1);
+  const w2 = cpuResults.get(2);
+  const speedup = w2.throughput / w1.throughput;
+  if (!(speedup >= SPEEDUP_MIN_E1)) {
+    console.error(
+      `\n  E-1 FAIL: 2-worker throughput not >${SPEEDUP_MIN_E1}× baseline ` +
+        `(${speedup.toFixed(2)}× on ${process.platform}) — workers not parallel.`,
+    );
+    process.exit(1);
+  }
+  console.log(
+    `\n  ✓ 2-worker scaling: ${speedup.toFixed(2)}× baseline ` +
+      `(floor=${SPEEDUP_MIN_E1}× for ${process.platform})`,
+  );
+
+  // E-1 — the knee is at the core count.
+  let kneeMeasured = false;
+  if (KNEE_MEASURABLE) {
+    const low = cpuResults.get(KNEE_LOW);
+    const high = cpuResults.get(KNEE_HIGH);
+    const satRatio = high.throughput / low.throughput;
+    const perRoundRatios = rounds.map((round) => {
+      const lowSample = round.find((r) => r.workers === KNEE_LOW);
+      const highSample = round.find((r) => r.workers === KNEE_HIGH);
+      return highSample.throughput / lowSample.throughput;
+    });
+    console.log(`  knee pair (CORES→2×CORES): ${KNEE_LOW}→${KNEE_HIGH} workers`);
+    console.log(
+      `  per-round knee ratios: ${perRoundRatios.map((r) => `${r.toFixed(2)}×`).join(' | ')}   ` +
+        `spread ${(Math.max(...perRoundRatios) - Math.min(...perRoundRatios)).toFixed(2)}`,
+    );
+    console.log(
+      `  saturation ratio (${KNEE_HIGH}/${KNEE_LOW}): ${satRatio.toFixed(2)}×   ` +
+        `(budget ≤${SAT_RATIO_MAX_E1}×, host cores=${CORES})`,
+    );
+    if (satRatio > SAT_RATIO_MAX_E1) {
+      console.error(
+        `\n  E-1 FAIL: throughput did not plateau at cores — ${satRatio.toFixed(2)}× ` +
+          `> ${SAT_RATIO_MAX_E1}× budget at ${KNEE_LOW}→${KNEE_HIGH} workers ` +
+          `(host cores=${CORES}). Investigate.`,
+      );
+      process.exit(1);
+    }
+    console.log(
+      `  ✓ saturation confirmed at the knee (${KNEE_LOW}→${KNEE_HIGH} workers): ` +
+        `${satRatio.toFixed(2)}× (extra ${((satRatio - 1) * 100).toFixed(0)}% from doubling past saturation)`,
+    );
+    kneeMeasured = true;
+  } else {
+    console.log(`  knee pair (CORES→2×CORES): ${KNEE_LOW}→${KNEE_HIGH} workers`);
+    console.log(
+      `  NOT MEASURABLE on this host: 2×CORES=${KNEE_HIGH} > MAX_WORKERS=${MAX_WORKERS} — ` +
+        `the sweep cannot reach the knee.`,
+    );
+    console.log(
+      `  → E-1 knee assertion SKIPPED (not measurable on this host), NOT passed. ` +
+        `The sweep tops out at ${WORKER_COUNTS[WORKER_COUNTS.length - 1]} workers.`,
+    );
+  }
+
+  return { cpuResults, kneeMeasured };
 }
 
 async function probeUnderLoad() {
@@ -189,8 +495,8 @@ async function probeUnderLoad() {
   }
 
   // Scenario C: drain in flight → isAlive stays true (process is alive
-  // while workers finish), isReady flips to { ok:false, reason:
-  // "shutting-down" } (no new work, even mid-drain).
+  // while workers finish), isReady flips to { ok:false,
+  // reason:"shutting-down" } (no new work, even mid-drain).
   {
     const runtime = await createWorkerRuntime({ workers: 2 });
     try {
@@ -214,7 +520,7 @@ async function probeUnderLoad() {
   console.log('  ✓ E-4: probes correctly reflect idle / saturated / draining states.');
 }
 
-async function phaseEDecisionMatrix(cpuResults, ioResults) {
+async function phaseEDecisionMatrix(cpuResults, ioResults, kneeMeasured) {
   console.log('\n── Phase E-3: Sizing decision matrix ──────────────────────────────────');
   console.log('  CPU-bound vs I/O-bound scaling for the same worker-count sweep:\n');
 
@@ -222,10 +528,9 @@ async function phaseEDecisionMatrix(cpuResults, ioResults) {
   console.log(header);
   console.log(`  ${'-'.repeat(7)}  ${'-'.repeat(12)}  ${'-'.repeat(12)}  ${'-'.repeat(12)}`);
 
-  for (let i = 0; i < WORKER_COUNTS.length; i++) {
-    const w = WORKER_COUNTS[i];
-    const cpu = cpuResults[i]?.throughput ?? 0;
-    const io = ioResults[i]?.throughput ?? 0;
+  for (const w of WORKER_COUNTS) {
+    const cpu = cpuResults.get(w)?.throughput ?? 0;
+    const io = ioResults.get(w)?.throughput ?? 0;
     // Heuristic: if CPU-bound plateaus here, label as 'I/O (wasted)';
     // if both are still climbing, label as 'still scaling'.
     const cpuLabel = w <= CORES ? 'both ok' : 'I/O only';
@@ -236,7 +541,17 @@ async function phaseEDecisionMatrix(cpuResults, ioResults) {
 
   console.log('\n  Default sizing recommendation:');
   console.log(`    WORKER_CONCURRENCY = availableParallelism() = ${CORES} on this host`);
-  console.log('    → CPU-bound workloads saturate at this value (E-1)');
+  if (kneeMeasured) {
+    console.log('    → CPU-bound workloads saturate at this value (E-1 measured the knee)');
+  } else {
+    console.log(
+      `    → CPU-bound workloads are EXPECTED to saturate at this value, but E-1 could not measure`,
+    );
+    console.log(
+      `      the knee on this host (2×CORES=${KNEE_HIGH} > MAX_WORKERS=${MAX_WORKERS}) — this line is`,
+    );
+    console.log('      the sizing rule, not a measurement taken here.');
+  }
   console.log('    → I/O-bound workloads benefit from more, but only if memory allows (E-2)');
   console.log(
     '    → Mapped from Gunicorn: workers = $WEB_CONCURRENCY = nproc (CPU) or nproc × N (I/O)',
@@ -248,95 +563,57 @@ async function runBenchmark() {
   console.log('BENCHMARK: CPU Saturation Point (Phase E — T6 prep)');
   console.log('=====================================================================\n');
 
-  // Run both phases first, collect results, then format the matrix.
-  const cpuResults = [];
-  const ioResults = [];
-
-  console.log('── Phase E-1: CPU-bound saturation point ─────────────────────────────');
-  console.log(`  host: ${CORES} logical cores available`);
-  console.log(`  workload: ${TASKS_PER_TRIAL} tasks × 50k-iter modular arithmetic per task\n`);
-
-  // Anchor the saturation test on the actual worker counts in the
-  // sweep (capped at MAX_WORKERS), not on the host's CORES value.
-  // WORKER_COUNTS is constructed by appending `Math.min(MAX_WORKERS,
-  // CORES)` last, which on small-core hosts (< 16 cores) ends up
-  // smaller than the second-to-last entry — e.g. on a 3-core macOS
-  // GitHub Actions runner the array is `[1, 2, 4, 8, 16, 3]`. Picking
-  // the largest / second-largest by index then silently inverts the
-  // ratio (3-worker tput / 16-worker tput = 0.18× instead of the
-  // intended 16-worker tput / 8-worker tput ≈ 2×). Sort ascending
-  // and pick the tail two entries to make the selection robust to
-  // the array shape.
-  const sortedCounts = [...WORKER_COUNTS].sort((a, b) => a - b);
-  const maxW = sortedCounts[sortedCounts.length - 1];
-  const halfW = sortedCounts[sortedCounts.length - 2];
-
-  let baselineThroughput = null;
-  for (const workers of WORKER_COUNTS) {
-    const r = await measureWorkload(workers, cpuBoundWorkload, false);
-    const idealScaling = (baselineThroughput ?? r.throughput) * workers;
-    const efficiency = r.throughput / idealScaling;
-    cpuResults.push({ ...r, idealScaling, efficiency });
-    console.log(formatRow(workers, r.durationMs, r.throughput, idealScaling, efficiency));
-    if (baselineThroughput === null) baselineThroughput = r.throughput;
-  }
-
-  const w2 = cpuResults.find((r) => r.workers === 2);
-  const e1ok = w2 && w2.throughput / cpuResults[0].throughput >= SPEEDUP_MIN_E1;
-  if (!e1ok) {
-    console.error(
-      `\n  E-1 FAIL: 2-worker throughput not >${SPEEDUP_MIN_E1}× baseline ` +
-        `(${(w2.throughput / cpuResults[0].throughput).toFixed(2)}× on ${process.platform}) — workers not parallel.`,
-    );
-    process.exit(1);
-  }
-  console.log(
-    `\n  ✓ 2-worker scaling: ${(w2.throughput / cpuResults[0].throughput).toFixed(2)}× baseline ` +
-      `(floor=${SPEEDUP_MIN_E1}× for ${process.platform})`,
-  );
-
-  const halfCpu = cpuResults.find((r) => r.workers === halfW);
-  const fullCpu = cpuResults.find((r) => r.workers === maxW);
-  const satRatio = fullCpu.throughput / halfCpu.throughput;
-  console.log(`  saturation ratio (${maxW}/${halfW}): ${satRatio.toFixed(2)}×`);
-  if (satRatio > 1.5) {
-    console.error('\n  E-1 FAIL: throughput did not plateau at cores — investigate.');
-    process.exit(1);
-  }
-  console.log(
-    `  ✓ saturation confirmed at ~${maxW} workers (extra ${((satRatio - 1) * 100).toFixed(0)}% from doubling past saturation; host cores=${CORES})`,
-  );
+  const { cpuResults, kneeMeasured } = await phaseECpuSaturation();
 
   console.log('\n── Phase E-2: I/O-bound control ───────────────────────────────────────');
   console.log(`  workload: ${TASKS_PER_TRIAL} tasks × 10ms setTimeout each\n`);
+  const ioResults = new Map();
   for (const workers of WORKER_COUNTS) {
-    const r = await measureWorkload(workers, ioBoundWorkload, true);
-    ioResults.push(r);
+    const r = await measureWorkload(workers, ioBoundWorkload, TASKS_PER_TRIAL);
+    ioResults.set(workers, r);
     const dur = r.durationMs.toFixed(0).padStart(7);
     const tput = r.throughput.toFixed(0).padStart(7);
     console.log(`  workers=${String(workers).padStart(3)}: ${dur}ms -> ${tput} tasks/sec`);
   }
 
-  const halfIo = ioResults.find((r) => r.workers === halfW);
-  const fullIo = ioResults.find((r) => r.workers === maxW);
-  const ioRatio = fullIo.throughput / halfIo.throughput;
-  console.log(`  oversubscription ratio (${maxW}/${halfW}): ${ioRatio.toFixed(2)}×`);
-  if (ioRatio < 1.15) {
+  const ioPair = selectIoPair();
+  if (!ioPair) {
+    console.error('\n  E-2 FAIL: no doubling pair of worker counts in the sweep to compare.');
+    process.exit(1);
+  }
+  const lowIo = ioResults.get(ioPair.low);
+  const highIo = ioResults.get(ioPair.high);
+  const ioRatio = highIo.throughput / lowIo.throughput;
+  console.log(`  comparison pair: ${ioPair.high}/${ioPair.low} — ${ioPair.reason}`);
+  console.log(
+    `  oversubscription ratio (${ioPair.high}/${ioPair.low}): ${ioRatio.toFixed(2)}×   ` +
+      `(floor=${IO_RATIO_MIN_E2}×, host cores=${CORES})`,
+  );
+  if (ioRatio < IO_RATIO_MIN_E2) {
     console.error(
       `\n  E-2 FAIL: I/O-bound throughput did not grow with workers (${ioRatio.toFixed(2)}×) — runtime bottleneck.`,
     );
     process.exit(1);
   }
   console.log(
-    `  ✓ I/O-bound scales ${ioRatio.toFixed(2)}× from ${halfW}→${maxW} workers — confirms CPU is the E-1 bottleneck`,
+    `  ✓ I/O-bound scales ${ioRatio.toFixed(2)}× from ${ioPair.low}→${ioPair.high} workers — confirms CPU is the E-1 bottleneck`,
   );
 
-  await phaseEDecisionMatrix(cpuResults, ioResults);
+  await phaseEDecisionMatrix(cpuResults, ioResults, kneeMeasured);
   await probeUnderLoad();
 
   console.log('\n=====================================================================');
-  console.log('VERDICT: Phase E passed — saturation rule confirmed empirically.');
-  console.log('Ready to ship `concurrency: "auto"` + WORKER_CONCURRENCY env var in T6.');
+  if (kneeMeasured) {
+    console.log(
+      'VERDICT: Phase E passed — the saturation knee was measured at availableParallelism().',
+    );
+  } else {
+    console.log(
+      `VERDICT: Phase E passed — the knee was NOT measurable on this host (2×CORES=${KNEE_HIGH} > MAX_WORKERS=${MAX_WORKERS}).`,
+    );
+    console.log('        E-1a, E-2 and E-4 verified; the saturation knee remains UNMEASURED here.');
+  }
+  console.log('Sizing rule for `concurrency: "auto"` + WORKER_CONCURRENCY (T6): workers ≈ nproc.');
   console.log('=====================================================================');
 }
 

@@ -308,16 +308,38 @@ File: `benchmarks/default-sizing-memory.benchmark.js`
 
 **Why this exists**: Section 8 above confirmed linear scaling. Section 1️⃣8️⃣ zooms in on **where the scaling breaks** and **whether more is better**. It is the empirical input for `WORKER_CONCURRENCY` and `concurrency: 'auto'` defaults in T6 — the defaults aren't folklore, they're measured.
 
+### Methodology (rewritten 2026-10-23 — the knee gate was measuring noise)
+
+The E-1 gate used to compare the **two largest entries of the sweep** (16 and 8 on most hosts) and to measure **every configuration once, in a fixed order**. Two independent defects followed from that shape:
+
+1. **Wrong pair.** The knee of a CPU-bound sweep sits at the host core count. Comparing 16 → 8 measures a ratio that is ≈1.0 *by construction* on any host with ≤ 16 cores (both are already oversubscribed), so the gate was measuring runner noise against a 1.5× budget. It failed intermittently in CI — run `40036815752`, Node 24.x / macos-latest measured 1.58× → FAIL, while the Node 22.x leg of the *same* run measured 1.05× → PASS on identical code.
+2. **Single measurement, fixed order, no warmup.** The first configuration paid the process cold-start (≈20% slow on a 28-core host: 1 worker took 1021 ms where 2 workers took 431 ms — an impossible 118% "efficiency"), and the sweep always ended with the host's own core count, so the configuration the gate cared about was always measured last, in the most mature process.
+
+The gate now:
+
+- **sweeps worker counts that contain the knee**: `CORES` and `2×CORES` (both capped at `MAX_WORKERS = 20`);
+- **asserts on the knee pair**: `tput(2×CORES) / tput(CORES) ≤ 1.5×` — ≈1.0 when the knee is at `CORES`, ≈2.0 when it is at `2×CORES`; the budget separates the two;
+- **measures every configuration over 4 rounds**, with the sweep **rotated by one position per round and its direction alternated per round** (even rounds ascending, odd rounds descending). A cyclic rotation alone is not enough: it keeps the relative order of the pair's two members, so a systematic "measured later is faster/slower" effect biases the ratio in *every* round. Alternating the direction inverts that relative order every other round, so the systematic component cancels across the even number of rounds;
+- **reports the median** of the 4 rounds per configuration — not the maximum: the gate is a *ratio* between two magnitudes, and the variance of the maximum of N samples is larger than the variance of the median;
+- **discards a warmup sweep** (¼ of the tasks per point) before the measured rounds;
+- **prints every round's value**, so the spread is visible and not only the median the gate asserts on.
+
+The E-2 (I/O control) uses the **same pair** as E-1 whenever the knee is measurable, so the two phases are apples-to-apples. When the knee is out of range the doubling pair (8, 16) is the E-2 fallback (floor 1.15×).
+
+**When the knee is not measurable** (`2×CORES > MAX_WORKERS`, i.e. hosts with more than 10 cores): the sweep cannot reach the knee, so the E-1 knee assertion is **skipped with an explicit message** — never reported as "saturation confirmed". E-1a (2-worker vs 1-worker), E-2 and E-4 still run.
+
 ### Setup
 
 - 28-core Xeon E5-2680 v4 host
 - 2,000 tasks per data point
-- Worker counts swept: 1, 2, 4, 8, 16, **20 (capped — see "Why cap at 20" below)**
+- Worker counts swept: 1, 2, 4, 8, 16, **20 (capped — see "Why cap at 20" below)** — plus `CORES` and `2×CORES` whenever they fit under the cap
 - Two workloads compared:
   - **CPU-bound**: 50,000-iteration modular arithmetic per task (~5-10 ms single-core)
   - **I/O-bound (control)**: 10 ms `setTimeout` per task (pure idle wait)
 
-### Results (CPU-bound)
+### Results (CPU-bound) — 28-core host
+
+> **The knee is out of reach on this host.** The sweep stops at `MAX_WORKERS = 20`, so on a 28-core host the knee at 28 cores is never reached and the E-1 knee assertion is reported as *not measurable* — never as a pass. The numbers below show the runtime's own scaling curve, which flattens well below 28 workers. The knee gate itself is exercised on the 3–5 core CI runners, where the sweep reaches `CORES` and `2×CORES`.
 
 | Workers | Throughput | Scaling vs 1-worker | Efficiency vs ideal linear | Notes |
 | --- | --- | --- | --- | --- |
@@ -328,14 +350,42 @@ File: `benchmarks/default-sizing-memory.benchmark.js`
 | 16 | 18,618 t/s | 9.10× | 56.9% | **diminishing returns** |
 | **20** | 19,956 t/s | 9.76× | 48.8% | **plateau** — saturation ratio vs 16 = 1.07× |
 
+The table above is the historical single-pass measurement. The current benchmark reports the **median of 4 rotated, direction-alternated rounds** instead — see the table below.
+
+### Results (CPU-bound) — current method, 28-core host (measured 2026-10-23)
+
+| Workers | Median throughput | Scaling vs 1-worker | Efficiency vs ideal linear | Spread across the 4 rounds |
+| --- | --- | --- | --- | --- |
+| 1 | 2,057 t/s | 1.00× | 100.0% | 96 t/s (4.7%) |
+| 2 | 4,862 t/s | **2.36×** | 118.2% | 617 t/s (12.7%) |
+| 4 | 8,497 t/s | 4.13× | 103.3% | 1,995 t/s (23.5%) |
+| 8 | 13,796 t/s | 6.71× | 83.8% | 2,583 t/s (18.7%) |
+| 16 | 16,500 t/s | 8.02× | 50.1% | 4,844 t/s (29.4%) |
+| **20** | 16,834 t/s | 8.18× | 40.9% | 817 t/s (4.9%) — **plateau** |
+
+The knee assertion is **not measurable on this host** (`2×CORES = 56 > MAX_WORKERS = 20`), so the benchmark prints *"E-1 knee assertion SKIPPED (not measurable on this host), NOT passed"* instead of the old, false *"saturation confirmed at ~20 workers"* — nothing saturated at 20 workers on a 28-core host.
+
+### Gate noise floor — why the old gate was a coin flip
+
+The gate is a **ratio** between two measured throughputs, so what matters is how much that ratio moves between identical runs. Measured on this host, same metric (`tput(16)/tput(8)` — the doubling pair, the same shape as the knee pair), **one fresh process per run**, running the real benchmark code (the old one extracted from git, the new one from the working tree):
+
+| Method | Ratios over 10 / 8 fresh runs | Spread | Worst value vs the 1.5× budget |
+| --- | --- | --- | --- |
+| Old — single pass, fixed order | 0.85 … **1.88** | **1.03** | 1.88× — **25% over the budget** (1 of 10 runs would have failed the gate) |
+| New — 4 rotated + direction-alternated rounds, median | 1.04 … 1.30 | **0.26** | 1.30× — 13% under the budget (0 of 8 runs) |
+
+That is the CI flake reproduced locally: the old single-pass measurement of the *same* pair produced 1.88× against a true value of ≈1.12×, which is exactly how the old gate failed on run `40036815752`. The new method is **3.9× tighter** on the spread and its centre moves with the measurement order by ≤0.04, against 0.13 for the old method (whose centre is not even well defined: the old median was 1.10 and its mean 1.17, the gap being the 1.88× outlier).
+
 ### Results (I/O-bound control)
 
 | Workers | Throughput | Scaling vs 1-worker |
 | --- | --- | --- |
-| 1 | 64 t/s | 1.00× |
-| 20 | 1,241 t/s | 19.4× — **still scaling linearly with workers** |
+| 1 | 63 t/s | 1.00× |
+| 8 | 483 t/s | 7.7× |
+| 16 | 956 t/s | 15.2× |
+| 20 | 1,200 t/s | 19.0× — **still scaling linearly with workers** |
 
-I/O-bound does NOT plateau — oversubscription keeps paying off. Confirms the bottleneck in the CPU-bound sweep is genuinely the CPU, not message-passing or queue overhead.
+I/O-bound does NOT plateau — oversubscription keeps paying off. Confirms the bottleneck in the CPU-bound sweep is genuinely the CPU, not message-passing or queue overhead. On the 28-core host the comparison pair is the doubling pair (8, 16) → **1.98×** (floor 1.15×), because the knee pair is out of range; on a host with ≤ 10 cores the same phase compares `CORES` → `2×CORES` instead, the same pair E-1 asserts on.
 
 ### Why cap at 20
 
