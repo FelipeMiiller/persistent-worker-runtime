@@ -286,6 +286,27 @@ runtime.unsubscribe('cache:user', handler);  // true
 
 Gracefully drains the queue, terminates all workers, and rejects any in-flight tasks with `WorkerRuntimeError('Runtime is shutting down')`. Idempotent.
 
+### `runtime[Symbol.asyncDispose]() → Promise<void>` (ADR-0026)
+
+The **Explicit Resource Management** protocol. On Node.js **>= 24** the consumer can scope the runtime with `await using` — the teardown runs when the scope ends, even if the block threw:
+
+```javascript
+async function withScopedRuntime() {
+  await using runtime = await createWorkerRuntime({ workers: 1 });
+  const result = await runtime.execute({ type: 'ping', fn: () => 'pong' });
+  console.log(result);
+  // <- runtime.shutdown() runs here, even if the block threw
+}
+
+await withScopedRuntime();
+```
+
+> **The `await using` syntax needs Node.js >= 24 on the CONSUMER side.** The library implements only the **protocol** (a plain method), never the syntax — `engines.node` is `>= 22.13.0` and that parser does not understand `using`. The runtime itself still works on 22.13.0.
+
+The disposal is exactly a `shutdown()` (queue drained, in-flight streams aborted, every worker thread terminated) and the returned promise resolves **after** the teardown completed. It is **idempotent** — disposing an already-shut-down runtime, or disposing twice, resolves without throwing. On Node.js < 24, call the method directly: `await runtime[Symbol.asyncDispose]()`.
+
+TypeScript: `src/index.d.ts` pulls the `esnext.disposable` lib in with a `/// <reference lib="esnext.disposable" />` directive, so a consumer with `target: ES2022` compiles with no extra configuration (requires TypeScript >= 5.2).
+
 ### `runtime.stats` (HARDEN-04 + ADR-0014)
 
 ```typescript
@@ -360,6 +381,49 @@ runtime.on('stream:chunk',       ({ taskId, seq }) => {});
 runtime.on('stream:end',         ({ taskId, totalChunks, returnValue }) => {});
 runtime.on('stream:aborted',     ({ taskId, reason }) => {});
 runtime.on('stream:backpressure',({ taskId, state, queueLength }) => {});
+```
+
+---
+
+## `attempt(input) → Promise<[error, value]>` (ADR-0026)
+
+Go returns the error instead of throwing it (`v, err := doSomething()`). `attempt` is the JavaScript translation: it **never throws** and **never rejects** — it returns the error as the first element of a two-element tuple.
+
+```javascript
+const runtime = await createWorkerRuntime({ workers: 1 });
+
+const [err, value] = await attempt(() => runtime.execute({ type: 'ping', fn: () => 'pong' }));
+
+if (err) {
+  // Handle it here — no try/catch nesting.
+  console.error(`worker failed: ${err.message}`);
+} else {
+  console.log(value);
+}
+
+await runtime.shutdown();
+```
+
+| Case | Result |
+| ---- | ------ |
+| Success | `[null, value]` — `error` is `null` (Go's `nil`), never `undefined` |
+| Failure (rejection **or** synchronous throw) | `[error, undefined]` |
+| The error object | The **original** instance — same identity, same `cause`, same `stack`. Never wrapped |
+| A resolved `undefined` value | `[null, undefined]` — a value is not an error |
+| Input | A thunk `() => T \| Promise<T>` **or** a promise. The thunk also captures a synchronous throw |
+
+`attempt` has no dependency on the runtime — it works on any promise.
+
+```javascript
+// Success → [null, 'ok']
+const [okErr, okValue] = await attempt(() => Promise.resolve('ok'));
+
+// Failure → [Error, undefined] — the original error instance, not a wrapper
+const [boomErr, boomValue] = await attempt(() => {
+  throw new Error('boom');
+});
+
+console.log(okErr, okValue, boomErr instanceof Error, boomValue);
 ```
 
 ---

@@ -31,7 +31,8 @@ A production-grade, concurrent execution layer built atop `node:worker_threads`.
   - [9. Inter-Worker BroadcastChannel (L1 Cache Invalidation)](#9-inter-worker-broadcastchannel-l1-cache-invalidation)
   - [10. Streaming Task Results (Async Generators + Backpressure)](#10-streaming-task-results-async-generators--backpressure)
   - [11. Runtime Hardening & Adaptive Concurrency (v0.2.0)](#11-runtime-hardening--adaptive-concurrency-v020)
-  - [12. Node.js Core RFC Proposal](#-nodejs-core-rfc-proposal)
+  - [12. Explicit Resource Management & Result Tuples (ADR-0026)](#12-explicit-resource-management--result-tuples-adr-0026)
+  - [13. Node.js Core RFC Proposal](#-nodejs-core-rfc-proposal)
 - [Architecture & Memory Hierarchy](#-architecture--memory-hierarchy)
 - [Comparison with Existing Solutions](#-comparison-with-existing-solutions)
 - [Architecture Decision Records (ADRs)](#-architecture-decision-records-adrs)
@@ -626,6 +627,72 @@ const recycling = snapshot.filter((w) => w.status === 'recycling');
 - **BC-3** Poll always runs (was gated on accumulation rate). Cost: one cheap function call per worker per tick.
 
 Full TypeScript surface at [`src/index.d.ts`](src/index.d.ts). See **[ADR-0024](docs/adr/0024-runtime-observability-and-recycling-hardening.md)** for the rationale and `[CHANGELOG.md](CHANGELOG.md)` for the migration notes.
+
+---
+
+### 12. Explicit Resource Management & Result Tuples (ADR-0026)
+
+Two small features that remove two pieces of boilerplate: the `try/finally` around a runtime, and the `try/catch` around an awaited call.
+
+#### 12.1 — `await using` — the teardown you cannot forget
+
+A runtime is a pool of **OS threads**. Forgetting `shutdown()` leaks them. `WorkerRuntime` now implements the **Explicit Resource Management** protocol (`[Symbol.asyncDispose]()`), so on **Node.js >= 24** you can scope the runtime:
+
+```javascript
+{
+  await using runtime = await createWorkerRuntime({ workers: 4 });
+  await runtime.execute({ type: 'report', fn: buildReport });
+} // runtime.shutdown() runs here — even if the block threw
+```
+
+> **⚠️ The `await using` syntax requires Node.js >= 24 on the CONSUMER side.** The library itself implements only the **protocol** (a plain method), never the syntax — `package.json` declares `engines.node >= 22.13.0` and the parser of that version does not understand `using`. The runtime keeps working on 22.13.0; only the `await using` *syntax* is unavailable there.
+
+The disposal is exactly a `shutdown()` — the queue is drained, in-flight streams are aborted, every worker thread is terminated — and the returned promise resolves **after** the teardown completed. It is **idempotent**, so disposing an already-shut-down runtime (or disposing twice) is safe.
+
+On Node.js < 24, call the protocol method directly:
+
+```javascript
+const runtime = await createWorkerRuntime({ workers: 4 });
+try {
+  await runtime.execute({ type: 'report', fn: buildReport });
+} finally {
+  await runtime[Symbol.asyncDispose](); // same teardown as shutdown()
+}
+```
+
+**TypeScript** — the shipped `src/index.d.ts` pulls the `esnext.disposable` lib in with a `/// <reference lib="esnext.disposable" />` directive, so a consumer with `target: ES2022` compiles with **no extra configuration** (requires TypeScript >= 5.2, the version that introduced that lib).
+
+#### 12.2 — `attempt()` — Go-style multi-return errors
+
+Go returns the error instead of throwing it (`v, err := doSomething()`). `attempt` is the JavaScript translation: it never throws, it **returns** the error as the first element of a tuple.
+
+```javascript
+import { attempt } from 'persistent-worker-runtime';
+
+const [err, value] = await attempt(() => runtime.execute({ type: 'report', fn: buildReport }));
+
+if (err) {
+  // Handle the error here — no try/catch nesting.
+  console.error(`worker failed: ${err.message}`);
+  return;
+}
+
+console.log(value);
+```
+
+The contract:
+
+| Case | Result |
+| ---- | ------ |
+| Success | `[null, value]` — `error` is `null` (Go's `nil`), never `undefined` |
+| Failure (rejection **or** synchronous throw) | `[error, undefined]` |
+| The error object | The **original** instance — same identity, same `cause`, same `stack`. Never wrapped |
+| A resolved `undefined` value | `[null, undefined]` — a value is not an error |
+| Input | A thunk `() => T \| Promise<T>` **or** a promise. The thunk also captures a synchronous throw |
+
+`attempt` has no dependency on the runtime — it works on any promise.
+
+See **[ADR-0026](docs/adr/0026-explicit-resource-management-and-result-tuple.md)** for the full rationale, including why the declaration file needs the reference directive and why the synchronous `[Symbol.dispose]` is deliberately absent.
 
 ---
 
