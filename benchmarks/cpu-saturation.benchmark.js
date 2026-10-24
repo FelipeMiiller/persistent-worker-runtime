@@ -209,11 +209,26 @@ function median(values) {
  *
  * The sweep is rotated by one position per round (so no configuration
  * always sits in the same slot) AND the direction alternates per round
- * (even rounds ascending, odd rounds descending). The direction
- * alternation is what cancels the systematic component of the order
- * effect: a cyclic rotation alone keeps the relative order of the two
- * members of the measured pair, so a "measured later is faster" bias
- * would inflate the asserted ratio in EVERY round.
+ * (even rounds ascending, odd rounds descending).
+ *
+ * Why the direction alternation exists: a cyclic rotation alone keeps the
+ * RELATIVE order of the two members of the measured pair fixed in every
+ * round, so a position-dependent bias ("measured later is faster") would
+ * land on the same side of the asserted ratio in EVERY round — a systematic
+ * bias, which no order statistic removes. Alternating the direction moves
+ * the pair across the sweep between rounds and largely cancels it.
+ *
+ * How largely: the cancellation is NOT exact. Whether the pair's relative
+ * order flips in a given round depends on where the pair sits in the sweep.
+ * Measured on the sweep a 3-core CI runner produces ([1,2,3,4,6,8,16], pair
+ * 3→6), the balance is 3 rounds "low first" against 1 "high first", leaving
+ * the high member on average 1.75 positions later than the low one. The
+ * residual inflates the ratio by a few percent — measured at ~4% on a
+ * 28-core host, against a budget that has ~50% of headroom, so it cannot
+ * flip the assertion in either direction. Do not treat the alternation as
+ * an exact cancellation: if the gate ever needs one, the pair has to be
+ * measured adjacently with mirrored slots (see .agents/issues/
+ * CI-FAILURE-macos-cpu-saturation-knee.md).
  *
  * @param {number[]} sweep ascending worker counts
  * @param {number} round zero-based round index

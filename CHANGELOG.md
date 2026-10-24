@@ -85,6 +85,23 @@ and measurement work.
 
 ### Fixed
 
+- **`cpu-saturation` E-1 asserted the wrong pair — CI-only, no runtime change** — the gate compared
+  the **two largest** entries of the worker sweep (16 and 8) whatever the host was, and measured each
+  configuration **once**, in a fixed order. On a 3-core CI runner both members of that pair are already
+  oversubscribed, so the true ratio was ~1.0 *by construction* and the gate was measuring runner noise
+  against a 1.5× budget. The two macOS legs of the **same** CI run reported **3 and 5 cores** and
+  produced 1.58× (FAIL) and 1.05× (PASS). The gate now compares the **knee pair** `(CORES, 2×CORES)`
+  — ≈1.0× when the knee is at the core count, ≈2.0× when it is at twice that, which is what a 1.5×
+  budget can actually discriminate. E-1 measures **4 rounds** over the same sweep with the order
+  rotated by one position per round **and its direction alternated per round**, takes the **median**
+  per configuration, and runs a discarded warmup sweep first. Direction alternation is what removes
+  the systematic part: with rotation alone the two members of the pair keep a fixed relative order, so
+  "measured later = faster" stays *systematic* inside the ratio, and no order statistic removes a
+  systematic bias. Measured on a 28-core host, 8 repetitions per method: the old code's ratio spread
+  was 1.03 (max **1.88×** — through the budget), the new code's was 0.26 (max **1.30×**); the old
+  method's *centre* moved 13.3% with the sweep order, the new one 4.0%. When `2×CORES > MAX_WORKERS`
+  (host with more than 10 cores) the knee is out of reach and the benchmark now says so and **skips**
+  the assertion instead of printing "saturation confirmed" for a knee it never measured.
 - **Four public exports were missing from the TypeScript declarations** — `src/index.d.ts` shipped
   without `SqliteTaskQueue`, `TaskQueue`, `StreamAbortedError` and `StreamConfigError`, so a
   TypeScript consumer importing the documented API got `TS2305` on its first `tsc` run. The failure

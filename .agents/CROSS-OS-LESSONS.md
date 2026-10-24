@@ -236,6 +236,39 @@ finishes. Both records exist in `gh run list`. This is documented behavior but
 counterintuitive — when investigating "is this flake stable?", look at the
 **most recent** run for that head SHA, not the run you initially triggered.
 
+## 11. A benchmark gate must compare across the knee, not across the top of the sweep
+
+`cpu-saturation`'s E-1 gate compared the **two largest** entries of the worker sweep (16 and 8)
+whatever the host was, and measured each configuration **once**, in a fixed order, with the
+host's core count always measured **last**.
+
+On a 3-core CI runner, 8 and 16 workers are both far past the knee, so the true ratio was ~1.0
+*by construction* — the gate was asserting a property of the runner, not of the runtime. The two
+macOS legs of the **same** CI run reported **3 and 5 cores** and gave 1.58× (FAIL) and 1.05×
+(PASS). GitHub's `macos-latest` ARM64 runners are not uniform: **never assume a fixed core count
+across legs of one run**, and never calibrate a threshold on one leg's number.
+
+**Heuristics:**
+
+1. **Compare across the knee, not across the top of the sweep.** "Doubling workers past the core
+   count must not scale CPU-bound throughput" is the claim; the pair is `(CORES, 2×CORES)`. It
+   discriminates (≈1.0× vs ≈2.0×). An adjacent pair does not (≈1.33× either way).
+2. **Rotation alone does not cancel an order bias.** Rotating the sweep by one position per round
+   leaves the two members of the pair in a fixed *relative* order, so "measured later = faster"
+   stays **systematic** inside the ratio — and no order statistic removes a systematic bias.
+   Alternating the sweep's **direction** per round is what cancels it. Measured: the old method's
+   centre moved **13.3%** with the sweep order, the new one **4.0%**.
+3. **Median, not maximum, for a ratio gate.** Taking the max of both sides increases the ratio's
+   variance (the variance of a max-of-N is larger than a median-of-N's).
+4. **Assert only what was measured.** On a host with more cores than the sweep cap, the benchmark
+   now prints "not measurable on this host" and skips the gate. The old code printed
+   "saturation confirmed at ~20 workers" on a 28-core host where nothing had saturated.
+5. **Reproduce the flake locally before believing a fix.** The old code, run 10× in fresh
+   processes on a 28-core host, produced 1.88× on 1 of 10 runs — the CI flake, reproduced. The new
+   code's worst of 8 was 1.30× against a 1.5× budget.
+
+Source-of-truth fix: `benchmarks/cpu-saturation.benchmark.js`, commit `91934f0`.
+
 ---
 
 ## Index by date / source commit
@@ -245,7 +278,9 @@ counterintuitive — when investigating "is this flake stable?", look at the
 | 2026-09-19 | `ddcd33f` | macOS CI Node 22/24 | #1, #5, #6 — WORKER_COUNTS shape inversion |
 | 2026-09-19 | `daedaf6` | Windows CI Node 22 | #2, #8 — Phase 2 timing flake, bump 1500→2500ms |
 | 2026-09-19 | `bcc17bc` | local + Windows | #7 — CRLF/LF drift on `git checkout` |
+| 2026-10-23 | `c82172b` | macOS CI Node 24 | measurement-order bias in `adaptive-controller-opt-out` |
+| 2026-10-23 | `91934f0` | macOS CI Node 24 | #11 — knee pair + direction alternation in `cpu-saturation` |
 
 When a future agent adds a benchmark or timing-sensitive test, read sections 1, 2,
-5, 6, 9 first. When a CI matrix shows "1 OS fails, others pass", read section 4
+5, 6, 9, 11 first. When a CI matrix shows "1 OS fails, others pass", read section 4
 before assuming jitter.

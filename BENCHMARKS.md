@@ -319,7 +319,7 @@ The gate now:
 
 - **sweeps worker counts that contain the knee**: `CORES` and `2×CORES` (both capped at `MAX_WORKERS = 20`);
 - **asserts on the knee pair**: `tput(2×CORES) / tput(CORES) ≤ 1.5×` — ≈1.0 when the knee is at `CORES`, ≈2.0 when it is at `2×CORES`; the budget separates the two;
-- **measures every configuration over 4 rounds**, with the sweep **rotated by one position per round and its direction alternated per round** (even rounds ascending, odd rounds descending). A cyclic rotation alone is not enough: it keeps the relative order of the pair's two members, so a systematic "measured later is faster/slower" effect biases the ratio in *every* round. Alternating the direction inverts that relative order every other round, so the systematic component cancels across the even number of rounds;
+- **measures every configuration over 4 rounds**, with the sweep **rotated by one position per round and its direction alternated per round** (even rounds ascending, odd rounds descending). A cyclic rotation alone is not enough: it keeps the relative order of the pair's two members, so a systematic "measured later is faster/slower" effect biases the ratio in *every* round. Alternating the direction moves the pair across the sweep between rounds, which largely cancels it — **not exactly**: on the sweep a 3-core CI runner produces ([1,2,3,4,6,8,16], pair 3→6) the balance is 3 rounds "low first" against 1 "high first", leaving the high member on average 1.75 positions later. The residual inflates the ratio by a few percent (~4% measured on a 28-core host) against a budget with ~50% of headroom, so it cannot flip the assertion in either direction;
 - **reports the median** of the 4 rounds per configuration — not the maximum: the gate is a *ratio* between two magnitudes, and the variance of the maximum of N samples is larger than the variance of the median;
 - **discards a warmup sweep** (¼ of the tasks per point) before the measured rounds;
 - **prints every round's value**, so the spread is visible and not only the median the gate asserts on.
@@ -348,7 +348,7 @@ The E-2 (I/O control) uses the **same pair** as E-1 whenever the knee is measura
 | 4 | 9,255 t/s | 4.53× | 113.2% | nearly linear |
 | 8 | 15,629 t/s | 7.64× | 95.5% | first sign of contention |
 | 16 | 18,618 t/s | 9.10× | 56.9% | **diminishing returns** |
-| **20** | 19,956 t/s | 9.76× | 48.8% | **plateau** — saturation ratio vs 16 = 1.07× |
+| **20** | 19,956 t/s | 9.76× | 48.8% | *(the old "plateau / saturation ratio vs 16 = 1.07×" note was **wrong** — nothing saturated at 20 workers on a 28-core host; the ratio was measuring runner noise, not a knee)* |
 
 The table above is the historical single-pass measurement. The current benchmark reports the **median of 4 rotated, direction-alternated rounds** instead — see the table below.
 
