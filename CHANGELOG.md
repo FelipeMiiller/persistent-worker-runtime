@@ -111,6 +111,14 @@ and measurement work.
 
 ### Fixed
 
+- **The coverage gate measured the CI tooling** — CI-only, no runtime change. The new skill-gate test
+  imports `scripts/validate-skill.js`, which pulled `scripts/` into the coverage report for the first
+  time. That script is a CLI entry point: its `main()` is never executed by the test suite, so it
+  landed at 50.59% line / 41.67% function coverage, and `scripts/lib/spawn.js` at 38.78% — dragging
+  the all-files line figure to 89.92% and turning the 90% floor red. The coverage gate exists to
+  measure the **shipped library**; the CI tooling has its own gates (`npm run examples`,
+  `npm run skill:validate`) and is not part of the npm tarball. `scripts/**` is now excluded from
+  the report, which also makes the metric robust against any future test that imports a gate script.
 - **The skill gate failed on the Node floor** — `npm run skill:validate` exited 1 on Node **22.13.0**,
   the version `engines` declares as supported: the skill's `await using` example does not parse
   there, and the gate classified it as a **fatal syntax error**. A snippet that needs newer syntax
