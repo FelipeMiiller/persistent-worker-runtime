@@ -117,8 +117,13 @@ and measurement work.
   landed at 50.59% line / 41.67% function coverage, and `scripts/lib/spawn.js` at 38.78% — dragging
   the all-files line figure to 89.92% and turning the 90% floor red. The coverage gate exists to
   measure the **shipped library**; the CI tooling has its own gates (`npm run examples`,
-  `npm run skill:validate`) and is not part of the npm tarball. `scripts/**` is now excluded from
-  the report, which also makes the metric robust against any future test that imports a gate script.
+  `npm run skill:validate`) and is not part of the npm tarball. The report is now restricted to
+  `src/**`.
+  The subtlety: `--test-coverage-exclude` **replaces** the test runner's default exclusion (the
+  test files themselves), so excluding `scripts/**` on its own would have pulled the 41 test files
+  back into the report — they average 81.72% function coverage, which would have dragged the
+  function figure down by ~5 points and left the 85% floor with almost no headroom.
+  `--test-coverage-include=src/**` keeps the default intact and reproduces the original metric.
 - **The skill gate failed on the Node floor** — `npm run skill:validate` exited 1 on Node **22.13.0**,
   the version `engines` declares as supported: the skill's `await using` example does not parse
   there, and the gate classified it as a **fatal syntax error**. A snippet that needs newer syntax
