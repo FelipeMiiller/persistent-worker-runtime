@@ -1,17 +1,17 @@
 # Agent Handover Guide: Persistent Worker Runtime
 
 > **Audience**: AI Coding Agents (Antigravity, Claude Code, Cursor, Windsurf, Copilot) or engineers starting a new chat/session on this repository.
-> **Last Updated**: 2026-10-03 (v0.3.0 shipped; CI hardening + spec hygiene + large-file investigation)
+> **Last Updated**: 2026-10-26 (repo relocated to `D:\repository\persistent-worker-runtime`; ADR-0026 shipped in the `develop` delta; coverage metric and skill gate hardened)
 > **Active Branch**: `develop` (tracks `origin/develop`; `main` is the release target)
 > **Released**: `v0.2.0`, `v0.2.1`, **`v0.3.0`** (2026-09-24) on npm with provenance.
-> **In flight**: `develop` is ~40 commits ahead of `main` with **no API changes** — the delta is 4 benchmark-assertion fixes, 3 new examples, and docs. Release (bump / promote / publish) is deliberately deferred; see §4.
+> **In flight**: `develop` is 67 commits ahead of `main` and **does contain API changes** (ADR-0026: `attempt()` + `[Symbol.asyncDispose]()`). Release (bump / promote / publish) is deliberately deferred; see §4.
 
 ---
 
 ## 🎯 1. Project Overview & Context
 
 - **Repository**: `https://github.com/FelipeMiiller/persistent-worker-runtime`
-- **Local Path**: `c:\repository\persistent-worker-runtime`
+- **Local Path**: `D:\repository\persistent-worker-runtime`
 - **NPM Package**: `persistent-worker-runtime` (latest: **`0.3.0`**)
 - **Goal**: Build a high-performance persistent worker runtime for Node.js over native `worker_threads`, keeping the Event Loop 100% dedicated to non-blocking I/O while persistent workers execute CPU-bound tasks and transactional outbox background jobs with warm L1 heaps.
 
@@ -88,7 +88,7 @@
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Current state**: v0.3.0 shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters, Coverage and Skill validation, and is ~60 commits ahead of `main`.
+**Current state**: v0.3.0 shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters, Coverage and Skill validation, and is 67 commits ahead of `main`.
 
 **Only remaining repo action**: decide whether to release the `develop` delta. It now **does contain API changes** — `attempt()` was added to the public exports (17 names) and `WorkerRuntime` implements `[Symbol.asyncDispose]()` (ADR-0026) — alongside 4 benchmark-assertion fixes, 2 test-flake fixes, 3 new examples, spec hygiene, and a `research/` directory. Both bumping to v0.4.0 and promoting `develop` → `main` are deliberate maintainer decisions, not library work. The maintainer has explicitly deferred the release; do not publish without being asked.
 
@@ -120,7 +120,7 @@ Everything before the tag is reversible. `npm publish` is not — confirm with t
 
 ```bash
 # Tests + lint
-npm test                     # 641 tests, 0 failed, 0 skipped
+npm test                     # 682 tests, 0 failed, 0 skipped
 npm run lint                 # biome check (no auto-fix)
 npm run lint:ci              # biome ci (CI strict mode; used by lint.yml)
 npm run validate             # lint + test + benchmark:hot-path (used by pre-push, prepublish)
@@ -200,7 +200,7 @@ node --input-type=module -e "import * as mod from './src/index.js'; console.log(
 | BroadcastChannel wrapper | `src/broadcast-channel.js` |
 | Adaptive concurrency controller (ADR-0014) | `src/adaptive-controller.js` |
 | Worker-pool sizing helpers (ADR-0023) | `src/worker-pool-sizing.js` |
-| Architectural decisions | `docs/adr/0001..0024-*.md` (see `docs/adr/README.md`) |
+| Architectural decisions | `docs/adr/0001..0026-*.md` (see `docs/adr/README.md`) |
 | DR plan | `docs/operations/disaster-recovery.md` |
 | Empirical benchmark results | `BENCHMARKS.md` |
 | Embedded AI-agent skill | `skills/persistent-worker-runtime/` |
