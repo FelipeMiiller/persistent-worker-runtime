@@ -4,7 +4,7 @@
 > **Last Updated**: 2026-10-26 (repo relocated to `D:\repository\persistent-worker-runtime`; ADR-0026 shipped in the `develop` delta; coverage metric and skill gate hardened; the skill's outbox pattern fixed — issue 009)
 > **Active Branch**: `develop` (tracks `origin/develop`; `main` is the release target)
 > **Released**: `v0.2.0`, `v0.2.1`, **`v0.3.0`** (2026-09-24) on npm with provenance.
-> **In flight**: `develop` is 70 commits ahead of `main` and **does contain API changes** (ADR-0026: `attempt()` + `[Symbol.asyncDispose]()`). Release (bump / promote / publish) is deliberately deferred; see §4.
+> **In flight**: `develop` is 72 commits ahead of `main` and **does contain API changes** (ADR-0026: `attempt()` + `[Symbol.asyncDispose]()`). Release (bump / promote / publish) is deliberately deferred; see §4.
 
 ---
 
@@ -93,7 +93,7 @@ the 16 entries are closed; the one that is not:
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Current state**: v0.3.0 shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters, Coverage and Skill validation, and is 70 commits ahead of `main`.
+**Current state**: v0.3.0 shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters, Coverage and Skill validation, and is 72 commits ahead of `main`.
 
 **Only remaining repo action**: decide whether to release the `develop` delta. It now **does contain API changes** — `attempt()` was added to the public exports (17 names) and `WorkerRuntime` implements `[Symbol.asyncDispose]()` (ADR-0026) — alongside 4 benchmark-assertion fixes, 2 test-flake fixes, 3 new examples, spec hygiene, and a `research/` directory. Both bumping to v0.4.0 and promoting `develop` → `main` are deliberate maintainer decisions, not library work. The maintainer has explicitly deferred the release; do not publish without being asked.
 
