@@ -55,12 +55,12 @@ setInterval(async () => {
       fn: async (p) => mailer.sendWelcome(p.email),
     });
     handle.onComplete(async () => {
-      await db.query("UPDATE outbox SET status='done' WHERE id=$1", [p.outboxId]);
+      await db.query("UPDATE outbox SET status='done' WHERE id=$1", [row.id]);
     });
     handle.onError(async (err) => {
       await db.query(
         "UPDATE outbox SET status='failed', error=$2 WHERE id=$1",
-        [p.outboxId, err.message]
+        [row.id, err.message]
       );
     });
   }
