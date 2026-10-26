@@ -11,7 +11,7 @@
 ## 🎯 1. Project Overview & Context
 
 - **Repository**: `https://github.com/FelipeMiiller/persistent-worker-runtime`
-- **Local Path**: `D:\repository\persistent-worker-runtime`
+- **Local Path**: `D:\repository\persistent-worker-runtime` (relocated 2026-10-26; the former `C:\repository\persistent-worker-runtime` is a leftover 109-byte stub — safe to delete once no session holds it)
 - **NPM Package**: `persistent-worker-runtime` (latest: **`0.3.0`**)
 - **Goal**: Build a high-performance persistent worker runtime for Node.js over native `worker_threads`, keeping the Event Loop 100% dedicated to non-blocking I/O while persistent workers execute CPU-bound tasks and transactional outbox background jobs with warm L1 heaps.
 
