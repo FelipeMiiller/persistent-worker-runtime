@@ -1,10 +1,10 @@
 # Agent Handover Guide: Persistent Worker Runtime
 
 > **Audience**: AI Coding Agents (Antigravity, Claude Code, Cursor, Windsurf, Copilot) or engineers starting a new chat/session on this repository.
-> **Last Updated**: 2026-10-26 (repo relocated to `D:\repository\persistent-worker-runtime`; ADR-0026 shipped in the `develop` delta; coverage metric and skill gate hardened)
+> **Last Updated**: 2026-10-26 (repo relocated to `D:\repository\persistent-worker-runtime`; ADR-0026 shipped in the `develop` delta; coverage metric and skill gate hardened; the skill's outbox pattern fixed — issue 009)
 > **Active Branch**: `develop` (tracks `origin/develop`; `main` is the release target)
 > **Released**: `v0.2.0`, `v0.2.1`, **`v0.3.0`** (2026-09-24) on npm with provenance.
-> **In flight**: `develop` is 67 commits ahead of `main` and **does contain API changes** (ADR-0026: `attempt()` + `[Symbol.asyncDispose]()`). Release (bump / promote / publish) is deliberately deferred; see §4.
+> **In flight**: `develop` is 70 commits ahead of `main` and **does contain API changes** (ADR-0026: `attempt()` + `[Symbol.asyncDispose]()`). Release (bump / promote / publish) is deliberately deferred; see §4.
 
 ---
 
@@ -29,7 +29,7 @@
 
 ## 📍 3. Current State Snapshot
 
-### Code Health (as of 2026-10-24)
+### Code Health (as of 2026-10-26)
 - **Tests**: **682 passing**, 0 failures, 0 skipped, 0 cancelled (`node:test`).
 - **Lint**: 0 errors, 0 warnings across `src/`, `test/`, `examples/`, `benchmarks/`, `research/` (Biome 2.x).
 - **Benchmarks**: **24** gated scripts in `benchmarks/`, all wired into `npm run benchmark:all` and run in CI. Full empirical results in `BENCHMARKS.md`.
@@ -75,20 +75,25 @@
 - **Multi-instance / production deployments still have deferred gaps** tracked in [DR plan §8](docs/operations/disaster-recovery.md#8-open-items-gaps-to-close). Current state: **§8.1** SIGTERM — recipe shipped as `examples/sigterm-drain.js`, still user-wired by design (ADR-0005). **§8.2** `/healthz` — **closed** via `isAlive()` / `isReady()`. **§8.3** OpenTelemetry and **§8.4** Postgres backend — **permanently out-of-scope by rule** (ADR-0005). **§8.5** chaos game day and **§8.6** cross-region snapshots — genuinely open, but deployment-side, not library work.
 
 ### Tracked work (`.agents/issues/`)
-- **`001-supervisor-start-not-idempotent.md`** — ✅ FIXED (`5c4069c` + `205c384`).
-- **`002-runtime-hardening-wave4-review.md`** — ✅ CLOSED (Findings 1+2 + Track 2 shipped in v0.2.0; Finding 3 doc note closed 2026-09-27).
-- **`003-spec-validation-drift.md`** — ✅ FIXED 2026-09-27. All 13 features validate 0 errors on both `validate_spec.py` and `validate_tasks.py`.
-- **`CI-FAILURE-macos-benchmarks.md`** — ✅ RESOLVED 2026-09-23 (platform-aware threshold in `cpu-saturation.benchmark.js`).
-- **`CI-FAILURE-windows-broadcast-fanout.md`** — ✅ FIXED 2026-09-27. `broadcast-fanout` discarded 2000 `TaskHandle`s behind a fixed sleep; the unhandled rejection on `shutdown()` exited 1.
-- **`CI-FAILURE-macos-adaptive-optout-noise.md`** — ✅ FIXED 2026-09-28. Single unwarmed p99 pass was scheduler noise; now warmup + best-of-5, gated on p50.
-- **`CI-FAILURE-macos-default-sizing-hardware-calibration.md`** — ✅ FIXED 2026-09-28. Ratio threshold was calibrated to the author's 28-core host; now asserts marginal MB per worker.
-- **`io-throughput-preempted-accounting.md`** — ✅ FIXED 2026-09-27. Now counts distinct terminal `taskId`s against `TOTAL_TASKS + 1`.
+
+`.agents/issues/` is the canonical drift tracker, and **`AGENTS.md` carries its full table** — read it
+there instead of a copy of it here. A second copy of a tracker is a second thing to go stale. 15 of
+the 16 entries are closed; the one that is not:
+
+- **`009-skill-outbox-pattern-undefined-variable.md`** — 🟡 PARTIALLY FIXED 2026-10-26. The shipped
+  snippet is corrected (`p.outboxId` → `row.id` in Pattern 1's `onComplete`/`onError`; `p` was the
+  **worker-side** payload parameter and did not exist in the main-thread scope where the handlers
+  are registered). The gate-hardening half stays open, and its root cause is now correct: the gate
+  classifies a block by its **first runtime error**, so the `import express` failure masked every
+  later error in the same block — the body never ran. The obvious fix (a "read but never bound"
+  scope check) would **not** catch this, because `p` *is* bound, as the `fn` parameter; it is a
+  cross-scope reference, and real scope analysis needs a parser this repo does not have (ADR-0005).
 
 ---
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Current state**: v0.3.0 shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters, Coverage and Skill validation, and is 67 commits ahead of `main`.
+**Current state**: v0.3.0 shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters, Coverage and Skill validation, and is 70 commits ahead of `main`.
 
 **Only remaining repo action**: decide whether to release the `develop` delta. It now **does contain API changes** — `attempt()` was added to the public exports (17 names) and `WorkerRuntime` implements `[Symbol.asyncDispose]()` (ADR-0026) — alongside 4 benchmark-assertion fixes, 2 test-flake fixes, 3 new examples, spec hygiene, and a `research/` directory. Both bumping to v0.4.0 and promoting `develop` → `main` are deliberate maintainer decisions, not library work. The maintainer has explicitly deferred the release; do not publish without being asked.
 

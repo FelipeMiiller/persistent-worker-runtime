@@ -29,7 +29,7 @@ persistent-worker-runtime/
 ├── .github/workflows/ci.yml            # Multi-OS matrix CI (Ubuntu, macOS, Windows)
 ├── .agents/rules/                      # Always-on rules (test-before-commit, MADR, zero-deps, end-of-spec hardening, perf-first-authoring)
 ├── docs/
-│   └── adr/                            # Architecture Decision Records (MADR format, 0001..0014)
+│   └── adr/                            # Architecture Decision Records (MADR format, 0001..0026)
 ├── src/                                # Core implementation (pure JavaScript ESM)
 │   ├── index.js                        # Public API entry point
 │   ├── index.d.ts                      # TypeScript definitions for IDE autocompletion
@@ -40,8 +40,15 @@ persistent-worker-runtime/
 │   ├── worker-handle.js                # Managed Worker thread wrapper (watchdog, recycling, preemption)
 │   ├── worker-thread-entry.js          # In-thread worker loop with L1 memory
 │   ├── supervisor.js                   # Pool lifecycle, recycling, and crash recovery
-│   └── worker-runtime.js               # Central execution engine
-├── test/                               # Native unit tests (node:test, 682 tests across 183 suites)
+│   ├── worker-runtime.js               # Central execution engine
+│   ├── worker-pool-sizing.js           # Sizing policy — options → env → auto → 1 (ADR-0019, ADR-0023)
+│   ├── adaptive-controller.js          # Dual-signal ELU + p99 controller (ADR-0014)
+│   ├── broadcast-channel.js            # Inter-worker pub/sub + cache invalidation (ADR-0013)
+│   ├── streaming.js                    # Stream chunk protocol (ADR-0012)
+│   ├── stream-runner.js                # Stream dispatch + backpressure runner (ADR-0012)
+│   ├── event-target-compat.js          # EventEmitter → EventTarget shim (on/once/off + 'error' handling)
+│   └── fn-deps-scanner.js              # Scans a task fn for `node:*` refs → `fnDeps` manifest (ADR-0024)
+├── test/                               # Native unit tests (node:test, 682 tests across 183 suites, 41 files)
 │   ├── task-queue.test.js              # Queue unit tests (lifecycle, priority, affinity, drain, destroy)
 │   ├── errors.test.js                  # Error hierarchy tests
 │   ├── supervisor-units.test.js        # Supervisor getters, dispatch validation, retry path
@@ -53,7 +60,7 @@ persistent-worker-runtime/
 │   ├── preemption.test.js              # Hard preemption watchdog integration tests
 │   ├── concurrency-stress.test.js      # Concurrency stress tests
 │   └── worker-runtime.test.js          # Core runtime end-to-end tests
-├── benchmarks/                         # Performance and Event Loop lag benchmarks (10 total)
+├── benchmarks/                         # Performance and Event Loop lag benchmarks (24 total — abridged list below)
 │   ├── event-loop-lag.benchmark.js
 │   ├── stateful-vs-stateless.benchmark.js
 │   ├── batch-concurrency.benchmark.js
@@ -103,7 +110,7 @@ These are the **canonical link targets** for the next session / agent. Each item
 | 006 | [`.agents/issues/006-examples-and-skill-code-blocks-never-executed.md`](.agents/issues/006-examples-and-skill-code-blocks-never-executed.md) | The 20 `examples/` scripts and the shipped skill's code blocks are never executed by CI | ✅ **FIXED** 2026-10-23 | `npm run examples` (`scripts/run-examples.js`) runs all 20 examples in isolated child processes **outside** the repo working tree, with a hard timeout and a visible `// requires:` skip marker — **20/20 ok, 0 skipped, 0 failed**, and `git status` stays clean. `npm run skill:validate` (`scripts/validate-skill.js`) syntax-checks and executes the shipped skill's code blocks; it needed its own workflow because every other workflow uses `paths-ignore: ['**.md', …]` and the skill is all `.md`. **A block that does not parse is now fatal** — the first version reported syntax errors and exited 0, which is not a gate. On its first run the gate found **3 real defects** in the shipped skill: 2 blocks that did not parse, 3 calls to `runtime.stats()` (it is a **getter**, so the snippet threw `TypeError`), and 1 snippet that crashed the process on `shutdown()` (unhandled rejection of a fire-and-forget handle). All 3 fixed. |
 | 007 | [`.agents/issues/007-coverage-threshold-and-release-version-consistency.md`](.agents/issues/007-coverage-threshold-and-release-version-consistency.md) | Coverage reports but never fails; release never checks tag ↔ version ↔ CHANGELOG | ✅ **FIXED** 2026-10-23 | `npm run test:coverage` now carries `--test-coverage-lines=90 --test-coverage-branches=80 --test-coverage-functions=85` (note the names: **no** `--experimental-` prefix — they exist as far back as Node 22.13.0). Floors sit below the measured baseline (**94.39 / 87.71 / 91.01**), because a floor equal to the baseline turns the next uncovered line into a red build. Proven to fail: the same run with `--test-coverage-lines=100` exits 1. `release.yml` gained a pre-flight step before `npm publish` — tag ↔ `package.json` version ↔ a `## [X.Y.Z]` section in `CHANGELOG.md`, plus a registry check on the tagless `workflow_dispatch` path — failing with a clear `::error::` message |
 | 008 | [`.agents/issues/008-taskhandle-promise-contract-mismatch.md`](.agents/issues/008-taskhandle-promise-contract-mismatch.md) | `TaskHandle.promise` was documented as internally `.catch()`-handled — and it was not | ✅ **FIXED** 2026-10-23 | **ADR-0025** implements the contract: `dispatch()` (and `dispatchAll()`) attach a no-op rejection handler to the handle's promise, so a discarded handle cannot raise an unhandled rejection — while the promise **still rejects** (`await handle.promise` throws) and `onError` **still fires**. `execute()` deliberately does **not** get the protection, so ADR-0018's hazard stays visible. `execute()` now calls a private `#dispatchTask()` instead of the public `dispatch()`. `test/dispatch-promise-contract.test.js` proves it: removing the keep-alive makes 4 of its 7 tests fail. ADR-0018 amended (false claim marked corrected, text kept as history), the JSDoc of both modes made coherent, and the shipped skill now documents `onError` as the failure channel |
-| 009 | [`.agents/issues/009-skill-outbox-pattern-undefined-variable.md`](.agents/issues/009-skill-outbox-pattern-undefined-variable.md) | The shipped skill's outbox pattern references an out-of-scope variable | 🔴 **OPEN** 2026-10-23 | `skills/persistent-worker-runtime/references/patterns.md` (Pattern 1) uses `p.outboxId` inside the `onComplete`/`onError` handlers, but the pattern's own row variable is named `row` — copying the block verbatim throws `ReferenceError: p is not defined`. It slipped past the skill gate because the block is a **fragment**: fragments are parsed, not executed, so an undeclared identifier inside one is invisible. That is the gate's known blind spot |
+| 009 | [`.agents/issues/009-skill-outbox-pattern-undefined-variable.md`](.agents/issues/009-skill-outbox-pattern-undefined-variable.md) | The shipped skill's outbox pattern references an out-of-scope variable | 🟡 **PARTIALLY FIXED** 2026-10-26 | `skills/persistent-worker-runtime/references/patterns.md` (Pattern 1) used `p.outboxId` inside the `onComplete`/`onError` handlers, but `p` is the **worker-side** payload parameter of `fn: async (p) => …` — it does not exist in the main-thread scope where the handlers are registered, so copying the block verbatim threw `ReferenceError: p is not defined`. Fixed to `row.id` (the outbox row id). **The original explanation in this table was wrong** and is corrected in the issue file: the gate does not classify blocks statically — it **executes** them and classifies by the **first runtime error**. Pattern 1 dies at `import express` (ESM imports resolve before the body runs), so it was classified `EXTERNAL-DEPENDENCY` and **the body never executed**. The real blind spot: *an import failure masks every later error in the same block*. The gate-hardening half of the issue stays open — a "read but never bound" scope check would **not** catch it (`p` *is* bound, as the `fn` parameter); it is a cross-scope reference, and real scope analysis needs a parser this repo does not have (ADR-0005) |
 
 **Cross-references for related gaps** (not in `.agents/issues/` but worth knowing):
 
