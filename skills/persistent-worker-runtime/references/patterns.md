@@ -8,6 +8,69 @@ Six battle-tested patterns, each with runnable code. Copy, adapt, ship.
 
 The canonical "don't lose the email if the DB is down" pattern. HTTP request writes to the outbox table in a transaction; the runtime drains the outbox in the background and dispatches the work; the worker thread does the slow IO without blocking the event loop; the result is confirmed back to the outbox row.
 
+The pattern is shown in two blocks. **The core** is dependency-free, and the skill gate EXECUTES it — that is what keeps the defect class of issue 009 covered: the handler that confirms the result reads the outbox ROW, and the gate reports it if it ever stops doing so. **The wiring** is the Express + Postgres half; the gate syntax-checks it and reports it honestly as not executed, because it needs packages this zero-dependency repository cannot install (ADR-0005).
+
+In your application both halves run in the SAME process: the wiring's `runtime` and `db` are the ones the core dispatches through.
+
+**The core** — drain the outbox and confirm each result back to its row:
+
+```javascript
+import { createWorkerRuntime } from 'persistent-worker-runtime';
+
+// `db` stands in for the Postgres pool of the wiring block, and it resolves
+// ONE row on purpose: a stand-in that resolved none would leave the loop
+// body unexecuted, and the gate would learn nothing from the pattern it is
+// supposed to validate.
+const db = {
+  async query(sql) {
+    if (sql.includes('SELECT')) {
+      return { rows: [{ id: 7, payload: JSON.stringify({ email: 'ada@example.com' }) }] };
+    }
+    return { rows: [], rowCount: 1 };
+  },
+};
+
+const runtime = await createWorkerRuntime({ workers: 1 });
+
+// Drain the outbox: dispatch the pending jobs, and confirm each result back
+// to the outbox row it came from.
+async function drainOnce() {
+  const { rows } = await db.query(
+    "SELECT id, payload FROM outbox WHERE status = 'pending' LIMIT 100"
+  );
+  for (const row of rows) {
+    const handle = runtime.dispatch({
+      type: 'send_welcome_email',
+      payload: { ...JSON.parse(row.payload), outboxId: row.id },
+      retries: 5,
+      retryDelayMs: 2000,
+      fn: async (p) => {
+        // The worker does the slow IO. The task function must be
+        // SELF-CONTAINED: it is serialized to the worker thread, where
+        // nothing from this scope exists — not `db`, not `row`, not `p`
+        // beyond its own parameter.
+        return { sent: true, email: p.email };
+      },
+    });
+    handle.onComplete(async () => {
+      await db.query("UPDATE outbox SET status='done' WHERE id=$1", [row.id]);
+    });
+    handle.onError(async (err) => {
+      await db.query(
+        "UPDATE outbox SET status='failed', error=$2 WHERE id=$1",
+        [row.id, err.message]
+      );
+    });
+  }
+}
+
+// Drain now, and then every 1s.
+await drainOnce();
+setInterval(drainOnce, 1000);
+```
+
+**The wiring** — accept the request, write the outbox row, serve it:
+
 ```javascript
 import express from 'express';
 import { createWorkerRuntime } from 'persistent-worker-runtime';
@@ -41,31 +104,6 @@ app.post('/signup', async (req, res) => {
   }
 });
 
-// Drain the outbox: every 1s, dispatch pending jobs
-setInterval(async () => {
-  const { rows } = await db.query(
-    "SELECT id, payload FROM outbox WHERE status = 'pending' LIMIT 100"
-  );
-  for (const row of rows) {
-    const handle = runtime.dispatch({
-      type: 'send_welcome_email',
-      payload: { ...JSON.parse(row.payload), outboxId: row.id },
-      retries: 5,
-      retryDelayMs: 2000,
-      fn: async (p) => mailer.sendWelcome(p.email),
-    });
-    handle.onComplete(async () => {
-      await db.query("UPDATE outbox SET status='done' WHERE id=$1", [row.id]);
-    });
-    handle.onError(async (err) => {
-      await db.query(
-        "UPDATE outbox SET status='failed', error=$2 WHERE id=$1",
-        [row.id, err.message]
-      );
-    });
-  }
-}, 1000);
-
 app.listen(3000);
 process.on('SIGTERM', () => runtime.shutdown());
 ```
@@ -74,6 +112,11 @@ process.on('SIGTERM', () => runtime.shutdown());
 is internally `.catch()`-handled (ADR-0025), so a failed background job will
 not crash the process — it will simply never call `onComplete`. Always
 register `onError` to move the outbox row to `failed`.
+
+Both handlers read the outbox ROW (`row.id`), never the task function's
+parameter (`p`). `p` is bound inside the task function, on the worker thread:
+a handler that reads it is reading a scope that does not exist there, and
+the failure only shows up when the job completes.
 
 ---
 
