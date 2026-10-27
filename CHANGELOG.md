@@ -4,14 +4,13 @@ All notable changes to `persistent-worker-runtime` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-10-27
 
-Changes merged to `develop` after the v0.3.0 release. The public API surface **does** change now:
-`src/index.js` exports **17** names (the new `attempt` helper) and `WorkerRuntime` implements
-`[Symbol.asyncDispose]()`. One behaviour also changed: `dispatch()` now attaches an internal
-rejection handler to the handle's promise (ADR-0025), so a fire-and-forget handle that nobody
-awaits can no longer take the process down. Everything else is CI, correctness, type-surface
-and measurement work.
+The public API surface **changes**: `src/index.js` exports **17** names (the new `attempt` helper)
+and `WorkerRuntime` implements `[Symbol.asyncDispose]()`. One behaviour also changes: `dispatch()`
+now attaches an internal rejection handler to the handle's promise (ADR-0025), so a fire-and-forget
+handle that nobody awaits can no longer take the process down. Everything else is CI, correctness,
+type-surface and measurement work.
 
 ### Added
 
