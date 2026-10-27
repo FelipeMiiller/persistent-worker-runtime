@@ -111,6 +111,43 @@ and measurement work.
 
 ### Fixed
 
+- **The skill gate could not see a defect inside a block's deferred work** (ADR-0027) — CI tooling
+  only, no runtime change. The gate executes every JavaScript block of the shipped skill in an
+  isolated child process, and it reported a block as validated when it had never observed the code
+  the block declares. Two **independent** masks produced that, and either one alone hid the defect:
+  - **the import mask** — ESM resolves every static import *before* the module body runs, so a block
+    whose first import cannot be resolved dies before its body executes. It was classified
+    `EXTERNAL-DEPENDENCY`, a label that reads like *"the only problem is a missing package"*;
+  - **the observation mask** — the harness epilogue waited one tick (50 ms) and called
+    `process.exit(0)`, so a defect inside work the block **defers** (a timer callback) fired after the
+    gate had already exited.
+
+  The defect class is the one of issue 009: the outbox pattern's completion handler read
+  `p.outboxId`, where `p` is the **worker-side** payload parameter of the task function — an
+  identifier that does not exist in the scope of the handler that reads it. It reached the published
+  npm package. The measurement is the part worth keeping: **the defect passed the old gate even with
+  the import mask removed**, so fixing only the import mask would have been a vacuously green fix.
+
+  The gate now observes a block's synchronous body **plus a bounded window of deferred work** — 2500 ms,
+  granted only to a block that left pending timer work behind (detected with
+  `process.getActiveResourcesInfo()`, counted *before* the harness schedules its own timer, since the
+  harness timer is itself a `Timeout`). Every other block keeps the 50 ms fast path, so the gate's
+  wall-clock cost does not grow for the blocks that have nothing to defer; the summary reports how
+  many blocks paid the window. The gate also **says what it did not observe**: the
+  `EXTERNAL-DEPENDENCY` reason now states that the body was NOT executed and that a defect inside it
+  is invisible to the gate, and the summary counts the blocks it observed against the blocks it did
+  not, with the reason for each. A skip is no longer readable as a validation.
+
+  The shipped outbox pattern was split so the gate can execute it: a dependency-free **core** (the
+  drain loop, where the defect lived) and the external **wiring** (Express, Postgres), which the gate
+  syntax-checks and reports honestly as not executed. Reintroducing the defect in the core now makes
+  the gate report `[FRAGMENT] … undefined identifier "p"`.
+
+  The change is provably non-vacuous: `test/skill-gate-defect-class.test.js` runs the same fixtures
+  with the window disabled — the pre-fix harness — and asserts the defect is **not** reported there.
+  Work deferred beyond the window is still not observed; ADR-0027 records that limit, and why a
+  static scope check and an import stub cannot close it in a zero-dependency repository (ADR-0005).
+
 - **The coverage gate measured the CI tooling** — CI-only, no runtime change. The new skill-gate test
   imports `scripts/validate-skill.js`, which pulled `scripts/` into the coverage report for the first
   time. That script is a CLI entry point: its `main()` is never executed by the test suite, so it
