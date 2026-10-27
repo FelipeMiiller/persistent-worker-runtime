@@ -87,6 +87,14 @@
  *    Those categories are reported with the file, the line and the reason, so
  *    the finding is actionable — the gate just does not fail on them.
  *
+ *    A report is NOT the same claim as a validation. The gate says, per block
+ *    and in the summary, whether it OBSERVED the block's body: a block that
+ *    died on an unresolvable import, or that the gate skipped on purpose, was
+ *    NOT observed, and a defect inside it is invisible to the gate. The
+ *    `EXTERNAL-DEPENDENCY` reason says so in as many words, and the summary
+ *    counts the blocks the gate did not observe and says why. Reading the
+ *    exit code alone does not tell the two apart — read the summary.
+ *
  * The `// requires:` marker
  *
  * A JavaScript block may declare, on a line of its own, what it needs before
@@ -211,6 +219,21 @@ const EXCLUDED_BLOCKS = {
   'references/observability.md': {
     5: 'only registers signal handlers — running it would exercise no library API',
   },
+};
+
+/**
+ * Why a block was NOT observed, by the status it carries.
+ *
+ * The point of the table is that a skip must never read as a validation:
+ * each line says what the gate did NOT look at.
+ */
+const NOT_OBSERVED_REASONS = {
+  'external-dependency': 'the block died on an unresolvable import — its body never ran',
+  skipped: 'the gate did not run the block',
+  'syntax-error': 'the block never ran — it does not parse',
+  fragment: 'the block body did not execute',
+  'runtime-error': 'the block body did not execute',
+  timeout: 'the block body did not execute',
 };
 
 /**
@@ -500,9 +523,13 @@ export function validateSkillMeta(meta, skillDir) {
  * Explains why an executed block did not succeed.
  *
  * @param {{timedOut: boolean, stdout: string, stderr: string, code: number|null}} result
+ * @param {{bodyStarted?: boolean}} [options] `bodyStarted` says whether the
+ *   block's body ran at all. It changes the EXTERNAL-DEPENDENCY reason: a
+ *   block that died on an unresolvable import never ran its body, and a
+ *   defect inside it is invisible to the gate — a fact the old wording hid.
  * @returns {{kind: string, reason: string}}
  */
-export function classifyBlockFailure(result) {
+export function classifyBlockFailure(result, { bodyStarted = true } = {}) {
   if (result.timedOut) {
     return { kind: 'timeout', reason: 'the block did not finish within the time budget' };
   }
@@ -517,9 +544,12 @@ export function classifyBlockFailure(result) {
   }
   const missingPackage = /Cannot find package '([^']+)'/.exec(text);
   if (missingPackage) {
+    const coverage = bodyStarted
+      ? 'the block body ran up to the failure, so the gate cannot validate the code after it'
+      : 'the block body was NOT executed, so a defect inside it is invisible to the gate';
     return {
       kind: 'external-dependency',
-      reason: `external dependency — package "${missingPackage[1]}" is not installable in this zero-dependency repository (ADR-0005)`,
+      reason: `external dependency — package "${missingPackage[1]}" is not installable in this zero-dependency repository (ADR-0005) — ${coverage}`,
     };
   }
   const typeError = /TypeError: (.*)/.exec(text);
@@ -754,7 +784,7 @@ export async function runSkillGate({
       continue;
     }
 
-    const failure = classifyBlockFailure(result);
+    const failure = classifyBlockFailure(result, { bodyStarted: record.bodyStarted });
     outcome.status = failure.kind;
     outcome.reason = failure.reason;
     log(`[${failure.kind.toUpperCase()}] ${outcome.label} — ${failure.reason}`);
@@ -771,11 +801,15 @@ export async function runSkillGate({
   const runtimeErrors = outcomes.filter((o) => o.status === 'runtime-error');
   const timeouts = outcomes.filter((o) => o.status === 'timeout');
 
-  // The distinction the gate keeps on every outcome: a block the gate
-  // OBSERVED (its body ran) against a block it did NOT observe (the body
-  // never executed). The report lands in the next task; the flag is what
-  // the report is built from.
+  // The distinction the report must not blur: a block the gate OBSERVED
+  // (its body ran) against a block it did NOT observe (the body never
+  // executed). A skip is not a validation.
   const observedBlocks = outcomes.filter((o) => o.observed);
+  const notObserved = outcomes.filter((o) => !o.observed);
+  const notObservedByStatus = new Map();
+  for (const outcome of notObserved) {
+    notObservedByStatus.set(outcome.status, (notObservedByStatus.get(outcome.status) || 0) + 1);
+  }
   const paidWindow = outcomes.filter((o) => o.paidWindow === true);
   const fastPath = outcomes.filter((o) => o.delayMs === FAST_PATH_DELAY_MS);
 
@@ -789,6 +823,8 @@ export async function runSkillGate({
     runtimeErrors: runtimeErrors.length,
     timeouts: timeouts.length,
     observed: observedBlocks.length,
+    notObserved: notObserved.length,
+    notObservedByStatus: Object.fromEntries(notObservedByStatus),
     paidWindow: paidWindow.length,
     fastPath: fastPath.length,
     observationWindowMs,
@@ -813,7 +849,22 @@ export async function runSkillGate({
     log(`  ${lang}: ${count} — ${reason}`);
   }
 
-  // How much of the skill the gate actually looked at.
+  // How much of the skill the gate actually looked at. Reported separately
+  // from the counts above, because a block the gate did not run is a block
+  // the gate did not validate.
+  log(
+    `\nblocks OBSERVED (the block body executed): ${observedBlocks.length} | blocks NOT observed (the block body did not execute): ${notObserved.length}`,
+  );
+  if (notObserved.length > 0) {
+    log('not observed, by reason:');
+    for (const [status, count] of [...notObservedByStatus.entries()].sort((a, b) => b[1] - a[1])) {
+      log(
+        `  ${status}: ${count} — ${NOT_OBSERVED_REASONS[status] ?? 'the block body did not execute'}`,
+      );
+    }
+    log('not observed (a defect inside one of these is invisible to the gate):');
+    for (const outcome of notObserved) log(`  ${outcome.label} — ${outcome.reason}`);
+  }
   log(
     `observation window: ${paidWindow.length} block(s) paid the ${observationWindowMs} ms window | ${fastPath.length} block(s) took the ${FAST_PATH_DELAY_MS} ms fast path`,
   );

@@ -167,3 +167,69 @@ describe('the skill gate observation window', () => {
     assert.equal(summary.observationWindowMs, OBSERVATION_WINDOW_MS);
   });
 });
+
+// ─── What the gate did NOT observe ─────────────────────────────────────────
+//
+// A report is not a validation. The gate has to say which blocks it actually
+// looked at, because a block that died on an unresolvable import reports
+// just as loudly as a block that ran — and a defect inside the former is
+// invisible to the gate.
+
+describe('the skill gate report of the blocks it did not observe', () => {
+  it('says that an external-dependency block never ran its body', async () => {
+    const skillDir = writeFixtureSkill('external', [
+      [
+        "import express from 'express';",
+        '',
+        'const app = express();',
+        'console.log(typeof app);',
+      ].join('\n'),
+    ]);
+
+    const { outcomes, summary } = await runFixture(skillDir);
+
+    assert.equal(outcomes[0].status, 'external-dependency');
+    assert.match(outcomes[0].reason, /body was NOT executed/);
+    assert.match(outcomes[0].reason, /invisible to the gate/);
+
+    assert.equal(outcomes[0].observed, false);
+    assert.equal(summary.notObserved, 1);
+    assert.equal(summary.notObservedByStatus['external-dependency'], 1);
+    assert.equal(summary.observed, 0);
+  });
+
+  it('counts the blocks it did not observe and says why', async () => {
+    const skillDir = writeFixtureSkill('not-observed', [
+      ["import express from 'express';", "console.log('never runs');"].join('\n'),
+      ['const value = 1;', 'console.log(value);'].join('\n'),
+    ]);
+
+    const { summary } = await runFixture(skillDir);
+
+    // One block ran, one never did.
+    assert.equal(summary.observed, 1);
+    assert.equal(summary.notObserved, 1);
+    assert.deepEqual(summary.notObservedByStatus, { 'external-dependency': 1 });
+  });
+
+  it('does not claim a block never ran when its body did run', async () => {
+    // A dynamic import fails INSIDE the body: the body ran, and the gate
+    // cannot validate the code after the failure. The report must not claim
+    // the opposite — that would be a lie in the other direction.
+    const skillDir = writeFixtureSkill('dynamic-import', [
+      [
+        "const { join } = await import('node:path');",
+        "console.log(join('a', 'b'));",
+        "await import('definitely-not-installed');",
+      ].join('\n'),
+    ]);
+
+    const { outcomes, summary } = await runFixture(skillDir);
+
+    assert.equal(outcomes[0].status, 'external-dependency');
+    assert.doesNotMatch(outcomes[0].reason, /body was NOT executed/);
+    assert.match(outcomes[0].reason, /body ran up to the failure/);
+    assert.equal(outcomes[0].observed, true);
+    assert.equal(summary.notObserved, 0);
+  });
+});
