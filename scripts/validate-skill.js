@@ -33,6 +33,33 @@
  *  6. Validates `.skill-meta.json`: it must parse, its trigger list must be
  *     non-empty and free of duplicates, and every file it lists must exist.
  *
+ * The observation contract
+ *
+ * The gate observes a block's SYNCHRONOUS body plus a bounded window of the
+ * work the block DEFERS. Two INDEPENDENT masks used to hide defects here,
+ * and a block that fell under either of them was reported as if it had been
+ * validated:
+ *
+ *  - The import mask. ESM resolves every static import BEFORE the module
+ *    body runs, so a block whose import cannot be resolved dies before its
+ *    body executes. The gate reports those blocks as EXTERNAL-DEPENDENCY and
+ *    says so explicitly: the body was NOT executed, and a defect inside it
+ *    is invisible to the gate.
+ *  - The observation mask. A defect inside work the block defers — a timer
+ *    callback, a promise chain — fires after the harness's own wait. The
+ *    harness therefore keeps the event loop open for an OBSERVATION WINDOW
+ *    (2500 ms) whenever the block left pending timer work behind.
+ *
+ * Work deferred BEYOND that window is still not observed. The limit is
+ * inherent to a bounded harness and is recorded in ADR-0027 rather than
+ * hidden.
+ *
+ * The window is charged only to blocks that left a pending timer behind.
+ * Every other block keeps the 50 ms fast path, so the gate's wall-clock cost
+ * does not grow for the blocks that have nothing to defer. The summary
+ * reports how many blocks paid the window, and how many blocks the gate did
+ * NOT observe and why.
+ *
  * Exit code:
  *
  *  - 1 when the metadata is incoherent, OR when any JavaScript block FAILS TO
@@ -101,16 +128,47 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runNode } from './lib/spawn.js';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SKILL_DIR = join(REPO_ROOT, 'skills', 'persistent-worker-runtime');
-const META_FILE = join(SKILL_DIR, '.skill-meta.json');
+const DEFAULT_PACKAGE_ENTRY_URL = pathToFileURL(join(REPO_ROOT, 'src', 'index.js')).href;
 
 /** Wall-clock budget for a single JavaScript block. */
 const DEFAULT_TIMEOUT_MS = 20_000;
+
+/**
+ * How long the harness keeps the event loop open for a block that left
+ * pending timer work behind.
+ *
+ * 2500 ms is a MEASURED value, not a round guess: the shipped outbox
+ * pattern's timer fires at 1000 ms, and a worker dispatch plus its failure
+ * path adds roughly 100 ms on top of that. 2500 ms covers the pattern with
+ * margin, and the fixture probe shows it is enough to surface the issue-009
+ * defect class (`p.outboxId`, read from a timer callback).
+ *
+ * Work deferred BEYOND this window is still NOT observed. That limit is
+ * inherent to a bounded harness and is recorded in ADR-0027.
+ */
+export const OBSERVATION_WINDOW_MS = 2500;
+
+/**
+ * The fast path: how long the harness waits for a block that left no timer
+ * work behind. Unchanged from the gate's original epilogue, so the blocks
+ * that have nothing to defer do not get slower.
+ */
+export const FAST_PATH_DELAY_MS = 50;
+
+/**
+ * Environment variable that carries the path of the child's observation
+ * record.
+ *
+ * The record is how the gate learns the two things an exit code cannot tell
+ * it: whether the block's body ran at all, and which path the harness took.
+ */
+const RECORD_ENV_VAR = 'PWR_GATE_OBSERVATION_RECORD';
 
 /** Fence languages that carry JavaScript. */
 const JS_LANGS = new Set(['js', 'javascript', 'mjs', 'node']);
@@ -183,10 +241,22 @@ const NODE_REQUIREMENT_RE = /^node\s*>=\s*(\d+(?:\.\d+){0,2})$/i;
  * exposes the package's public API as globals so those blocks run as
  * written. A block that imports the package itself is unaffected: its
  * lexical binding shadows the global.
+ *
+ * The preamble also opens the child's OBSERVATION RECORD. The record is
+ * written HERE, at the first statement of the module body, because that is
+ * the only place where "the body ran" is still knowable: ESM resolves every
+ * static import BEFORE the module body runs, so a block that dies on an
+ * unresolvable import never reaches this line. The record is what lets the
+ * gate say "the body was NOT executed" instead of guessing.
  */
 function buildPreamble(packageEntryUrl) {
   return [
     `import * as __pwr from ${JSON.stringify(packageEntryUrl)};`,
+    "import { appendFileSync as __pwrRecord } from 'node:fs';",
+    '',
+    '// Gate harness: mark the start of the block body.',
+    `const __pwrRecordPath = process.env.${RECORD_ENV_VAR};`,
+    "if (__pwrRecordPath) __pwrRecord(__pwrRecordPath, 'body-started\\n');",
     'for (const __key of Object.keys(__pwr)) {',
     "  if (typeof __pwr[__key] === 'function' && !(__key in globalThis)) globalThis[__key] = __pwr[__key];",
     '}',
@@ -198,18 +268,65 @@ function buildPreamble(packageEntryUrl) {
  * Harness epilogue appended to an executed block.
  *
  * Two jobs:
- *  - wait one tick so Node can surface an unhandled rejection (that is how
- *    a block that rejects a task handle at shutdown shows up);
+ *  - observe the work the block deferred, so a defect inside it is reported
+ *    instead of passing silently;
  *  - exit the process, so a block that leaves a runtime alive cannot hang
  *    the gate.
+ *
+ * The pending-timer check MUST run before the harness schedules its own
+ * wait. The harness's own timer is itself a `Timeout` resource, and counting
+ * it would make every block look like it had deferred work — every block
+ * would then pay the observation window, and the gate's wall-clock cost
+ * would grow for no coverage gain.
+ *
+ * `process.getActiveResourcesInfo()` reports the resources that are
+ * currently keeping the event loop alive, so it answers exactly the
+ * question the epilogue asks: did the block leave a pending timer behind?
+ * A worker runtime does NOT show up as a `Timeout` (only as a
+ * `MessagePort`), and an `Immediate` fires before the harness's own wait
+ * resolves, so neither of them is charged the window.
  */
-const EPILOGUE = [
-  '',
-  '// Gate harness: give Node a tick to report unhandled rejections, then exit.',
-  'await new Promise((resolve) => setTimeout(resolve, 50));',
-  'process.exit(0);',
-  '',
-].join('\n');
+function buildEpilogue(observationWindowMs) {
+  const windowMs =
+    Number.isFinite(observationWindowMs) && observationWindowMs > 0 ? observationWindowMs : 0;
+  return [
+    '',
+    '// Gate harness: observe the deferred work of the block, then exit.',
+    `const __pwrWindowMs = ${windowMs};`,
+    "const __pwrHasPendingTimer = __pwrWindowMs > 0 && process.getActiveResourcesInfo().includes('Timeout');",
+    `const __pwrDelayMs = __pwrHasPendingTimer ? __pwrWindowMs : ${FAST_PATH_DELAY_MS};`,
+    "if (__pwrRecordPath) __pwrRecord(__pwrRecordPath, 'delay=' + __pwrDelayMs + '\\n');",
+    'await new Promise((resolve) => setTimeout(resolve, __pwrDelayMs));',
+    'process.exit(0);',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Reads the observation record a child wrote.
+ *
+ * @param {string} recordPath Absolute path of the record file.
+ * @returns {{bodyStarted: boolean, delayMs: number|null}} `bodyStarted` is
+ *   false when the child never reached the module body — which is what
+ *   "the block body was not executed" means. `delayMs` is the delay the
+ *   harness chose, or `null` when the child died before choosing one.
+ */
+export function readObservationRecord(recordPath) {
+  if (!existsSync(recordPath)) return { bodyStarted: false, delayMs: null };
+  let content = '';
+  try {
+    content = readFileSync(recordPath, 'utf8');
+  } catch {
+    return { bodyStarted: false, delayMs: null };
+  }
+  const lines = content.split(/\r?\n/);
+  const delayLine = lines.find((line) => line.startsWith('delay='));
+  const delay = delayLine ? Number(delayLine.slice('delay='.length)) : Number.NaN;
+  return {
+    bodyStarted: lines.includes('body-started'),
+    delayMs: Number.isFinite(delay) ? delay : null,
+  };
+}
 
 /**
  * Extracts the fenced code blocks from a Markdown document.
@@ -429,9 +546,10 @@ export function classifyBlockFailure(result) {
 /**
  * Lists the Markdown documents that make up the skill.
  *
+ * @param {string} [skillDir] Absolute path of the skill directory.
  * @returns {{absolute: string, relative: string}[]}
  */
-export function listSkillDocuments() {
+export function listSkillDocuments(skillDir = SKILL_DIR) {
   const documents = [];
   const walk = (dir) => {
     for (const entry of readdirSync(dir).sort()) {
@@ -442,34 +560,58 @@ export function listSkillDocuments() {
         documents.push({
           absolute,
           relative: absolute
-            .slice(SKILL_DIR.length + 1)
-            .split('\\')
+            .slice(skillDir.length + 1)
+            .split(sep)
             .join('/'),
         });
       }
     }
   };
-  walk(SKILL_DIR);
+  walk(skillDir);
   return documents;
 }
 
-async function main() {
-  const packageEntryUrl = pathToFileURL(join(REPO_ROOT, 'src', 'index.js')).href;
+/**
+ * Runs the skill gate over a skill directory.
+ *
+ * This is the gate's body, extracted from the CLI so that a test can run it
+ * against a FIXTURE skill instead of the shipped one. The fixture belongs to
+ * the test suite: a future edit to the shipped skill must not be able to make
+ * a test pass by changing what the test reads.
+ *
+ * @param {object} [options]
+ * @param {string} [options.skillDir] Absolute path of the skill directory.
+ * @param {string} [options.packageEntryUrl] URL of the package entry point.
+ * @param {number} [options.observationWindowMs] How long to observe a block's
+ *   deferred work. `0` disables the window — the pre-fix behaviour — which is
+ *   how the regression test proves that the window is load-bearing.
+ * @param {(...args: unknown[]) => void} [options.log] Where the report goes.
+ * @returns {Promise<{outcomes: object[], outOfScope: object[], documents: number,
+ *   blockCount: number, metaProblems: string[], summary: object, fatal: boolean}>}
+ */
+export async function runSkillGate({
+  skillDir = SKILL_DIR,
+  packageEntryUrl = DEFAULT_PACKAGE_ENTRY_URL,
+  observationWindowMs = OBSERVATION_WINDOW_MS,
+  log = (...args) => console.log(...args),
+} = {}) {
+  const metaFile = join(skillDir, '.skill-meta.json');
+  const displayDir = relative(REPO_ROOT, skillDir).split(sep).join('/') || skillDir;
 
   // --- metadata -------------------------------------------------------
   const metaProblems = [];
   let meta = null;
   try {
-    meta = JSON.parse(readFileSync(META_FILE, 'utf8'));
+    meta = JSON.parse(readFileSync(metaFile, 'utf8'));
   } catch (err) {
     metaProblems.push(`.skill-meta.json is not valid JSON: ${err.message}`);
   }
-  if (meta) metaProblems.push(...validateSkillMeta(meta, SKILL_DIR));
+  if (meta) metaProblems.push(...validateSkillMeta(meta, skillDir));
 
-  console.log('skill gate — skills/persistent-worker-runtime\n');
+  log(`skill gate — ${displayDir}\n`);
 
   // --- block extraction ------------------------------------------------
-  const documents = listSkillDocuments();
+  const documents = listSkillDocuments(skillDir);
   const outcomes = [];
   const outOfScope = [];
   let blockIndex = 0;
@@ -495,6 +637,7 @@ async function main() {
           label,
           status: 'skipped',
           reason: `not executed — ${exclusion}`,
+          observed: false,
           fingerprint: blockFingerprint(block.code),
         });
         return;
@@ -516,6 +659,7 @@ async function main() {
             label,
             status: 'skipped',
             reason: `not executed — requires: ${requirement} — the gate cannot verify this requirement`,
+            observed: false,
             fingerprint: blockFingerprint(block.code),
           });
           return;
@@ -525,6 +669,7 @@ async function main() {
             label,
             status: 'skipped',
             reason: `not executed — requires node >= ${nodeRequirement.minVersion} (running v${process.versions.node}) — the snippet uses syntax this Node cannot parse`,
+            observed: false,
             fingerprint: blockFingerprint(block.code),
           });
           return;
@@ -536,6 +681,7 @@ async function main() {
         status: 'pending',
         lang: block.lang,
         code: block.code,
+        observed: false,
         fingerprint: blockFingerprint(block.code),
       });
     });
@@ -562,7 +708,8 @@ async function main() {
         .find((line) => /Error/.test(line));
       outcome.status = 'syntax-error';
       outcome.reason = `the snippet does not parse — ${message ?? 'syntax error'}`;
-      console.log(`[SYNTAX] ${outcome.label} — ${outcome.reason}`);
+      outcome.observed = false;
+      log(`[SYNTAX] ${outcome.label} — ${outcome.reason}`);
       continue;
     }
 
@@ -574,7 +721,7 @@ async function main() {
       /(['"])persistent-worker-runtime\1/g,
       JSON.stringify(packageEntryUrl),
     );
-    const executable = `${buildPreamble(packageEntryUrl)}${rewritten}${EPILOGUE}`;
+    const executable = `${buildPreamble(packageEntryUrl)}${rewritten}${buildEpilogue(observationWindowMs)}`;
 
     // The block runs from a FILE, not from `--eval`: `--input-type=module`
     // is inherited by worker threads through `execArgv`, and a worker that
@@ -582,25 +729,35 @@ async function main() {
     // single task. A file needs no flag, so the runtime's workers start
     // normally.
     const scriptFile = join(workDir, `block-${outcome.fingerprint}.mjs`);
+    const recordFile = join(workDir, `record-${outcome.fingerprint}.txt`);
     writeFileSync(scriptFile, executable, 'utf8');
 
     const result = await runNode({
       args: [scriptFile],
       cwd: workDir,
+      env: { [RECORD_ENV_VAR]: recordFile },
       timeoutMs: DEFAULT_TIMEOUT_MS,
     });
+
+    // The record carries the two facts the exit code cannot: whether the
+    // block's body ran at all, and which path the harness took.
+    const record = readObservationRecord(recordFile);
+    outcome.durationMs = result.durationMs;
+    outcome.delayMs = record.delayMs;
+    outcome.paidWindow = record.delayMs !== null && record.delayMs > FAST_PATH_DELAY_MS;
+    outcome.observed = record.bodyStarted;
 
     if (result.code === 0 && !result.timedOut) {
       outcome.status = 'executed';
       outcome.reason = 'executed successfully';
-      console.log(`[  OK  ] ${outcome.label}`);
+      log(`[  OK  ] ${outcome.label}`);
       continue;
     }
 
     const failure = classifyBlockFailure(result);
     outcome.status = failure.kind;
     outcome.reason = failure.reason;
-    console.log(`[${failure.kind.toUpperCase()}] ${outcome.label} — ${failure.reason}`);
+    log(`[${failure.kind.toUpperCase()}] ${outcome.label} — ${failure.reason}`);
   }
 
   rmSync(workDir, { recursive: true, force: true });
@@ -614,15 +771,38 @@ async function main() {
   const runtimeErrors = outcomes.filter((o) => o.status === 'runtime-error');
   const timeouts = outcomes.filter((o) => o.status === 'timeout');
 
-  console.log('\n=== skill gate summary ===');
-  console.log(`documents: ${documents.length} | fenced blocks: ${blockIndex}`);
-  console.log(
+  // The distinction the gate keeps on every outcome: a block the gate
+  // OBSERVED (its body ran) against a block it did NOT observe (the body
+  // never executed). The report lands in the next task; the flag is what
+  // the report is built from.
+  const observedBlocks = outcomes.filter((o) => o.observed);
+  const paidWindow = outcomes.filter((o) => o.paidWindow === true);
+  const fastPath = outcomes.filter((o) => o.delayMs === FAST_PATH_DELAY_MS);
+
+  const summary = {
+    javascriptBlocks: outcomes.length,
+    executed: executed.length,
+    skipped: skipped.length,
+    fragments: fragments.length,
+    external: external.length,
+    syntaxErrors: syntaxErrors.length,
+    runtimeErrors: runtimeErrors.length,
+    timeouts: timeouts.length,
+    observed: observedBlocks.length,
+    paidWindow: paidWindow.length,
+    fastPath: fastPath.length,
+    observationWindowMs,
+  };
+
+  log('\n=== skill gate summary ===');
+  log(`documents: ${documents.length} | fenced blocks: ${blockIndex}`);
+  log(
     `javascript blocks: ${outcomes.length} | executed: ${executed.length} | skipped: ${skipped.length} | fragment: ${fragments.length} | external-dependency: ${external.length} | runtime-error: ${runtimeErrors.length} | syntax-error: ${syntaxErrors.length} | timeout: ${timeouts.length}`,
   );
-  console.log(
+  log(
     'fatal: syntax-error (a snippet that does not parse). reported, not fatal: fragment, external-dependency, runtime-error, timeout.',
   );
-  console.log(`out-of-scope blocks: ${outOfScope.length}`);
+  log(`out-of-scope blocks: ${outOfScope.length}`);
 
   const byLang = new Map();
   for (const entry of outOfScope) {
@@ -630,45 +810,66 @@ async function main() {
   }
   for (const [lang, count] of [...byLang.entries()].sort((a, b) => b[1] - a[1])) {
     const reason = outOfScope.find((entry) => entry.lang === lang).reason;
-    console.log(`  ${lang}: ${count} — ${reason}`);
+    log(`  ${lang}: ${count} — ${reason}`);
   }
 
+  // How much of the skill the gate actually looked at.
+  log(
+    `observation window: ${paidWindow.length} block(s) paid the ${observationWindowMs} ms window | ${fastPath.length} block(s) took the ${FAST_PATH_DELAY_MS} ms fast path`,
+  );
+
   if (skipped.length > 0) {
-    console.log('\nskipped (not executed, with reason):');
-    for (const outcome of skipped) console.log(`  ${outcome.label} — ${outcome.reason}`);
+    log('\nskipped (not executed, with reason):');
+    for (const outcome of skipped) log(`  ${outcome.label} — ${outcome.reason}`);
   }
   if (fragments.length > 0) {
-    console.log('\nfragments (undefined identifier defined outside the snippet):');
-    for (const outcome of fragments) console.log(`  ${outcome.label} — ${outcome.reason}`);
+    log('\nfragments (undefined identifier defined outside the snippet):');
+    for (const outcome of fragments) log(`  ${outcome.label} — ${outcome.reason}`);
   }
   if (external.length > 0) {
-    console.log('\nexternal dependencies (not installable in a zero-dependency repo):');
-    for (const outcome of external) console.log(`  ${outcome.label} — ${outcome.reason}`);
+    log('\nexternal dependencies (not installable in a zero-dependency repo):');
+    for (const outcome of external) log(`  ${outcome.label} — ${outcome.reason}`);
   }
+  if (runtimeErrors.length > 0) {
+    log('\nRUNTIME ERRORS — reported, not fatal:');
+    for (const outcome of runtimeErrors) log(`  ${outcome.label} — ${outcome.reason}`);
+  }
+  if (timeouts.length > 0) {
+    log('\nTIMEOUTS — reported, not fatal:');
+    for (const outcome of timeouts) log(`  ${outcome.label} — ${outcome.reason}`);
+  }
+
+  let fatal = false;
   if (syntaxErrors.length > 0) {
+    fatal = true;
     console.error('\n=== SYNTAX ERRORS — these snippets do not parse (FATAL) ===');
     for (const outcome of syntaxErrors) console.error(`  ${outcome.label} — ${outcome.reason}`);
     console.error(
       `\nskill gate FAILED — ${syntaxErrors.length} JavaScript block(s) do not parse. A snippet that does not parse is a broken snippet: an agent copying it verbatim gets a syntax error on the first line. Fix the snippet (or mark the fence as out of scope) and re-run \`npm run skill:validate\`.`,
     );
-    process.exit(1);
-  }
-  if (runtimeErrors.length > 0) {
-    console.log('\nRUNTIME ERRORS — reported, not fatal:');
-    for (const outcome of runtimeErrors) console.log(`  ${outcome.label} — ${outcome.reason}`);
-  }
-  if (timeouts.length > 0) {
-    console.log('\nTIMEOUTS — reported, not fatal:');
-    for (const outcome of timeouts) console.log(`  ${outcome.label} — ${outcome.reason}`);
   }
 
   if (metaProblems.length > 0) {
+    fatal = true;
     console.error('\n=== skill metadata problems ===');
     for (const problem of metaProblems) console.error(`  ${problem}`);
     console.error('\nskill gate FAILED — the skill metadata is not coherent.');
-    process.exit(1);
   }
 
+  return {
+    outcomes,
+    outOfScope,
+    documents: documents.length,
+    blockCount: blockIndex,
+    metaProblems,
+    summary,
+    fatal,
+  };
+}
+
+async function main() {
+  const result = await runSkillGate();
+  if (result.fatal) process.exit(1);
   console.log('\nskill gate PASSED.');
 }
 
