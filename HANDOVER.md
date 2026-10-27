@@ -111,6 +111,15 @@ entries are closed** (the last two on 2026-10-27). The ones that were open until
   not the platform. **The budget was not raised** (the cliff was the workload): the example gained a
   `PWR_VACUUM_TASKS` knob (default 2000, unchanged for a human) and the gate runs 100 tasks
   (319 ms), mirroring `PWR_JSON_MB` in `parallel-json-parse.js`.
+- **`CI-FAILURE-macos-watchdog-poll-interval-bound.md`** — ✅ FIXED 2026-10-27. On Node 26.x /
+  macOS, `preemption fired at 402ms — expected < 400ms` (run `40536778188`) — a 2 ms overshoot.
+  The assertion bounded the mechanism **below its own ceiling**: `src/supervisor.js:990` preempts
+  on the first poll tick that observes `elapsed >= workerPollIntervalMs`, so the latency lands in
+  `(pollInterval, 2 × pollInterval]` — with a 200 ms interval the ceiling is exactly 400 ms and
+  the test asserted `< 400`. Measured over 25 runs on an idle host: 356-373 ms, i.e. ~40 ms of
+  headroom on an *unloaded* machine. The bound is now `2 × workerPollIntervalMs + 75%` (550 ms)
+  with a stated lower tolerance, and it still catches a slower watchdog (verified: 1966 ms with a
+  1000 ms poll). Test-only change — no runtime behaviour moved.
 
 ---
 

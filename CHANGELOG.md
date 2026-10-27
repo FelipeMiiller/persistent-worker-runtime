@@ -161,6 +161,21 @@ type-surface and measurement work.
   `checkpointWal`, `vacuumCompleted` and both assertions. This mirrors the `PWR_JSON_MB` knob that
   `parallel-json-parse.js` already uses for the same reason.
 
+- **The preemption-latency assertion bounded the watchdog below its own ceiling** — test-only, no
+  runtime change. `src/supervisor.js:990` preempts on the first poll tick that **observes**
+  `elapsed >= workerPollIntervalMs`, so the preemption lands anywhere in
+  `(pollInterval, 2 × workerPollInterval]` — the task's start phase inside the poll cycle is
+  arbitrary, and a tick that fires a hair early does not observe it, so the next tick fires. With
+  a 200 ms interval the mechanism's ceiling is exactly **400 ms**, and the test asserted
+  `elapsed < 400` — zero margin. Measured over 25 runs on an idle host: 356-373 ms, i.e. ~40 ms
+  of headroom on a machine that was not even loaded; a loaded macOS runner reached 402 ms and the
+  suite failed. The bound is now derived from the mechanism's range plus a stated margin
+  (`2 × workerPollIntervalMs + 75%`, with a lower tolerance for the monotonic-vs-wall-clock skew)
+  and the header comment cites the contract ADR-0024 actually states — preemption at the poll
+  cadence, decoupled from `task.timeoutMs`. The bound keeps its power: with a slower watchdog
+  (1000 ms poll) the preemption lands at 1966 ms and the assertion still fails. The pre-HARDEN-10
+  behaviour waited for `timeoutMs` (60 s), two orders of magnitude past the bound.
+
 - **The coverage gate measured the CI tooling** — CI-only, no runtime change. The new skill-gate test
   imports `scripts/validate-skill.js`, which pulled `scripts/` into the coverage report for the first
   time. That script is a CLI entry point: its `main()` is never executed by the test suite, so it
