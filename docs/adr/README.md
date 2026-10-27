@@ -30,3 +30,4 @@ This directory contains the formal Architecture Decision Records for the **Persi
 | **[ADR-0024](0024-runtime-observability-and-recycling-hardening.md)** | Hardening do Runtime — Telemetria Per-Worker, Task-Fn Dispatch via Deps Manifest, Reciclagem por Taxa de Acumulação | Proposed | 2026-09-20 |
 | **[ADR-0025](0025-fire-and-forget-dispatch-promise-contract.md)** | Fire-and-Forget `dispatch()` Promise Contract — Keep-Alive Handler on the Task Handle | Accepted | 2026-10-23 |
 | **[ADR-0026](0026-explicit-resource-management-and-result-tuple.md)** | Explicit Resource Management (`Symbol.asyncDispose`) and the Go-Style Result Tuple (`attempt`) | Accepted | 2026-10-24 |
+| **[ADR-0027](0027-skill-gate-observation-window.md)** | The Skill Gate's Observation Contract — A Bounded Window of Deferred Work | Accepted | 2026-10-27 |
