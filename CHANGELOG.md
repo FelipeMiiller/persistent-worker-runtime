@@ -147,6 +147,20 @@ type-surface and measurement work.
   Work deferred beyond the window is still not observed; ADR-0027 records that limit, and why a
   static scope check and an import stub cannot close it in a zero-dependency repository (ADR-0005).
 
+- **`durable-task-vacuum.js` timed out in the examples gate on Node 22.x / Windows** — CI-only, no
+  runtime change. The example's workload is **fsync-bound, not CPU-bound**: every task is persisted
+  in its own `BEGIN IMMEDIATE` transaction (ADR-0020), and the example enqueues 2000 tasks twice, so
+  the workload is 4000 durable transactions. That took **2.8 s on an idle workstation** and
+  **more than 60 s — the gate's entire budget — on a loaded CI runner**, a 21× spread. The example
+  therefore sat exactly on the cliff: the same run passed it on the Windows legs of Node 24.x and
+  Node 26.x, so the variance was the runner's load, not the platform.
+  **The budget was deliberately not raised** — the cliff was the workload, and raising the timeout
+  would only have moved it. Instead the example gained a `PWR_VACUUM_TASKS` knob (default 2000,
+  unchanged for anyone running it directly) and the gate runs 100 tasks, which took **319 ms** and
+  still exercises every path the example documents: `enqueue`, `dequeue`, `markFailed`,
+  `checkpointWal`, `vacuumCompleted` and both assertions. This mirrors the `PWR_JSON_MB` knob that
+  `parallel-json-parse.js` already uses for the same reason.
+
 - **The coverage gate measured the CI tooling** — CI-only, no runtime change. The new skill-gate test
   imports `scripts/validate-skill.js`, which pulled `scripts/` into the coverage report for the first
   time. That script is a CLI entry point: its `main()` is never executed by the test suite, so it

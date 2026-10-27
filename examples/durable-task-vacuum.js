@@ -11,7 +11,7 @@
  * happy path lean) accumulate forever.
  *
  * Scenarios:
- *   A. No GC — 1 000 tasks are marked failed and stay on disk.
+ *   A. No GC — every task in the workload is marked failed and stays on disk.
  *   B. checkpointWal + vacuumCompleted — after the workload, both
  *      are invoked and the disk footprint shrinks.
  *
@@ -29,6 +29,16 @@
  *     `vacuumCompleted(0)`.
  *
  * Run: `node examples/durable-task-vacuum.js`
+ * Env:   PWR_VACUUM_TASKS=2000   tasks in the workload (default 2000)
+ *
+ * Why the knob exists: the workload is one durable `BEGIN IMMEDIATE`
+ * transaction per task (ADR-0020), so it is fsync-bound — on a loaded CI
+ * runner the 2000-task default took more than 60 s, over the examples gate's
+ * budget, while the same example took 2.8 s on an idle workstation. The
+ * gate runs a smaller workload through this knob (see `scripts/run-examples.js`),
+ * which exercises every code path this example documents — enqueue, dequeue,
+ * markFailed, checkpointWal, vacuumCompleted and the assertions — at a size
+ * that is fast on any runner.
  *
  * Refs: ADR-0020 (revised 2026-09-24), `src/queue/sqlite-backend.js`
  * (`checkpointWal` + `vacuumCompleted` + `markFailed` API surface).
@@ -48,7 +58,7 @@ const DatabaseCtor = nodeSqlite.Database ?? nodeSqlite.DatabaseSync;
 
 // === Configuration ===
 
-const TASK_COUNT = 2000;
+const TASK_COUNT = Number(process.env.PWR_VACUUM_TASKS ?? 2000);
 
 function makeHandle(id) {
   const handle = new TaskHandle({

@@ -87,8 +87,8 @@
 ### Tracked work (`.agents/issues/`)
 
 `.agents/issues/` is the canonical drift tracker, and **`AGENTS.md` carries its full table** — read it
-there instead of a copy of it here. A second copy of a tracker is a second thing to go stale. **All 16
-entries are closed** (the last one, issue 009, on 2026-10-27). The entry that was open until then:
+there instead of a copy of it here. A second copy of a tracker is a second thing to go stale. **All 17
+entries are closed** (the last two on 2026-10-27). The ones that were open until then:
 
 - **`009-skill-outbox-pattern-undefined-variable.md`** — ✅ FIXED 2026-10-27. The shipped snippet is
   corrected (`p.outboxId` → `row.id` in Pattern 1's `onComplete`/`onError`; `p` was the
@@ -102,6 +102,15 @@ entries are closed** (the last one, issue 009, on 2026-10-27). The entry that wa
   gate even with no external import at all. A static scope check would **not** have caught it
   (`p` *is* bound, as the `fn` parameter); it is a cross-scope reference, and real scope analysis
   needs a parser this repo does not have (ADR-0005).
+- **`CI-FAILURE-windows-vacuum-example-timeout.md`** — ✅ FIXED 2026-10-27. `durable-task-vacuum.js`
+  timed out after 60 s in the examples gate on Node 22.x / Windows (run `40533324325`), the v0.4.0
+  release candidate. The workload is **fsync-bound**: 2000 tasks × 2 scenarios = 4000 durable
+  `BEGIN IMMEDIATE` transactions, which took **2.8 s on an idle workstation** and **> 60 s on a
+  loaded runner** — a 21× spread, so the example sat exactly on the gate's 60 s budget. The other
+  Windows legs (Node 24.x / 26.x) ran the same example fine in the same run, so it was runner load,
+  not the platform. **The budget was not raised** (the cliff was the workload): the example gained a
+  `PWR_VACUUM_TASKS` knob (default 2000, unchanged for a human) and the gate runs 100 tasks
+  (319 ms), mirroring `PWR_JSON_MB` in `parallel-json-parse.js`.
 
 ---
 

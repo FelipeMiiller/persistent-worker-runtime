@@ -57,6 +57,20 @@ const EXAMPLE_OVERRIDES = {
     timeoutMs: 120_000,
     reason: 'default target is a 1 GB file; the gate runs a 64 MB target via PWR_JSON_MB',
   },
+  'durable-task-vacuum.js': {
+    // The workload is one durable `BEGIN IMMEDIATE` transaction per task
+    // (ADR-0020), so it is fsync-bound rather than CPU-bound: 2000 tasks
+    // took 2.8 s on an idle workstation and over 60 s — the gate's whole
+    // budget — on a loaded Windows runner. The budget is not raised: the
+    // cliff was the workload, and raising the timeout would only move it.
+    // The gate runs 100 tasks, which exercises every path the example
+    // documents (enqueue, dequeue, markFailed, checkpointWal,
+    // vacuumCompleted, and both assertions) at a size that is fast on any
+    // runner.
+    env: { PWR_VACUUM_TASKS: '100' },
+    reason:
+      'the workload is fsync-bound; the gate runs 100 tasks via PWR_VACUUM_TASKS instead of 2000',
+  },
 };
 
 /**
