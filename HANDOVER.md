@@ -1,17 +1,17 @@
 # Agent Handover Guide: Persistent Worker Runtime
 
 > **Audience**: AI Coding Agents (Antigravity, Claude Code, Cursor, Windsurf, Copilot) or engineers starting a new chat/session on this repository.
-> **Last Updated**: 2026-10-26 (repo relocated to `D:\repository\persistent-worker-runtime`; ADR-0026 shipped in the `develop` delta; coverage metric and skill gate hardened; the skill's outbox pattern fixed — issue 009)
+> **Last Updated**: 2026-10-27 (the skill gate now observes a block's deferred work — ADR-0027; issue 009 closed; the leftover stub at the former repository path removed; the v0.4.0 release is in flight)
 > **Active Branch**: `develop` (tracks `origin/develop`; `main` is the release target)
 > **Released**: `v0.2.0`, `v0.2.1`, **`v0.3.0`** (2026-09-24) on npm with provenance.
-> **In flight**: `develop` is 72 commits ahead of `main` and **does contain API changes** (ADR-0026: `attempt()` + `[Symbol.asyncDispose]()`). Release (bump / promote / publish) is deliberately deferred; see §4.
+> **In flight**: `develop` carries the v0.4.0 delta — ADR-0026 (`attempt()` + `[Symbol.asyncDispose]()`, 17 public exports) and ADR-0027 (the skill gate's observation contract). The maintainer authorized the release on 2026-10-27; see §4.
 
 ---
 
 ## 🎯 1. Project Overview & Context
 
 - **Repository**: `https://github.com/FelipeMiiller/persistent-worker-runtime`
-- **Local Path**: `D:\repository\persistent-worker-runtime` (relocated 2026-10-26; the former `C:\repository\persistent-worker-runtime` is a leftover 109-byte stub — safe to delete once no session holds it)
+- **Local Path**: `D:\repository\persistent-worker-runtime` (relocated 2026-10-26; the former `C:\repository\persistent-worker-runtime` was a leftover 109-byte stub and was **removed** on 2026-10-27, once the session that held it open was gone)
 - **NPM Package**: `persistent-worker-runtime` (latest: **`0.3.0`**)
 - **Goal**: Build a high-performance persistent worker runtime for Node.js over native `worker_threads`, keeping the Event Loop 100% dedicated to non-blocking I/O while persistent workers execute CPU-bound tasks and transactional outbox background jobs with warm L1 heaps.
 
@@ -29,13 +29,13 @@
 
 ## 📍 3. Current State Snapshot
 
-### Code Health (as of 2026-10-26)
-- **Tests**: **682 passing**, 0 failures, 0 skipped, 0 cancelled (`node:test`).
-- **Lint**: 0 errors, 0 warnings across `src/`, `test/`, `examples/`, `benchmarks/`, `research/` (Biome 2.x).
+### Code Health (as of 2026-10-27)
+- **Tests**: **694 passing**, 0 failures, 0 skipped, 0 cancelled (`node:test`) — 186 suites.
+- **Lint**: 0 errors, 0 warnings across 110 files in `src/`, `test/`, `examples/`, `benchmarks/`, `research/`, `scripts/` (Biome 2.x).
 - **Benchmarks**: **24** gated scripts in `benchmarks/`, all wired into `npm run benchmark:all` and run in CI. Full empirical results in `BENCHMARKS.md`.
 - **Research**: 2 usage-pattern investigations in `research/` (NOT CI gates — they measure how an *application* should use the library, not `src/` itself). See [`research/README.md`](research/README.md).
 - **Examples**: **20** runnable scripts demonstrating the public API, all verified to exit 0.
-- **Embedded Skill**: `skills/persistent-worker-runtime/` shipped in npm tarball.
+- **Embedded Skill**: `skills/persistent-worker-runtime/` shipped in npm tarball — every JavaScript block is **executed** by `npm run skill:validate`, which now also observes each block's deferred work (ADR-0027).
 
 ### Released
 - **v0.2.0** (2026-09-22 09:59Z) — ADR-0014 (adaptive concurrency) + ADR-0024 (runtime hardening). Tag `e098329`. CI run `35713434984`.
@@ -59,8 +59,18 @@
 14. **`node-built-ins-map/`** — Complete (ADR-0022). Authoritative map of "Node built-ins we use" vs "custom code we wrote".
 15. **`sizing-policy/`** — Complete (ADR-0023). `WORKER_CONCURRENCY` env + `concurrency: 'auto'` factory option.
 16. **`runtime-hardening/`** — **Complete (ADR-0024) — Accepted**. All 11 HARDEN tasks delivered (T1-T11 across Wave 1-4 commits). 3 post-review fixes: recycle-backoff Promise leak (`714f1e6`), Track 2 chunk leak (`b5c4bde`), T10 redundant if/else collapse (`12f7603`).
+17. **`skill-gate-coverage/`** — **Complete (ADR-0027)**. The skill gate's observation contract: it observes a block's deferred work within a bounded window (2500 ms) when the block left a pending timer behind, records whether the body actually ran, and reports every block it did **not** observe. Proven non-vacuous by `test/skill-gate-defect-class.test.js`.
 
 ### Recent Quality Wins (since last handover)
+- **The skill gate now observes what a snippet defers** (2026-10-27, ADR-0027) — the shipped outbox
+  pattern carried a real defect (`p.outboxId`, read from a handler that has no `p` in scope) and the
+  gate reported it as `OK`. Two **independent** masks were hiding it: an unresolvable `import` kills
+  the module body before it runs, and the harness's 50 ms tick ended the child before the block's
+  deferred work fired. The gate now keeps the event loop open for a bounded window (2500 ms) when a
+  block left a pending timer behind, records whether the body actually ran, and reports every block
+  it did **not** observe. Proven non-vacuous: the same fixture passes with the window off and is
+  flagged with it on. The shipped pattern was split into a dependency-free core (executed) and the
+  Express/Postgres wiring (syntax-checked, honestly reported).
 - **v0.3.0 shipped** (2026-09-24) — durable queue + liveness/readiness probes. See §3 "Released".
 - **Four benchmark-assertion defects fixed at the root** (2026-09-27/28) — each had a hard-coded threshold or sleep that encoded the benchmark author's machine instead of the behaviour under test. `broadcast-fanout` discarded 2000 `TaskHandle`s behind a fixed 200 ms sleep (unhandled rejection exited 1); `adaptive-controller-opt-out` gated on an unwarmed single p99 (scheduler noise, not a regression); `default-sizing-memory` required a ratio that only holds on a high-core-count host; `adaptive-controller-tick` measured without warmup. All four have issue files in `.agents/issues/`.
 - **Two test-suite flakes fixed at the root** (2026-09-28) — `recycling.test.js` slept a fixed 200 ms for `worker_recycled`; now deadline-based polling. Note the same file already carried "bump to 200 ms to absorb CI timer noise" comments from an earlier flake — raising a sleep constant is the wrong fix, it only moves the cliff.
@@ -77,29 +87,33 @@
 ### Tracked work (`.agents/issues/`)
 
 `.agents/issues/` is the canonical drift tracker, and **`AGENTS.md` carries its full table** — read it
-there instead of a copy of it here. A second copy of a tracker is a second thing to go stale. 15 of
-the 16 entries are closed; the one that is not:
+there instead of a copy of it here. A second copy of a tracker is a second thing to go stale. **All 16
+entries are closed** (the last one, issue 009, on 2026-10-27). The entry that was open until then:
 
-- **`009-skill-outbox-pattern-undefined-variable.md`** — 🟡 PARTIALLY FIXED 2026-10-26. The shipped
-  snippet is corrected (`p.outboxId` → `row.id` in Pattern 1's `onComplete`/`onError`; `p` was the
+- **`009-skill-outbox-pattern-undefined-variable.md`** — ✅ FIXED 2026-10-27. The shipped snippet is
+  corrected (`p.outboxId` → `row.id` in Pattern 1's `onComplete`/`onError`; `p` was the
   **worker-side** payload parameter and did not exist in the main-thread scope where the handlers
-  are registered). The gate-hardening half stays open, and its root cause is now correct: the gate
-  classifies a block by its **first runtime error**, so the `import express` failure masked every
-  later error in the same block — the body never ran. The obvious fix (a "read but never bound"
-  scope check) would **not** catch this, because `p` *is* bound, as the `fn` parameter; it is a
-  cross-scope reference, and real scope analysis needs a parser this repo does not have (ADR-0005).
+  are registered). The gate-hardening half is closed too, by **ADR-0027**: the gate now observes a
+  block's deferred work within a bounded window (2500 ms) whenever the block left a pending timer
+  behind, and reports every block it did **not** observe. The issue's original explanation was
+  wrong and is corrected in the issue file: the gate classifies a block by its **first runtime
+  error**, so an import failure masked every later error in the same block — and the harness's
+  50 ms tick masked every error that lived in deferred work, which is why the defect passed the
+  gate even with no external import at all. A static scope check would **not** have caught it
+  (`p` *is* bound, as the `fn` parameter); it is a cross-scope reference, and real scope analysis
+  needs a parser this repo does not have (ADR-0005).
 
 ---
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Current state**: v0.3.0 shipped and published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters, Coverage and Skill validation, and is 72 commits ahead of `main`.
+**Current state**: v0.3.0 is published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters, Coverage and Skill validation, and carries the v0.4.0 delta.
 
-**Only remaining repo action**: decide whether to release the `develop` delta. It now **does contain API changes** — `attempt()` was added to the public exports (17 names) and `WorkerRuntime` implements `[Symbol.asyncDispose]()` (ADR-0026) — alongside 4 benchmark-assertion fixes, 2 test-flake fixes, 3 new examples, spec hygiene, and a `research/` directory. Both bumping to v0.4.0 and promoting `develop` → `main` are deliberate maintainer decisions, not library work. The maintainer has explicitly deferred the release; do not publish without being asked.
+**Current repo action — the v0.4.0 release, authorized by the maintainer on 2026-10-27**: bump `package.json` to `0.4.0` with a `## [0.4.0]` section in `CHANGELOG.md` → CI green on `develop` → promote `develop` → `main` → tag `v0.4.0` → publish the GitHub release, which triggers `release.yml` (it publishes to npm with provenance, and its pre-flight checks tag ↔ version ↔ CHANGELOG agreement). The delta **does contain API changes** — `attempt()` is the 17th public export and `WorkerRuntime` implements `[Symbol.asyncDispose]()` (ADR-0026) — alongside ADR-0027 (the skill gate's observation contract), 4 benchmark-assertion fixes, 2 test-flake fixes, 3 new examples, spec hygiene, and a `research/` directory.
 
 ### Open follow-ups (in priority order)
 
-1. **Release decision** — ⏸️ deferred by maintainer. `CHANGELOG.md` has a ready `[Unreleased]` section covering the whole delta. Path if resumed: bump `package.json` → CI green → promote `develop` → `main` → tag → `npm publish`.
+1. **v0.4.0 release** — ▶️ in flight, authorized 2026-10-27. Path: bump `package.json` → CI green → promote `develop` → `main` → tag → `gh release create` (which triggers the publish). `CHANGELOG.md` already has the whole delta under `[Unreleased]`.
 2. **DR plan §8** — §8.2 `/healthz` closed; §8.3/§8.4 permanently out-of-scope by ADR-0005; §8.1 SIGTERM has a shipped recipe (`examples/sigterm-drain.js`) and stays user-wired by design. **§8.5** (chaos game day) and **§8.6** (cross-region snapshots) are genuinely open but **deployment-side, not library work** — they need a production deployment to exist first.
 3. ~~`tasks.md` template migration~~ — ✅ DONE 2026-09-23; all 13 features now validate 0 errors on both validators (`.agents/issues/003-spec-validation-drift.md`).
 4. ~~Spec-precision follow-ups~~ (`RECYCLE-08`, `PREEMPT-06`, `PREEMPT-08`) — ✅ all covered by existing tests in `test/recycling.test.js` and `test/preemption.test.js`.
