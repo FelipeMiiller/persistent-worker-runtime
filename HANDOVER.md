@@ -1,10 +1,10 @@
 # Agent Handover Guide: Persistent Worker Runtime
 
 > **Audience**: AI Coding Agents (Antigravity, Claude Code, Cursor, Windsurf, Copilot) or engineers starting a new chat/session on this repository.
-> **Last Updated**: 2026-10-27 (the skill gate now observes a block's deferred work — ADR-0027; issue 009 closed; the leftover stub at the former repository path removed; the v0.4.0 release is in flight)
+> **Last Updated**: 2026-10-27 (**v0.4.0 published** — ADR-0026 explicit resource management + ADR-0027 the skill gate's observation contract; issue 009 closed; two latent CI flakes fixed at the root; the leftover stub at the former repository path removed)
 > **Active Branch**: `develop` (tracks `origin/develop`; `main` is the release target)
-> **Released**: `v0.2.0`, `v0.2.1`, **`v0.3.0`** (2026-09-24) on npm with provenance.
-> **In flight**: `develop` carries the v0.4.0 delta — ADR-0026 (`attempt()` + `[Symbol.asyncDispose]()`, 17 public exports) and ADR-0027 (the skill gate's observation contract). The maintainer authorized the release on 2026-10-27; see §4.
+> **Released**: `v0.2.0`, `v0.2.1`, `v0.3.0`, **`v0.4.0`** (2026-10-27) on npm with provenance.
+> **In flight**: nothing. `develop` is at the `v0.4.0` tag plus this documentation commit; `main` is at the tag. The next library work is open — see §4.
 
 ---
 
@@ -12,7 +12,7 @@
 
 - **Repository**: `https://github.com/FelipeMiiller/persistent-worker-runtime`
 - **Local Path**: `D:\repository\persistent-worker-runtime` (relocated 2026-10-26; the former `C:\repository\persistent-worker-runtime` was a leftover 109-byte stub and was **removed** on 2026-10-27, once the session that held it open was gone)
-- **NPM Package**: `persistent-worker-runtime` (latest: **`0.3.0`**)
+- **NPM Package**: `persistent-worker-runtime` (latest: **`0.4.0`**)
 - **Goal**: Build a high-performance persistent worker runtime for Node.js over native `worker_threads`, keeping the Event Loop 100% dedicated to non-blocking I/O while persistent workers execute CPU-bound tasks and transactional outbox background jobs with warm L1 heaps.
 
 ---
@@ -41,6 +41,7 @@
 - **v0.2.0** (2026-09-22 09:59Z) — ADR-0014 (adaptive concurrency) + ADR-0024 (runtime hardening). Tag `e098329`. CI run `35713434984`.
 - **v0.2.1** (2026-09-22 21:13Z) — Post-release hygiene bundle: `.gitattributes` (LF enforcement), CI workflow fixes (commit-lint SHA + `pull_request` event switch + `exec` require drop), macOS timing tolerance, ESM `require` condition, docs refresh. Tag `41d9eae`. CI run `35784807442`.
 - **v0.3.0** (2026-09-24) — Durable queue via `node:sqlite` (T13: `SqliteTaskQueue`, lease-based orphan recovery, retry budget) + liveness/readiness probes (DR §8.2 closure, `runtime.isAlive()` / `runtime.isReady()`). Tag `a515998`. ADR-0020 **revised** 2026-09-24 to SQLite-only; external RDBMS/event-streaming backends permanently out-of-scope by ADR-0005.
+- **v0.4.0** (2026-10-27) — Explicit Resource Management (ADR-0026: `attempt()` + `[Symbol.asyncDispose]()`, 17 public exports) + the skill gate's observation contract (ADR-0027). Tag `79e1663`. Also carries 4 benchmark-assertion fixes, 2 test-flake fixes, the Node 26 CI leg + the engine-floor job, and two CI flakes fixed at the root (the vacuum example's workload, the preemption-latency bound). Publish run `40542561927` (pre-flight + provenance).
 
 ### Completed Features (all merged to `main`)
 1. **`persistent-worker-runtime/`** — Initial implementation (ADR-0001..0009).
@@ -125,14 +126,15 @@ entries are closed** (the last two on 2026-10-27). The ones that were open until
 
 ## 🚀 4. Exact Next Action for the New Chat
 
-**Current state**: v0.3.0 is published on npm. All feature ADRs complete. `develop` is green across the full 6-job CI matrix plus Linters, Coverage and Skill validation, and carries the v0.4.0 delta.
+**Current state**: v0.4.0 is published on npm (tag `79e1663`, provenance verified). All feature ADRs are complete and **all 17 tracked issues are closed**. `develop` is green across the full 6-job CI matrix plus Linters, Coverage and Skill validation.
 
-**Current repo action — the v0.4.0 release, authorized by the maintainer on 2026-10-27**: bump `package.json` to `0.4.0` with a `## [0.4.0]` section in `CHANGELOG.md` → CI green on `develop` → promote `develop` → `main` → tag `v0.4.0` → publish the GitHub release, which triggers `release.yml` (it publishes to npm with provenance, and its pre-flight checks tag ↔ version ↔ CHANGELOG agreement). The delta **does contain API changes** — `attempt()` is the 17th public export and `WorkerRuntime` implements `[Symbol.asyncDispose]()` (ADR-0026) — alongside ADR-0027 (the skill gate's observation contract), 4 benchmark-assertion fixes, 2 test-flake fixes, 3 new examples, spec hygiene, and a `research/` directory.
+**No library work is pending.** The release delta shipped: ADR-0026 (`attempt()` + `[Symbol.asyncDispose]()`, 17 public exports), ADR-0027 (the skill gate's observation contract), 4 benchmark-assertion fixes, 2 test-flake fixes, the Node 26 CI leg + the engine-floor job, and two CI flakes fixed at the root (the vacuum example's fsync-bound workload, and the preemption-latency assertion that bounded the watchdog below its own ceiling).
 
 ### Open follow-ups (in priority order)
 
-1. **v0.4.0 release** — ▶️ in flight, authorized 2026-10-27. Path: bump `package.json` → CI green → promote `develop` → `main` → tag → `gh release create` (which triggers the publish). `CHANGELOG.md` already has the whole delta under `[Unreleased]`.
-2. **DR plan §8** — §8.2 `/healthz` closed; §8.3/§8.4 permanently out-of-scope by ADR-0005; §8.1 SIGTERM has a shipped recipe (`examples/sigterm-drain.js`) and stays user-wired by design. **§8.5** (chaos game day) and **§8.6** (cross-region snapshots) are genuinely open but **deployment-side, not library work** — they need a production deployment to exist first.
+1. **DR plan §8** — §8.2 `/healthz` closed; §8.3/§8.4 permanently out-of-scope by ADR-0005; §8.1 SIGTERM has a shipped recipe (`examples/sigterm-drain.js`) and stays user-wired by design. **§8.5** (chaos game day) and **§8.6** (cross-region snapshots) are genuinely open but **deployment-side, not library work** — they need a production deployment to exist first.
+2. **The skill gate's remaining blind spot** — the gate observes a block's deferred work within a bounded window (2500 ms) and reports every block it did not observe. Work deferred **beyond** that window is still not observed, and a static scope check cannot close the gap in a zero-dependency repository (ADR-0005). Both limits are recorded in ADR-0027; closing them is a design decision, not a patch.
+3. **`research/`** — usage-pattern investigations, deliberately outside `benchmark:all` (they take 7-20 minutes and generate GB of temp files).
 3. ~~`tasks.md` template migration~~ — ✅ DONE 2026-09-23; all 13 features now validate 0 errors on both validators (`.agents/issues/003-spec-validation-drift.md`).
 4. ~~Spec-precision follow-ups~~ (`RECYCLE-08`, `PREEMPT-06`, `PREEMPT-08`) — ✅ all covered by existing tests in `test/recycling.test.js` and `test/preemption.test.js`.
 5. ~~`gh auth refresh --scopes workflow`~~ — ✅ DONE 2026-09-23; token has `workflow`, so workflow-touching dependabot PRs can be merged with `gh pr merge` directly.
